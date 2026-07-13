@@ -12,6 +12,8 @@ import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
 const MAX_INTERACTIVE_PIXEL_RATIO = 1.5;
+const MAX_SPARK_PIXEL_RATIO_DESKTOP = 1.25;
+const MAX_SPARK_PIXEL_RATIO_MOBILE = 1.0;
 const RENDERER_VISIBILITY_EPSILON = 0.002;
 // ============================================================
 // App State
@@ -228,11 +230,24 @@ function onResize() {
   state.camera.aspect = w / h;
   state.camera.updateProjectionMatrix();
   state.renderer.setSize(w, h);
+  updateInteractivePixelRatio();
   
   if (state.particleSystem) {
     state.particleSystem.setViewportSize(w, h);
   }
   syncResponsiveControlLayout();
+}
+
+function getInteractivePixelRatioCap() {
+  if (state.settings.renderer === 'spark') {
+    return isMobileViewport() ? MAX_SPARK_PIXEL_RATIO_MOBILE : MAX_SPARK_PIXEL_RATIO_DESKTOP;
+  }
+  return MAX_INTERACTIVE_PIXEL_RATIO;
+}
+
+function updateInteractivePixelRatio() {
+  if (!state.renderer || state.recordingActive) return;
+  state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, getInteractivePixelRatioCap()));
 }
 
 function syncResponsiveControlLayout() {
@@ -1673,6 +1688,7 @@ function updateRendererUI() {
 function toggleRendererMode(source = 'gesture') {
   const newMode = state.settings.renderer === 'spark' ? 'particles' : 'spark';
   state.settings.renderer = newMode;
+  updateInteractivePixelRatio();
   updateRendererUI();
   if (source === 'gesture') {
     if (newMode === 'spark') {
