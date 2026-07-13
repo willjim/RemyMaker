@@ -12,6 +12,8 @@ import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
 const MAX_INTERACTIVE_PIXEL_RATIO = 1.5;
+const MAX_SPARK_PIXEL_RATIO_DESKTOP = 1.25;
+const MAX_SPARK_PIXEL_RATIO_MOBILE = 1.0;
 const RENDERER_VISIBILITY_EPSILON = 0.002;
 // ============================================================
 // App State
@@ -228,11 +230,24 @@ function onResize() {
   state.camera.aspect = w / h;
   state.camera.updateProjectionMatrix();
   state.renderer.setSize(w, h);
+  updateInteractivePixelRatio();
   
   if (state.particleSystem) {
     state.particleSystem.setViewportSize(w, h);
   }
   syncResponsiveControlLayout();
+}
+
+function getInteractivePixelRatioCap() {
+  if (state.settings.renderer === 'spark') {
+    return isMobileViewport() ? MAX_SPARK_PIXEL_RATIO_MOBILE : MAX_SPARK_PIXEL_RATIO_DESKTOP;
+  }
+  return MAX_INTERACTIVE_PIXEL_RATIO;
+}
+
+function updateInteractivePixelRatio() {
+  if (!state.renderer || state.recordingActive) return;
+  state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, getInteractivePixelRatioCap()));
 }
 
 function syncResponsiveControlLayout() {
@@ -1066,7 +1081,16 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
     updateLoadingProgress(0.72, 'Loading Spark 2.0 Engine...');
     try {
       const { SparkRenderer, SplatMesh } = await import('@sparkjsdev/spark');
-      state.sparkRenderer = new SparkRenderer({ renderer: state.renderer });
+      state.sparkRenderer = new SparkRenderer({
+        renderer: state.renderer,
+        // 3DGS mode is sort-bound while the model/camera is moving. Throttle
+        // sort work slightly and use Spark 2 LoD knobs to keep interaction
+        // smooth; export still renders at its requested fixed resolution.
+        minSortIntervalMs: isMobileViewport() ? 50 : 33,
+        sortRadial: false,
+        lodSplatScale: isMobileViewport() ? 0.75 : 1.0,
+        lodRenderScale: isMobileViewport() ? 2.5 : 1.5,
+      });
       state.scene.add(state.sparkRenderer);
       state.SplatMeshClass = SplatMesh;
     } catch (err) {
@@ -1147,6 +1171,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   try {
     const currentSplatMesh = new state.SplatMeshClass({
       fileBytes: buffer.slice(0), // 3DGS mode keeps all contents (no cropping)
+      lod: true,
       onLoad: (mesh) => {
         // Prevent race condition (only load if this is still the active mesh)
         if (state.splatMesh !== currentSplatMesh) return;
@@ -1673,6 +1698,7 @@ function updateRendererUI() {
 function toggleRendererMode(source = 'gesture') {
   const newMode = state.settings.renderer === 'spark' ? 'particles' : 'spark';
   state.settings.renderer = newMode;
+  updateInteractivePixelRatio();
   updateRendererUI();
   if (source === 'gesture') {
     if (newMode === 'spark') {
