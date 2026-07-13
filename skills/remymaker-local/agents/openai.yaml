@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run RemyMaker Locally"
+  short_description: "Launch the bundled RemyMaker website on this computer"
+  default_prompt: "Use $remymaker-local to run RemyMaker locally and give me the clickable address."

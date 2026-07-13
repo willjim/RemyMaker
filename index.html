@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Remy 自定义特效运镜工具</title>
+  <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/style.css?v=3.9">
+  <!-- Three.js Import Map -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js",
+      "fix-webm-duration": "https://cdn.jsdelivr.net/npm/@fix-webm-duration/fix/+esm"
+    }
+  }
+  </script>
+  <!-- GSAP CDN for cinematic flight timelines -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+</head>
+<body class="landing-mode">
+  <div class="app-container no-select">
+    <!-- Three.js Canvas -->
+    <div id="canvas-container"></div>
+    <!-- ========== Toolbar ========== -->
+    <div class="toolbar" id="toolbar">
+      <!-- URL Input -->
+      <div class="url-input-wrapper" id="toolbar-url-wrapper">
+        <input
+          type="text"
+          id="url-input"
+          class="url-input"
+          placeholder="Paste Remy3D or Kiri Engine share URL..."
+          autocomplete="off"
+          spellcheck="false"
+        >
+      </div>
+      <!-- Load Button -->
+      <button id="btn-load" class="btn btn-primary" title="Load model from URL">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+          <polyline points="12 5 19 12 12 19"></polyline>
+        </svg>
+        <span class="btn-text">Load</span>
+      </button>
+      <div class="toolbar-divider" id="toolbar-url-divider"></div>
+      
+      <!-- Upload Button (Hidden) -->
+      <button id="btn-upload" class="btn btn-secondary" title="Upload local PLY file" style="display: none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span class="btn-text">Upload PLY</span>
+      </button>
+      <!-- Hidden File Input -->
+      <input type="file" id="file-input" class="file-input-hidden" accept=".ply">
+      <!-- Download Button (Hidden) -->
+      <button id="btn-download" class="btn btn-secondary" title="Download current PLY/Splat file" disabled style="display: none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span class="btn-text">Download</span>
+      </button>
+
+      <!-- 1. 点云模式 / Spark Mode Toggle -->
+      <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle Spark 2.0 3DGS mode">
+        <span class="btn-icon-emoji">✨</span><span class="btn-text">3D Reality</span>
+      </button>
+      <div class="toolbar-divider"></div>
+
+      <!-- 2. 镜头运镜 / Camera Path Mode Toggle -->
+      <button id="btn-camera-mode" class="btn btn-secondary" title="Open camera path export mode">
+        <span class="btn-icon-emoji">🎥</span><span class="btn-text">Camera Path</span>
+      </button>
+      <div class="toolbar-divider"></div>
+
+      <!-- 3. 渲染设置 / Settings Toggle -->
+      <button id="btn-settings" class="btn btn-secondary" title="Open rendering & filtering settings">
+        <span class="btn-icon-emoji">⚙️</span><span class="btn-text">Settings</span>
+      </button>
+      <div class="toolbar-divider"></div>
+
+      <!-- 4. 手势控制 / Gesture Toggle -->
+      <button id="btn-gesture" class="btn btn-secondary" title="Toggle hand gesture control">
+        <span class="btn-icon-emoji">🤚</span><span class="btn-text">Gesture</span>
+      </button>
+      <div class="toolbar-divider"></div>
+
+      <!-- 5. 使用指南 / Guide Link -->
+      <a id="btn-guide" href="guide.html" target="_blank" class="btn btn-secondary" title="Open user guide" style="text-decoration: none;">
+        <span class="btn-icon-emoji">📖</span><span class="btn-text">Guide</span>
+      </a>
+    </div>
+    <!-- Language Switcher (Top Right Corner) -->
+    <button id="btn-lang" class="lang-toggle-btn" title="Switch Language / 切换语言">
+      <span class="lang-zh active-lang">中</span><span class="lang-sep">/</span><span class="lang-en">EN</span>
+    </button>
+    <button id="btn-home" class="home-btn" type="button">Home</button>
+    <!-- ========== Camera Path Panel ========== -->
+    <div class="camera-path-panel hidden" id="camera-path-panel">
+      <div class="camera-panel-header">
+        <h3>Camera Path Export</h3>
+        <span class="camera-start-hint">滑动可调整运镜的初始位置</span>
+        <button id="btn-header-preview" class="camera-header-preview" type="button" disabled>Preview</button>
+      </div>
+      <p style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
+        Please adjust your view; the initial position will serve as the first frame of the built-in flight preset. Click export video; during export, you can toggle point cloud mode and play particle effects, which will be fully recorded.
+      </p>
+      
+      <!-- Preset Flights Dropdown Selection -->
+      <div id="mobile-camera-options" class="mobile-camera-options"></div>
+      <div id="desktop-flight-anchor"></div>
+      <div id="flight-preset-item" class="setting-item camera-option-item" style="margin-bottom: 12px; display: flex; flex-direction: column;">
+        <label for="select-preset-flight" style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 4px;">Flight Path Preset</label>
+        <select id="select-preset-flight" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer;">
+          <option value="none">-- Custom Keyframes - Please Select --</option>
+          <option value="orbit360">1. Orbit 360 (Horizontal)</option>
+          <option value="verticalLoop">2. Vertical Pitch Loop</option>
+          <option value="figure8">3. Figure-8 Infinity Loop</option>
+          <option value="spiralHelix">4. Spiral Helix Zoom</option>
+          <option value="sinusoidWave">5. Sinusoid Altitude Wave</option>
+          <option value="panZoomScan">6. Detail Pan & Zoom Scan</option>
+          <option value="dollyZoom">7. Cinematic Dolly Zoom</option>
+          <option value="butterfly">8. Spherical Butterfly Sweep</option>
+          <option value="pendulum">9. Pendulum Swing Arc</option>
+          <option value="heroSweep">10. Low-Angle Hero Sweep</option>
+          <option value="macroRing">11. Close-up Macro Orbit</option>
+          <option value="zenithSpiral">12. Zenith Polar Spiral</option>
+          <option value="rhombic">13. Rhombic Diamond Path</option>
+          <option value="heart">14. 3D Cardiomorphic Loop</option>
+          <option value="turbulence">15. Turbulence Noise Flight</option>
+        </select>
+      </div>
+      
+      <div class="keyframe-list" id="keyframe-list">
+        <!-- Keyframe items added here -->
+      </div>
+      
+      <div class="camera-actions">
+        <div id="custom-keyframe-actions" class="camera-action-row">
+          <button id="btn-add-keyframe" class="btn btn-secondary" title="Add current camera view as keyframe">
+            <span class="keyframe-action-label">Add Keyframe</span><span class="keyframe-count-wrap">(<span id="keyframe-count">0</span>/5)</span>
+          </button>
+          <button id="btn-clear-keyframes" class="btn btn-secondary" title="Clear all keyframes">
+            Clear
+          </button>
+        </div>
+        <div class="camera-action-row">
+          <button id="btn-preview-path" class="btn btn-secondary" style="flex: 1; justify-content: center;" title="Preview camera path flight" disabled>
+            Preview
+          </button>
+          <button id="btn-export-video" class="btn btn-primary" disabled>
+            Export Video
+          </button>
+        </div>
+      </div>
+    </div>
+    <div id="preview-controls" class="preview-controls" aria-label="Preview controls">
+      <button id="btn-preview-toggle-renderer" class="btn btn-secondary" type="button">Switch Reality</button>
+      <button id="btn-preview-stop" class="btn btn-secondary" type="button">Stop Preview</button>
+      <button id="btn-preview-export" class="btn btn-primary" type="button">Export Video</button>
+    </div>
+    <div id="recording-controls" class="recording-controls" aria-label="Recording controls">
+      <span id="recording-indicator" class="recording-indicator">Recording</span>
+      <button id="btn-recording-toggle-renderer" class="btn btn-secondary" type="button">Switch Reality</button>
+      <button id="btn-recording-stop" class="btn btn-primary" type="button">Stop Export</button>
+    </div>
+    <!-- ========== Settings Panel ========== -->
+    <div class="settings-panel hidden" id="settings-panel">
+      <h3>Rendering Settings</h3>
+
+      <div class="mobile-setting-tabs" role="tablist" aria-label="Rendering parameters">
+        <button type="button" class="mobile-setting-tag active" data-setting-target="setting-crop-item">Crop</button>
+        <button type="button" class="mobile-setting-tag" data-setting-target="setting-size-item">Size</button>
+        <button type="button" class="mobile-setting-tag" data-setting-target="setting-brightness-item">Light</button>
+        <button type="button" class="mobile-setting-tag" data-setting-target="setting-density-item">Density</button>
+      </div>
+      
+      <div class="setting-item" style="display: none;">
+        <label for="setting-max-particles">Max Particles (Particle Cloud)</label>
+        <select id="setting-max-particles">
+          <option value="50000">50,000 (Fastest)</option>
+          <option value="150000">150,000 (Recommended)</option>
+          <option value="300000">300,000 (High Detail)</option>
+          <option value="500000" selected>500,000 (Maximum)</option>
+        </select>
+      </div>
+      <div id="setting-crop-item" class="setting-item mobile-parameter mobile-active">
+        <div class="setting-row-val">
+          <label for="setting-crop-factor">Filter Background (Crop)</label>
+          <span class="setting-val-display" id="setting-crop-factor-val">2.50x</span>
+        </div>
+        <input type="range" id="setting-crop-factor" min="0.50" max="3.00" step="0.05" value="2.50" list="crop-ticks">
+        <datalist id="crop-ticks">
+          <option value="0.5"></option>
+          <option value="1.0"></option>
+          <option value="1.5"></option>
+          <option value="2.0"></option>
+          <option value="2.5"></option>
+          <option value="3.0"></option>
+        </datalist>
+        <div class="slider-ticks">
+          <span>0.5x (Max)</span>
+          <span>1.0x</span>
+          <span>1.5x</span>
+          <span>2.0x</span>
+          <span>2.5x</span>
+          <span>3.0x (Off)</span>
+        </div>
+      </div>
+      <div class="setting-item" style="display: none;">
+        <div class="setting-row-val">
+          <label for="setting-min-opacity">Min Opacity (3DGS)</label>
+          <span class="setting-val-display" id="setting-min-opacity-val">0.50</span>
+        </div>
+        <input type="range" id="setting-min-opacity" min="0.0" max="0.5" step="0.05" value="0.50">
+      </div>
+      <div id="setting-size-item" class="setting-item mobile-parameter">
+        <div class="setting-row-val">
+          <label for="setting-point-size">Base Particle Size</label>
+          <span class="setting-val-display" id="setting-point-size-val">0.20</span>
+        </div>
+        <input type="range" id="setting-point-size" min="0.05" max="0.30" step="0.01" value="0.20">
+      </div>
+      <div id="setting-brightness-item" class="setting-item mobile-parameter">
+        <div class="setting-row-val">
+          <label for="setting-particle-brightness">Particle Brightness</label>
+          <span class="setting-val-display" id="setting-particle-brightness-val">0.70</span>
+        </div>
+        <input type="range" id="setting-particle-brightness" min="0.10" max="2.00" step="0.05" value="0.70">
+      </div>
+      <div id="setting-density-item" class="setting-item mobile-parameter">
+        <div class="setting-row-val">
+          <label for="setting-point-density">Point Cloud Density</label>
+          <span class="setting-val-display" id="setting-point-density-val">100%</span>
+        </div>
+        <input type="range" id="setting-point-density" min="0.01" max="1.00" step="0.01" value="1.00">
+      </div>
+      <div class="setting-item" style="display: none;">
+        <div class="setting-row-val">
+          <label for="setting-particle-softness">Particle Softness</label>
+          <span class="setting-val-display" id="setting-particle-softness-val">0.70</span>
+        </div>
+        <input type="range" id="setting-particle-softness" min="0.00" max="1.00" step="0.05" value="0.70">
+      </div>
+      <div class="setting-item" style="display: none;">
+        <div class="setting-row-val">
+          <label for="setting-particle-opacity">Particle Opacity</label>
+          <span class="setting-val-display" id="setting-particle-opacity-val">1.00</span>
+        </div>
+        <input type="range" id="setting-particle-opacity" min="0.00" max="1.00" step="0.05" value="1.00">
+      </div>
+      <div class="setting-item" style="display: none;">
+        <div class="setting-row-val">
+          <label for="setting-splat-scale">Splat Scale (3DGS)</label>
+          <span class="setting-val-display" id="setting-splat-scale-val">1.0</span>
+        </div>
+        <input type="range" id="setting-splat-scale" min="0.2" max="4.0" step="0.1" value="1.0">
+      </div>
+      <div id="desktop-scatter-anchor"></div>
+      <div id="scatter-effect-item" class="setting-item camera-option-item">
+        <label for="setting-scatter-effect">Scatter Effect (粒子分散效果)</label>
+        <select id="setting-scatter-effect" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer; margin-top: 5px;">
+          <option value="none" selected>No particle effects</option>
+          <option value="0">1. Original Explosion (原始无序粒子炸裂)</option>
+          <option value="1">2. Diagonal Sweep (角落对角线波前扫拂)</option>
+          <option value="3">3. Thanos Snap Dissolve (随机区块渐隐消散)</option>
+          <option value="8">4. Waterfall Downward Flow (由上而下瀑布流消散)</option>
+          <option value="11">5. Double Helix Upward (双螺旋结构向上攀升)</option>
+          <option value="16">6. Hologram 3D Printer (粒子逐层打印重组)</option>
+          <option value="13">7. Fractal Julia Orbit (分形几何轨道重组)</option>
+          <option value="14">8. Wind Snap Sweep (风吹飞砂由后向前扫拂)</option>
+          <option value="17">9. Rainfall Assembly (雨点下落重组)</option>
+        </select>
+      </div>
+    </div>
+    <!-- ========== Stats Panel ========== -->
+    <div class="stats-panel" id="stats-panel">
+      <div class="stat-row">
+        <span class="stat-label">Particles</span>
+        <span class="stat-value" id="stat-particles">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">FPS</span>
+        <span class="stat-value" id="stat-fps">0</span>
+      </div>
+      <!-- Flip Vertically Button -->
+      <button id="btn-flip-x" class="btn btn-secondary" style="margin-top: 6px; font-size: 10px; padding: 4px 8px; justify-content: center; width: 100%;" title="Toggle model orientation (flip upside down)">
+        <span class="btn-text">Flip Vertically</span>
+      </button>
+    </div>
+    <!-- ========== Progress Control ========== -->
+    <div class="progress-control" id="progress-control">
+      <div class="progress-label">
+        <span>Scatter / Gather</span>
+        <span class="progress-value" id="progress-value">0%</span>
+      </div>
+      <div class="progress-row" style="display: flex; align-items: center; gap: 8px; width: 100%;">
+        <input
+          type="range"
+          id="progress-slider"
+          class="progress-slider"
+          min="0"
+          max="100"
+          value="0"
+          step="1"
+          style="flex: 1;"
+        >
+        <!-- Auto-play Scatter Button -->
+        <button id="btn-play-scatter" class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px; display: flex; align-items: center; justify-content: center; height: 24px; min-width: 32px; margin: 0;" title="Auto-play scatter effect (0-100-0)">
+          <span class="btn-icon-emoji" style="margin: 0; font-size: 10px; font-family: inherit; font-weight: 600;">播放</span>
+        </button>
+      </div>
+    </div>
+    <!-- ========== Remy Intro Panel ========== -->
+    <div class="remy-intro-panel" id="remy-intro-panel">
+      <div class="remy-intro-header">
+        <span class="remy-intro-title" id="remy-intro-title">✨ 关于 Remy</span>
+        <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="remy-visit-link" id="remy-visit-link">→前往 Remy 官网</a>
+        <button id="btn-minimize-remy" class="remy-minimize-btn" title="最小化 / Minimize">×</button>
+      </div>
+      <div class="remy-intro-content" id="remy-intro-content">
+        照片视频很美好，但 3D 影像更显珍贵。Remy 是一款 3D 空间记录 App，让美好记忆场景可以保存并沉浸式体验。本网页使用 Vibe Coding 制作，你可以导入 Remy 已生成的 3D 影像，体验自定义运镜、发光粒子特效、手势控制等玩法，让 3D 影像变成更好玩的数字载体，祝你玩的开心！
+      </div>
+    </div>
+
+    <!-- ========== Webcam Preview ========== -->
+    <div class="webcam-container hidden" id="webcam-container">
+      <div class="webcam-preview">
+        <video id="webcam-video" autoplay playsinline muted></video>
+        <div class="webcam-label">
+          <span class="dot" id="webcam-dot"></span>
+          LIVE
+        </div>
+      </div>
+      <div class="gesture-guide" id="gesture-guide">
+        <div class="gesture-guide-item" id="guide-palm">🖐️ 张开手掌：粒子消散</div>
+        <div class="gesture-guide-item" id="guide-fist">✊ 握拳：粒子聚集</div>
+        <div class="gesture-guide-item" id="guide-victory">✌️ 剪刀手：切换模式</div>
+        <div class="gesture-guide-item" id="guide-zoom">✊✊ 双拳缩放：缩放模型</div>
+        <div class="gesture-guide-item" id="guide-pointing">☝️ 食指：控制模型视角</div>
+      </div>
+    </div>
+    <!-- ========== Welcome Hint (Landing Centered Box) ========== -->
+    <div class="welcome-hint" id="welcome-hint">
+      <div class="landing-card">
+        <div class="landing-logo">✨</div>
+        <h2>✨ Remy Custom Effects & Camera Tool</h2>
+        <p>Paste a Remy3D or Kiri Engine share URL below to begin exploring in 3D Point Cloud and Spark 3DGS.</p>
+        
+        <!-- Center Input Box -->
+        <div class="landing-input-box">
+          <input
+            type="text"
+            id="landing-url-input"
+            placeholder="Paste Remy3D or Kiri Engine share URL..."
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <button id="landing-btn-load" class="btn btn-primary" title="Load model">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+            <span class="btn-text">Load</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <!-- ========== Loading Overlay ========== -->
+    <div class="loading-overlay" id="loading-overlay">
+      <div class="loading-ring">
+        <div class="ring"></div>
+        <div class="ring"></div>
+        <div class="ring"></div>
+      </div>
+      <div class="loading-text" id="loading-text">Loading...</div>
+      <div class="loading-progress">
+        <div class="bar" id="loading-bar"></div>
+      </div>
+    </div>
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toast-container"></div>
+  </div>
+  <!-- App Entry Point -->
+  <script type="module" src="js/app.js?v=3.20"></script>
+</body>
+</html>
