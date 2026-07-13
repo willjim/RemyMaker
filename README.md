@@ -35,12 +35,15 @@ RemyMaker 是一款面向桌面端与手机端的 3D Gaussian Splatting 特效�
 
 ## 支持链接
 
-- Remy3D 分享链接
-- Kiri Engine 3DGS 分享链接
+- [Remy3D](https://www.remy3d.cn/) 分享链接
+- [Kiri Engine](https://www.kiriengine.app/) 3DGS 分享链接
 
 ## 使用 Skill 本地运行
 
-- 向你使用的 Agent 发送本项目链接并要求配置项目内的名为 remymaker-local 的 skill；
+- 向你使用的 Agent 发送下面这段话：
+
+  `  请将 https://github.com/willjim/RemyMaker 中名为 remymaker-local 的 skill 安装到本地`
+
 - 完成后发送「帮我运行remy」或「帮我运行remymaker」即可在本地运行本项目。
 
 ## 项目结构
@@ -75,5 +78,4 @@ RemyMaker 的实现离不开以下优秀项目与工具，在此向所有维护�
 - [GSAP](https://gsap.com/) — 镜头路径与界面动画
 - [fix-webm-duration](https://github.com/yusitnikov/fix-webm-duration) — WebM 时长修复
 - [Cloudflare Pages](https://pages.cloudflare.com/) — 网页托管与 Functions 运行环境
-
-请同时遵守各项目自身的许可证与使用条款。
+- [KIRI Engine](https://www.kiriengine.app/about) 全体小伙伴
