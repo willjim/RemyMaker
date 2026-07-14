@@ -35,6 +35,8 @@
 - 如果必须提供 PLY 转换，把转换放到 Web Worker，并显示可取消进度。
 - 对移动端禁用全量转换或限制最大点数。
 
+视频导出已优先改为 WebCodecs + MP4 muxer 的逐帧合成路径：导出时暂停实时动画循环，按目标 FPS 确定性渲染每一帧并显示合成进度；如果浏览器不支持 WebCodecs/H.264，则回退到原 MediaRecorder 实时录制。
+
 ### P1：利用 Spark 2 渲染层，减少过渡期双渲染时长
 
 动画循环会根据 `splatInterpolation` 同时更新粒子透明度和 Spark opacity，并在过渡中两者短暂同时可见。双渲染对移动端尤其昂贵。建议：

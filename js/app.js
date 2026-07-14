@@ -57,6 +57,7 @@ const state = {
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
   previewStart: null,
+  compositingActive: false, // true while deterministic WebCodecs video export owns rendering
   gatherAnimationId: null,
   cancelScatterAnimation: null,
   recordingActive: false,   // true during flight recording
@@ -1436,6 +1437,7 @@ async function toggleGestureControl() {
 // ============================================================
 function animate() {
   requestAnimationFrame(animate);
+  if (state.compositingActive) return;
   const delta = state.clock.getDelta();
   const elapsed = state.clock.getElapsedTime();
   // Pace capture at 60 FPS. When a slower device misses a frame, advance the
@@ -2293,7 +2295,233 @@ function stopExportRecording() {
   state.controls.update();
 }
 
+
 async function exportPathVideo({ fromPreview = false } = {}) {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    return exportPathVideoRealtime({ fromPreview });
+  }
+
+  try {
+    return await exportPathVideoComposited({ fromPreview });
+  } catch (error) {
+    console.warn('Composited export failed, falling back to realtime recorder:', error);
+    showToast(
+      state.lang === 'zh'
+        ? `合成导出不可用，改用实时录制：${error.message}`
+        : `Composited export unavailable, falling back to realtime recording: ${error.message}`,
+      'warning',
+      6000
+    );
+    return exportPathVideoRealtime({ fromPreview });
+  }
+}
+
+async function loadMp4Muxer() {
+  return import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/+esm');
+}
+
+async function selectVideoEncoderConfig(width, height, fps, bitrate) {
+  const candidates = [
+    { codec: 'avc1.640028', width, height, bitrate, framerate: fps, latencyMode: 'quality' },
+    { codec: 'avc1.4d0028', width, height, bitrate, framerate: fps, latencyMode: 'quality' },
+  ];
+
+  if (typeof VideoEncoder.isConfigSupported !== 'function') return candidates[0];
+  for (const config of candidates) {
+    try {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) return support.config || config;
+    } catch (_) {
+      // Try the next codec candidate.
+    }
+  }
+  throw new Error('No supported WebCodecs video encoder configuration was found.');
+}
+
+function renderCompositedExportFrame(frameIndex, totalFrames, fps, totalDuration) {
+  const t = frameIndex / fps;
+  const flightProgress = totalFrames <= 1 ? 1 : Math.min(frameIndex / (totalFrames - 1), 1);
+
+  if (state.settings.presetFlight !== 'none') {
+    applyPresetFlight(state.settings.presetFlight, flightProgress);
+  } else {
+    interpolateCamera(flightProgress);
+  }
+
+  state.splatInterpolation = state.settings.renderer === 'spark' ? 1.0 : 0.0;
+  state.splatInterpolationTarget = state.splatInterpolation;
+  syncModelRendererVisibility();
+
+  if (state.splatPivot && state.particleSystem?.pivot) {
+    state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
+  }
+  if (state.splatMesh) {
+    state.splatMesh.opacity = state.splatInterpolation;
+  }
+
+  if (state.particleSystem) {
+    const gatherDuration = 2.5;
+    const gatherProgress = state.settings.particleEffectEnabled
+      ? Math.max(0, 1 - t / gatherDuration)
+      : 0;
+    state.particleSystem.setProgressImmediate(gatherProgress);
+    state.particleSystem.setTransitionDirection(1.0);
+    state.particleSystem.setSplatInterpolation(state.splatInterpolation);
+    state.particleSystem.update(1 / fps, t);
+  }
+
+  state.renderer.render(state.scene, state.camera);
+}
+
+async function exportPathVideoComposited({ fromPreview = false } = {}) {
+  if (state.settings.presetFlight === 'none' && state.keyframes.length < 2) return;
+  if (state.recordingActive || state.compositingActive) return;
+  if (state.previewActive && !fromPreview) return;
+  state.cancelScatterAnimation?.();
+  if (state.gatherAnimationId) {
+    cancelAnimationFrame(state.gatherAnimationId);
+    state.gatherAnimationId = null;
+  }
+
+  if (fromPreview) {
+    stopPreviewFlight({ reopenPanel: false });
+    restorePreviewStart();
+  }
+
+  if (state.settings.presetFlight === 'none') {
+    if (!initCameraCurves()) return;
+  } else {
+    state.settings.originalFov = state.camera.fov;
+    const offset = new THREE.Vector3().copy(state.camera.position).sub(state.controls.target);
+    const spherical = new THREE.Spherical().setFromVector3(offset);
+    state.settings.flightStartSpherical = {
+      radius: spherical.radius,
+      phi: spherical.phi,
+      theta: spherical.theta
+    };
+  }
+
+  const mobileExport = isMobileViewport();
+  const mobileAspect = window.innerWidth / window.innerHeight;
+  const exportWidth = mobileExport
+    ? (mobileAspect <= 1 ? 1080 : Math.round(1080 * mobileAspect / 2) * 2)
+    : 1920;
+  const exportHeight = mobileExport
+    ? (mobileAspect <= 1 ? Math.round(1080 / mobileAspect / 2) * 2 : 1080)
+    : 1080;
+  const exportFps = mobileExport ? 30 : 60;
+  const bitrate = mobileExport ? 15000000 : 20000000;
+  const totalDuration = state.settings.presetFlight !== 'none'
+    ? getPresetFlightDuration(state.settings.presetFlight)
+    : (state.keyframes.length - 1) * 2.0;
+  const totalFrames = Math.max(1, Math.round(totalDuration * exportFps));
+
+  collapseCameraPathPanel();
+  showLoading(state.lang === 'zh' ? '正在合成高清视频 0%' : 'Compositing video 0%');
+  updateLoadingProgress(0, state.lang === 'zh' ? '正在初始化视频合成器...' : 'Initializing video compositor...');
+  await new Promise(resolve => requestAnimationFrame(resolve));
+
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  const pixelRatio = state.renderer.getPixelRatio();
+  const originalControlsEnabled = state.controls.enabled;
+
+  let encoder;
+  try {
+    const { Muxer, ArrayBufferTarget } = await loadMp4Muxer();
+    const encoderConfig = await selectVideoEncoderConfig(exportWidth, exportHeight, exportFps, bitrate);
+    const muxerCodec = 'avc';
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: {
+        codec: muxerCodec,
+        width: exportWidth,
+        height: exportHeight,
+        frameRate: exportFps,
+      },
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    });
+
+    let encoderError = null;
+    encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (error) => { encoderError = error; },
+    });
+    encoder.configure(encoderConfig);
+
+    state.compositingActive = true;
+    state.controls.enabled = false;
+    state.renderer.setPixelRatio(1);
+    state.renderer.setSize(exportWidth, exportHeight, false);
+    const displayScale = Math.min(originalWidth / exportWidth, originalHeight / exportHeight);
+    dom.container.style.setProperty('--export-canvas-width', `${Math.round(exportWidth * displayScale)}px`);
+    dom.container.style.setProperty('--export-canvas-height', `${Math.round(exportHeight * displayScale)}px`);
+    dom.container.classList.add('export-aspect-active');
+    state.camera.aspect = exportWidth / exportHeight;
+    state.camera.updateProjectionMatrix();
+    if (state.particleSystem) {
+      state.particleSystem.setViewportSize(exportWidth, exportHeight);
+      state.particleSystem.setPointSize(state.settings.pointSize);
+    }
+
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      renderCompositedExportFrame(frameIndex, totalFrames, exportFps, totalDuration);
+      const frame = new VideoFrame(state.renderer.domElement, {
+        timestamp: Math.round((frameIndex * 1000000) / exportFps),
+        duration: Math.round(1000000 / exportFps),
+      });
+      encoder.encode(frame, { keyFrame: frameIndex % exportFps === 0 });
+      frame.close();
+
+      while (encoder.encodeQueueSize > 4) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        if (encoderError) throw encoderError;
+      }
+
+      if (frameIndex % 3 === 0 || frameIndex === totalFrames - 1) {
+        const progress = (frameIndex + 1) / totalFrames;
+        updateLoadingProgress(progress, state.lang === 'zh'
+          ? `正在合成高清视频 ${Math.round(progress * 100)}%`
+          : `Compositing video ${Math.round(progress * 100)}%`);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+    }
+
+    updateLoadingProgress(0.98, state.lang === 'zh' ? '正在封装视频文件...' : 'Muxing video file...');
+    await encoder.flush();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+
+    const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    const filename = `${state.lastLoadedName || 'splat'}_render.mp4`;
+    if (state.settings.originalFov) state.camera.fov = state.settings.originalFov;
+    state.camera.near = 0.1;
+    state.camera.far = 1000;
+    state.camera.updateProjectionMatrix();
+    restoreRendererAfterExport(originalWidth, originalHeight, pixelRatio);
+    state.controls.enabled = originalControlsEnabled;
+    state.compositingActive = false;
+    hideLoading();
+
+    if (!blob.size) throw new Error('Generated video is empty.');
+    deliverVideoBlob(blob, filename);
+    showToast(state.lang === 'zh' ? '视频合成完成' : 'Video compositing complete', 'success', 6000);
+  } catch (error) {
+    try { await encoder?.flush?.(); } catch (_) {}
+    state.compositingActive = false;
+    if (state.settings.originalFov) state.camera.fov = state.settings.originalFov;
+    state.camera.near = 0.1;
+    state.camera.far = 1000;
+    state.camera.updateProjectionMatrix();
+    restoreRendererAfterExport(originalWidth, originalHeight, pixelRatio);
+    state.controls.enabled = originalControlsEnabled;
+    hideLoading();
+    throw error;
+  }
+}
+
+async function exportPathVideoRealtime({ fromPreview = false } = {}) {
   if (state.settings.presetFlight === 'none' && state.keyframes.length < 2) return;
   if (state.recordingActive) return;
   if (state.previewActive && !fromPreview) return;
