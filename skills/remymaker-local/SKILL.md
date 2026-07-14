@@ -1,6 +1,6 @@
 ---
 name: remymaker-local
-description: Launch the bundled RemyMaker (also called Remy)  web app as a local website with no package installation, then return its clickable localhost address. Use when a user asks to run, start, open, or launch “remy”, “remymaker”, or “RemyMaker” locally, including Chinese requests such as “帮我运行remy” or “帮我运行remymaker”.
+description: Launch the bundled RemyMaker (also called Remy) web app as a local website with no package installation, then return its clickable localhost address. Use when a user asks to run, start, open, or launch “remy”, “remymaker”, or “RemyMaker” locally, including Chinese requests such as “帮我运行remy” or “帮我运行remymaker”.
 ---
 
 # Run RemyMaker locally
