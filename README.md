@@ -78,4 +78,4 @@ RemyMaker 的实现离不开以下优秀项目与工具，在此向所有维护�
 - [GSAP](https://gsap.com/) — 镜头路径与界面动画
 - [fix-webm-duration](https://github.com/yusitnikov/fix-webm-duration) — WebM 时长修复
 - [Cloudflare Pages](https://pages.cloudflare.com/) — 网页托管与 Functions 运行环境
-- [KIRI Engine](https://www.kiriengine.app/about) 全体小伙伴
+- [KIRI Engine](https://www.kiriengine.app) 全体小伙伴
