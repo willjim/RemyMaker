@@ -580,6 +580,21 @@ html, body {
   background-size: 200% 100%;
 }
 
+.composition-cancel-button {
+  display: none;
+  min-width: 112px;
+  justify-content: center;
+}
+
+body.compositing-mode-active .composition-cancel-button {
+  display: inline-flex;
+}
+
+body.compositing-mode-active .composition-cancel-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }

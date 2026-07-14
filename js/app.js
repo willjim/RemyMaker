@@ -55,9 +55,20 @@ const state = {
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
   previewStart: null,
+  previewCompleted: false,
+  previewInitialRenderer: null,
+  previewRendererTimeline: [],
+  lastFlightGatherPercent: -1,
   gatherAnimationId: null,
   cancelScatterAnimation: null,
   recordingActive: false,   // true during flight recording
+  exportPreparing: false,   // true while the export canvas/recorder is being configured
+  compositingActive: false, // true while WebCodecs owns the WebGL renderer
+  compositionCancelRequested: false,
+  activeWebCodecsOutput: null,
+  animationFrameId: null,
+  exportInitialRenderer: null,
+  exportRendererTimeline: [],
   recordingFps: 60,
   recordTime: 0.0,
   xFlipped: true,           // true when model X-axis is flipped (flipped by default on load)
@@ -125,6 +136,7 @@ function cacheDom() {
     loadingOverlay: document.getElementById('loading-overlay'),
     loadingText: document.getElementById('loading-text'),
     loadingBar: document.getElementById('loading-bar'),
+    btnCancelComposition: document.getElementById('btn-cancel-composition'),
     statsPanel: document.getElementById('stats-panel'),
     statParticles: document.getElementById('stat-particles'),
     statFps: document.getElementById('stat-fps'),
@@ -322,6 +334,12 @@ const translations = {
     'btn-clear-keyframes': '清空',
     'btn-preview-path': '预览',
     'btn-export-video': '导出视频',
+    'btn-stop-preview': '停止预览',
+    'btn-stop-composition': '停止合成',
+    'stopping-composition': '正在停止合成…',
+    'compositing-video': '正在逐帧合成 1080p 视频',
+    'finalizing-video': '正在封装 MP4 视频',
+    'fallback-recording': '逐帧合成不可用，正在切换到实时录制',
     // Rendering Settings
     'settings-title': '渲染设置',
     'label-max-particles': '最大粒子数 (点云模式)',
@@ -480,6 +498,12 @@ const translations = {
     'btn-clear-keyframes': 'Clear',
     'btn-preview-path': 'Preview',
     'btn-export-video': 'Export Video',
+    'btn-stop-preview': 'Stop Preview',
+    'btn-stop-composition': 'Stop Compositing',
+    'stopping-composition': 'Stopping composition…',
+    'compositing-video': 'Compositing 1080p video frame by frame',
+    'finalizing-video': 'Finalizing MP4 video',
+    'fallback-recording': 'Frame composition unavailable; switching to live recording',
     // Rendering Settings
     'settings-title': 'Rendering Settings',
     'label-max-particles': 'Max Particles (Particle Cloud)',
@@ -718,7 +742,10 @@ function applyTranslations(lang) {
       }
     }
     if (dom.btnHeaderPreview) dom.btnHeaderPreview.textContent = dict['btn-preview-path'];
-    if (dom.btnPreviewStop) dom.btnPreviewStop.textContent = lang === 'zh' ? '停止预览' : 'Stop Preview';
+    updatePreviewStopButton();
+    if (dom.btnCancelComposition && !state.compositionCancelRequested) {
+      dom.btnCancelComposition.textContent = dict['btn-stop-composition'];
+    }
     if (dom.btnPreviewExport) dom.btnPreviewExport.textContent = dict['btn-export-video'];
     if (dom.btnRecordingStop) dom.btnRecordingStop.textContent = lang === 'zh' ? '停止导出' : 'Stop Export';
     if (dom.recordingIndicator) dom.recordingIndicator.textContent = lang === 'zh' ? '录制中' : 'Recording';
@@ -1232,21 +1259,44 @@ const updateRemyPosition = () => {
   if (!panel || panel.style.display === 'none') return;
   
   const gap = 10;
+  const previewControlsActive = document.body.classList.contains('preview-mode-active');
+  const recordingControlsActive = document.body.classList.contains('recording-mode-active');
   const webcamActive = dom.webcamContainer && !dom.webcamContainer.classList.contains('hidden');
   const progressActive = dom.progressControl && dom.progressControl.classList.contains('visible');
+
+  // Preview/export controls are fixed to the bottom edge on phones. Anchor the
+  // Remy card above the top-most active control (including the progress bar)
+  // so landscape screens and safe-area insets cannot make them overlap.
+  if (previewControlsActive || recordingControlsActive) {
+    const activeBottomControls = [];
+    if (previewControlsActive && dom.previewControls) activeBottomControls.push(dom.previewControls);
+    if (recordingControlsActive && dom.recordingControls) activeBottomControls.push(dom.recordingControls);
+    if (progressActive && dom.progressControl) activeBottomControls.push(dom.progressControl);
+
+    const controlTops = activeBottomControls
+      .map((element) => element.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => rect.top);
+
+    if (controlTops.length > 0) {
+      const topMostControl = Math.min(...controlTops);
+      panel.style.setProperty('bottom', `${window.innerHeight - topMostControl + gap}px`, 'important');
+      return;
+    }
+  }
   
   if (webcamActive) {
     // Position above the webcam container using its actual rendered height
     const wcRect = dom.webcamContainer.getBoundingClientRect();
     const viewH = window.innerHeight;
     const wcTop = wcRect.top; // top of webcam container relative to viewport
-    panel.style.bottom = (viewH - wcTop + gap) + 'px';
+    panel.style.setProperty('bottom', (viewH - wcTop + gap) + 'px');
   } else if (progressActive) {
     const pcRect = dom.progressControl.getBoundingClientRect();
     const viewH = window.innerHeight;
-    panel.style.bottom = (viewH - pcRect.top + gap) + 'px';
+    panel.style.setProperty('bottom', (viewH - pcRect.top + gap) + 'px');
   } else {
-    panel.style.bottom = '24px';
+    panel.style.removeProperty('bottom');
   }
 };
 
@@ -1419,8 +1469,27 @@ async function toggleGestureControl() {
 // ============================================================
 // Animation Loop
 // ============================================================
+function pauseRegularAnimationLoop() {
+  state.compositingActive = true;
+  if (state.animationFrameId !== null) {
+    cancelAnimationFrame(state.animationFrameId);
+    state.animationFrameId = null;
+  }
+}
+
+function resumeRegularAnimationLoop() {
+  if (!state.compositingActive) return;
+  state.compositingActive = false;
+  state.clock.getDelta();
+  if (state.animationFrameId === null) {
+    state.animationFrameId = requestAnimationFrame(animate);
+  }
+}
+
 function animate() {
-  requestAnimationFrame(animate);
+  state.animationFrameId = null;
+  if (state.compositingActive) return;
+  state.animationFrameId = requestAnimationFrame(animate);
   const delta = state.clock.getDelta();
   const elapsed = state.clock.getElapsedTime();
   // Pace capture at 60 FPS. When a slower device misses a frame, advance the
@@ -1463,9 +1532,15 @@ function animate() {
     state.lastFpsTime = elapsed;
     if (dom.statFps) dom.statFps.textContent = state.fps;
   }
-  // Auto-rotation control (stop rotating only when camera path flight preview mode is active)
+  // Keep the model fixed throughout camera-path setup, preview and export.
   if (state.particleSystem) {
-    state.particleSystem.autoRotate = !state.cameraModeActive;
+    const cameraFlowLocksRotation = state.cameraModeActive
+      || state.previewActive
+      || state.previewCompleted
+      || state.recordingActive
+      || state.exportPreparing
+      || state.compositingActive;
+    state.particleSystem.autoRotate = !cameraFlowLocksRotation;
     state.particleSystem.isGestureActive = state.isGestureActive;
   }
   // Gesture detection
@@ -1495,25 +1570,36 @@ function animate() {
     }
     state.lastGesture = currentGesture;
   }
+  if (state.previewActive) {
+    applyRendererTimelineAtTime(
+      state.previewTime,
+      state.previewInitialRenderer,
+      state.previewRendererTimeline
+    );
+  } else if (state.recordingActive) {
+    applyRendererTimelineAtTime(
+      state.recordTime,
+      state.exportInitialRenderer,
+      state.exportRendererTimeline
+    );
+  }
+  if (state.previewActive) {
+    updateFlightGatherProgress(state.previewTime);
+  } else if (state.recordingActive) {
+    updateFlightGatherProgress(state.recordTime);
+  }
   // Target interpolation based on renderer setting (no hand-open dissipation in Spark mode)
   state.splatInterpolationTarget = (state.settings.renderer === 'spark') ? 1.0 : 0.0;
   const transitionDirection = state.splatInterpolationTarget >= state.splatInterpolation ? 1.0 : -1.0;
   // Interpolate splat transition (0.0 to 1.0)
-  // Mobile export briefly renders particles and Spark together during a crossfade.
-  // Finish that expensive overlap sooner to protect recorded frame pacing while
-  // keeping the normal preview/desktop transition unchanged.
-  const interpolationLerp = state.recordingActive && isMobileViewport() ? 0.12 : 0.04;
+  const interpolationLerp = 0.04;
   state.splatInterpolation += (state.splatInterpolationTarget - state.splatInterpolation) * interpolationLerp;
   if (Math.abs(state.splatInterpolation - state.splatInterpolationTarget) < 0.001) {
     state.splatInterpolation = state.splatInterpolationTarget;
   }
   // Update rendering and interaction based on active engine
   if (state.isModelLoaded) {
-    // 1. Sync splat pivot rotation with particle system pivot rotation
-    if (state.splatPivot && state.particleSystem && state.particleSystem.pivot) {
-      state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
-    }
-    // 2. Update opacity of Spark SplatMesh (fade in as splatInterpolation goes to 1.0)
+    // 1. Update opacity of Spark SplatMesh (fade in as splatInterpolation goes to 1.0)
     if (state.splatMesh) {
       const splatOpacity = transitionDirection > 0
         ? Math.pow(state.splatInterpolation, 2.1)
@@ -1521,7 +1607,7 @@ function animate() {
       state.splatMesh.opacity = splatOpacity;
     }
     syncModelRendererVisibility();
-    // 3. Update Particle System (fades out internally in shader)
+    // 2. Update Particle System (fades out internally in shader)
     if (state.particleSystem) {
       if (state.particleSystem.material) {
         // depthWrite stays false for artistic AdditiveBlending glow;
@@ -1542,24 +1628,21 @@ function animate() {
         }
       }
     }
+
+    // 3. Synchronize the 3DGS pivot after auto-rotation has advanced. Copying the
+    // previous frame's value made the default model rotation look sticky.
+    if (state.splatPivot && state.particleSystem?.pivot) {
+      state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
+    }
   }
   // Camera Path Flight Animation (interpolates camera positions and targets)
   if (state.previewActive) {
     if (state.settings.presetFlight === 'none') {
-      state.previewTime += renderDelta;
-      const totalDuration = (state.keyframes.length - 1) * 2.0; // 2.0 seconds per segment (max 8.0s for 5 keyframes)
-      if (state.previewTime >= totalDuration) {
-        state.previewActive = false;
-        setPreviewControlsActive(false);
-        state.controls.enabled = true; // Restore OrbitControls
-        state.controls.update(); // Sync OrbitControls to final viewpoint
-        dom.btnPreviewPath.textContent = t('btn-preview-path');
-        showToast('Flight preview finished', 'success');
-      } else {
-        interpolateCamera(state.previewTime / totalDuration);
-      }
+      const totalDuration = getCurrentFlightDuration();
+      state.previewTime = Math.min(state.previewTime + renderDelta, totalDuration);
+      applyCurrentFlightProgress(state.previewTime / totalDuration);
+      if (state.previewTime >= totalDuration) finishPreviewCycle();
     }
-    // If a preset is active, GSAP handles the progress updates and camera positioning automatically
   } else if (state.recordingActive) {
     state.recordTime += renderDelta;
     const totalDuration = state.settings.presetFlight !== 'none'
@@ -1670,22 +1753,75 @@ function updateRendererUI() {
     }
   }
 }
-function toggleRendererMode(source = 'gesture') {
-  const newMode = state.settings.renderer === 'spark' ? 'particles' : 'spark';
-  state.settings.renderer = newMode;
+function setRendererMode(mode, source = 'timeline') {
+  if (mode !== 'particles' && mode !== 'spark') return;
+  if (state.settings.renderer === mode) return;
+  state.settings.renderer = mode;
   updateRendererUI();
+  if (source === 'timeline' || source === 'composite') return;
   if (source === 'gesture') {
-    if (newMode === 'spark') {
+    if (mode === 'spark') {
       showToast(t('gesture-switched-spark'), 'success', 2000);
     } else {
       showToast(t('gesture-switched-cloud'), 'info', 2000);
     }
   } else {
-    if (newMode === 'spark') {
+    if (mode === 'spark') {
       showToast(t('spark-mode-enabled'), 'success', 2000);
     } else {
       showToast(t('point-cloud-enabled'), 'info', 2000);
     }
+  }
+}
+
+function getRendererAtTime(time, initialRenderer, timeline = []) {
+  let renderer = initialRenderer || state.settings.renderer;
+  for (const event of timeline) {
+    if (event.time > time + 0.0001) break;
+    renderer = event.renderer;
+  }
+  return renderer;
+}
+
+function applyRendererTimelineAtTime(time, initialRenderer, timeline = []) {
+  setRendererMode(getRendererAtTime(time, initialRenderer, timeline), 'timeline');
+}
+
+function recordPreviewRendererSwitch(renderer) {
+  const time = Math.max(0, Math.min(state.previewTime, getCurrentFlightDuration()));
+  state.previewRendererTimeline = state.previewRendererTimeline.filter(
+    event => event.time < time - 0.0001
+  );
+  const previousRenderer = getRendererAtTime(
+    Math.max(0, time - 0.0002),
+    state.previewInitialRenderer,
+    state.previewRendererTimeline
+  );
+  if (previousRenderer !== renderer) {
+    state.previewRendererTimeline.push({ time, renderer });
+  }
+}
+
+function recordExportRendererSwitch(renderer) {
+  const timeline = state.exportRendererTimeline;
+  const time = Math.max(0, Math.min(state.recordTime, getCurrentFlightDuration()));
+  const cutoffIndex = timeline.findIndex(event => event.time >= time - 0.0001);
+  if (cutoffIndex >= 0) timeline.splice(cutoffIndex);
+  const previousRenderer = getRendererAtTime(
+    Math.max(0, time - 0.0002),
+    state.exportInitialRenderer,
+    timeline
+  );
+  if (previousRenderer !== renderer) timeline.push({ time, renderer });
+}
+
+function toggleRendererMode(source = 'gesture') {
+  const newMode = state.settings.renderer === 'spark' ? 'particles' : 'spark';
+  setRendererMode(newMode, source);
+  if (source === 'preview' && state.previewActive) {
+    recordPreviewRendererSwitch(newMode);
+  } else if (source === 'recording' && state.recordingActive) {
+    recordExportRendererSwitch(newMode);
   }
 }
 // ============================================================
@@ -2032,7 +2168,7 @@ function capturePreviewStart() {
   };
 }
 
-function restorePreviewStart() {
+function restorePreviewCameraStart() {
   if (!state.previewStart) return;
   state.camera.position.copy(state.previewStart.position);
   state.controls.target.copy(state.previewStart.target);
@@ -2043,53 +2179,96 @@ function restorePreviewStart() {
 
 function setPreviewControlsActive(active) {
   document.body.classList.toggle('preview-mode-active', active);
+  updateRemyPositionDeferred();
 }
 
 function setRecordingControlsActive(active) {
   document.body.classList.toggle('recording-mode-active', active);
+  updateRemyPositionDeferred();
 }
 
-function playGatherOnlyAnimation() {
-  if (!state.particleSystem || !state.settings.particleEffectEnabled) {
-    state.particleSystem?.setProgressImmediate(0);
-    dom.progressSlider.value = 0;
-    dom.progressValue.textContent = '0%';
-    return;
+function beginFlightGather() {
+  state.lastFlightGatherPercent = -1;
+  state.manualControl = Boolean(state.particleSystem && state.settings.particleEffectEnabled);
+  updateFlightGatherProgress(0);
+}
+
+function updateFlightGatherProgress(time) {
+  if (!state.particleSystem) return;
+  if (state.lastFlightGatherPercent === 0 && time >= EXPORT_GATHER_DURATION) return;
+  const progress = state.settings.particleEffectEnabled
+    ? Math.max(0, 1 - time / EXPORT_GATHER_DURATION)
+    : 0;
+  state.particleSystem.setProgressImmediate(progress);
+  const progressPercent = Math.round(progress * 100);
+  if (progressPercent !== state.lastFlightGatherPercent) {
+    state.lastFlightGatherPercent = progressPercent;
+    dom.progressSlider.value = progressPercent;
+    dom.progressValue.textContent = `${progressPercent}%`;
   }
-  if (state.gatherAnimationId) cancelAnimationFrame(state.gatherAnimationId);
-
-  state.manualControl = true;
-  state.particleSystem.setProgressImmediate(1);
-  dom.progressSlider.value = 100;
-  dom.progressValue.textContent = '100%';
-  const startedAt = performance.now();
-  const duration = 2500;
-
-  const animateGather = (now) => {
-    const progress = Math.max(0, 1 - (now - startedAt) / duration);
-    state.particleSystem.setProgressImmediate(progress);
-    dom.progressSlider.value = Math.round(progress * 100);
-    dom.progressValue.textContent = `${Math.round(progress * 100)}%`;
-    if (progress > 0) {
-      state.gatherAnimationId = requestAnimationFrame(animateGather);
-    } else {
-      state.gatherAnimationId = null;
-      state.manualControl = false;
-    }
-  };
-
-  state.gatherAnimationId = requestAnimationFrame(animateGather);
+  if (progress <= 0) state.manualControl = false;
 }
 
-function stopPreviewFlight({ reopenPanel = true } = {}) {
-  state.previewActive = false;
-  setPreviewControlsActive(false);
+function cancelGatherAnimation() {
   if (state.gatherAnimationId) {
     cancelAnimationFrame(state.gatherAnimationId);
     state.gatherAnimationId = null;
-    state.manualControl = false;
   }
+  state.lastFlightGatherPercent = -1;
+  state.manualControl = false;
+}
+
+function getCurrentFlightDuration() {
+  return state.settings.presetFlight !== 'none'
+    ? getPresetFlightDuration(state.settings.presetFlight)
+    : Math.max(0, (state.keyframes.length - 1) * 2.0);
+}
+
+function applyCurrentFlightProgress(progress) {
+  const clampedProgress = Math.max(0, Math.min(progress, 1));
+  if (state.settings.presetFlight !== 'none') {
+    applyPresetFlight(state.settings.presetFlight, clampedProgress);
+  } else {
+    interpolateCamera(clampedProgress);
+  }
+}
+
+function updatePreviewStopButton() {
+  if (!dom?.btnPreviewStop) return;
+  dom.btnPreviewStop.textContent = t('btn-stop-preview');
+}
+
+function finishPreviewCycle() {
+  if (!state.previewActive) return;
+  const duration = getCurrentFlightDuration();
+  state.previewTime = duration;
+  applyRendererTimelineAtTime(
+    state.previewTime,
+    state.previewInitialRenderer,
+    state.previewRendererTimeline
+  );
+  applyCurrentFlightProgress(duration > 0 ? state.previewTime / duration : 1);
+  state.previewActive = false;
+  state.previewCompleted = true;
+  state.presetAnimation = null;
+  cancelGatherAnimation();
+  state.controls.enabled = false;
+  setPreviewControlsActive(true);
+  updatePreviewStopButton();
+  dom.btnPreviewPath.textContent = t('btn-preview-path');
+  showToast(t('flight-preview-finished'), 'success');
+}
+
+function stopPreviewFlight({ reopenPanel = true, keepTimeline = true } = {}) {
+  state.previewActive = false;
+  state.previewCompleted = false;
+  setPreviewControlsActive(false);
+  cancelGatherAnimation();
   state.controls.enabled = true;
+  if (!keepTimeline) {
+    state.previewInitialRenderer = null;
+    state.previewRendererTimeline = [];
+  }
   
   if (state.presetAnimation) {
     state.presetAnimation.kill();
@@ -2106,14 +2285,25 @@ function stopPreviewFlight({ reopenPanel = true } = {}) {
   
   state.controls.update();
   dom.btnPreviewPath.textContent = t('btn-preview-path');
+  updatePreviewStopButton();
   if (reopenPanel) openCameraPathPanel();
-  showToast('Flight preview stopped', 'info');
 }
 
 function startPreviewFlight() {
+  if (state.settings.presetFlight === 'none') {
+    if (state.keyframes.length < 2 || !initCameraCurves()) return;
+  }
   capturePreviewStart();
+  state.previewInitialRenderer = state.settings.renderer;
+  state.previewRendererTimeline = [];
   state.cancelScatterAnimation?.();
-  playGatherOnlyAnimation();
+  cancelGatherAnimation();
+
+  setRendererMode(state.previewInitialRenderer || state.settings.renderer, 'timeline');
+  state.splatInterpolation = state.settings.renderer === 'spark' ? 1 : 0;
+  state.splatInterpolationTarget = state.splatInterpolation;
+  syncModelRendererVisibility();
+  beginFlightGather();
 
   if (state.settings.presetFlight !== 'none') {
     collapseCameraPathPanel();
@@ -2132,34 +2322,43 @@ function startPreviewFlight() {
     
     if (state.presetAnimation) {
       state.presetAnimation.kill();
+      state.presetAnimation = null;
     }
-    
-    state.presetProgressObj = { value: 0 };
+
+    state.previewTime = 0.0;
+    state.previewCompleted = false;
     state.settings.originalFov = state.camera.fov; // cache base FOV
-    
+    applyPresetFlight(state.settings.presetFlight, 0);
     const duration = getPresetFlightDuration(state.settings.presetFlight);
+    state.presetProgressObj = { value: 0 };
     state.presetAnimation = gsap.to(state.presetProgressObj, {
       value: 1,
-      duration: duration,
-      ease: "none",
-      repeat: -1, // infinite loop for closed-loop preview
+      duration,
+      ease: 'none',
+      repeat: 0,
       onUpdate: () => {
+        if (!state.previewActive) return;
+        state.previewTime = state.presetProgressObj.value * duration;
         applyPresetFlight(state.settings.presetFlight, state.presetProgressObj.value);
-      }
+      },
+      onComplete: () => {
+        state.presetAnimation = null;
+        if (state.previewActive) finishPreviewCycle();
+      },
     });
     
     dom.btnPreviewPath.textContent = state.lang === 'zh' ? '停止' : 'Stop Preview';
+    updatePreviewStopButton();
     showToast(`Looping preset: ${state.settings.presetFlight}`, 'info');
   } else {
-    if (state.keyframes.length < 2) return;
-    if (!initCameraCurves()) return;
-    
     collapseCameraPathPanel();
     state.controls.enabled = false; // Disable user interaction during flight preview
     state.previewTime = 0.0;
     state.previewActive = true;
+    state.previewCompleted = false;
     setPreviewControlsActive(true);
     dom.btnPreviewPath.textContent = state.lang === 'zh' ? '停止' : 'Stop Preview';
+    updatePreviewStopButton();
     showToast('Previewing camera flight path...', 'info');
   }
 }
@@ -2277,192 +2476,582 @@ function stopExportRecording() {
   state.controls.update();
 }
 
-async function exportPathVideo({ fromPreview = false } = {}) {
-  if (state.settings.presetFlight === 'none' && state.keyframes.length < 2) return;
-  if (state.recordingActive) return;
-  if (state.previewActive && !fromPreview) return;
-  state.cancelScatterAnimation?.();
+const EXPORT_FPS = 60;
+const EXPORT_VIDEO_BITRATE = 15_000_000;
+const EXPORT_GATHER_DURATION = 2.5;
+const COMPOSITION_POLL_INTERVAL_MS = 50;
+const COMPOSITION_MODULE_TIMEOUT_MS = 12_000;
+const COMPOSITION_START_TIMEOUT_MS = 15_000;
+const COMPOSITION_FRAME_TIMEOUT_MS = 15_000;
+const COMPOSITION_FINALIZE_TIMEOUT_MS = 30_000;
+const COMPOSITION_CANCEL_TIMEOUT_MS = 600;
 
-  if (fromPreview) {
-    stopPreviewFlight({ reopenPanel: false });
-    restorePreviewStart();
+class ExportCancelledError extends Error {
+  constructor() {
+    super('Video composition cancelled');
+    this.name = 'ExportCancelledError';
   }
-  
-  if (state.settings.presetFlight === 'none') {
-    if (!initCameraCurves()) return;
+}
+
+function setCompositionControlsActive(active) {
+  document.body.classList.toggle('compositing-mode-active', active);
+  if (!dom.btnCancelComposition) return;
+  dom.btnCancelComposition.disabled = false;
+  dom.btnCancelComposition.textContent = t('btn-stop-composition');
+}
+
+function setPreviewExportBusy(busy) {
+  if (!dom.btnPreviewExport) return;
+  dom.btnPreviewExport.disabled = busy;
+  if (busy) {
+    dom.btnPreviewExport.setAttribute('aria-busy', 'true');
   } else {
-    // Cache original FOV and starting spherical coordinates for video export
+    dom.btnPreviewExport.removeAttribute('aria-busy');
+  }
+}
+
+function requestStopComposition() {
+  if (!document.body.classList.contains('compositing-mode-active')) return;
+  state.compositionCancelRequested = true;
+  if (dom.btnCancelComposition) {
+    dom.btnCancelComposition.disabled = true;
+    dom.btnCancelComposition.textContent = t('stopping-composition');
+  }
+  updateLoadingProgress(0, t('stopping-composition'));
+}
+
+function throwIfCompositionCancelled() {
+  if (state.compositionCancelRequested) throw new ExportCancelledError();
+}
+
+function waitForCompositionTask(task, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(cancelPoll);
+      clearTimeout(timeout);
+      callback(value);
+    };
+    const cancelPoll = setInterval(() => {
+      if (state.compositionCancelRequested) {
+        finish(reject, new ExportCancelledError());
+      }
+    }, COMPOSITION_POLL_INTERVAL_MS);
+    const timeout = setTimeout(() => {
+      finish(reject, new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve(task).then(
+      value => finish(resolve, value),
+      error => finish(reject, error)
+    );
+  });
+}
+
+async function cancelWebCodecsOutput(output) {
+  if (!output || typeof output.cancel !== 'function') return;
+  await Promise.race([
+    Promise.resolve().then(() => output.cancel()).catch(() => {}),
+    new Promise(resolve => setTimeout(resolve, COMPOSITION_CANCEL_TIMEOUT_MS)),
+  ]);
+}
+
+function captureCameraState() {
+  return {
+    position: state.camera.position.clone(),
+    target: state.controls.target.clone(),
+    fov: state.camera.fov,
+    near: state.camera.near,
+    far: state.camera.far,
+  };
+}
+
+function restoreCameraState(cameraState) {
+  state.camera.position.copy(cameraState.position);
+  state.controls.target.copy(cameraState.target);
+  state.camera.fov = cameraState.fov;
+  state.camera.near = cameraState.near;
+  state.camera.far = cameraState.far;
+  state.camera.updateProjectionMatrix();
+  state.controls.update();
+}
+
+function setExactRendererState(mode) {
+  setRendererMode(mode, 'composite');
+  state.splatInterpolation = mode === 'spark' ? 1 : 0;
+  state.splatInterpolationTarget = state.splatInterpolation;
+  if (state.splatMesh) state.splatMesh.opacity = state.splatInterpolation;
+  if (state.particleSystem) {
+    state.particleSystem.setTransitionDirection(mode === 'spark' ? 1 : -1);
+    state.particleSystem.setSplatInterpolation(state.splatInterpolation);
+  }
+  state.rendererVisibility = { particles: null, spark: null };
+  syncModelRendererVisibility();
+}
+
+function configureExportCanvas(session) {
+  state.renderer.setPixelRatio(1);
+  state.renderer.setSize(session.exportWidth, session.exportHeight, false);
+  const displayScale = Math.min(
+    session.originalWidth / session.exportWidth,
+    session.originalHeight / session.exportHeight
+  );
+  dom.container.style.setProperty('--export-canvas-width', `${Math.round(session.exportWidth * displayScale)}px`);
+  dom.container.style.setProperty('--export-canvas-height', `${Math.round(session.exportHeight * displayScale)}px`);
+  dom.container.classList.add('export-aspect-active');
+  state.camera.aspect = session.exportWidth / session.exportHeight;
+  state.camera.updateProjectionMatrix();
+
+  if (state.particleSystem) {
+    state.particleSystem.setViewportSize(session.exportWidth, session.exportHeight);
+    const previewBufferWidth = session.originalWidth * session.pixelRatio;
+    const previewBufferHeight = session.originalHeight * session.pixelRatio;
+    const exportScale = Math.min(
+      session.exportWidth / previewBufferWidth,
+      session.exportHeight / previewBufferHeight
+    );
+    state.particleSystem.setPointSize(state.settings.pointSize * exportScale);
+  }
+}
+
+function resetExportPlayback(session) {
+  cancelGatherAnimation();
+  state.recordTime = 0;
+  state.virtualElapsedTime = 0;
+  state.camera.position.copy(session.startCamera.position);
+  state.controls.target.copy(session.startCamera.target);
+  state.camera.fov = session.startCamera.fov;
+  state.camera.near = session.startCamera.near;
+  state.camera.far = session.startCamera.far;
+  state.camera.updateProjectionMatrix();
+  setExactRendererState(session.initialRenderer);
+  const initialParticleProgress = state.settings.particleEffectEnabled ? 1 : 0;
+  state.particleSystem?.setProgressImmediate(initialParticleProgress);
+  applyCurrentFlightProgress(0);
+  state.renderer.render(state.scene, state.camera);
+}
+
+function renderExportFrame(session, timelineTime, flightProgress) {
+  applyRendererTimelineAtTime(
+    timelineTime,
+    session.initialRenderer,
+    session.rendererTimeline
+  );
+  applyCurrentFlightProgress(flightProgress);
+
+  state.splatInterpolationTarget = state.settings.renderer === 'spark' ? 1 : 0;
+  const transitionDirection = state.splatInterpolationTarget >= state.splatInterpolation ? 1 : -1;
+  state.splatInterpolation += (state.splatInterpolationTarget - state.splatInterpolation) * 0.04;
+  if (Math.abs(state.splatInterpolation - state.splatInterpolationTarget) < 0.001) {
+    state.splatInterpolation = state.splatInterpolationTarget;
+  }
+
+  if (state.splatMesh) {
+    state.splatMesh.opacity = transitionDirection > 0
+      ? Math.pow(state.splatInterpolation, 2.1)
+      : Math.pow(state.splatInterpolation, 1.45);
+  }
+  syncModelRendererVisibility();
+
+  if (state.particleSystem) {
+    state.particleSystem.autoRotate = false;
+    const gatherProgress = state.settings.particleEffectEnabled
+      ? Math.max(0, 1 - timelineTime / EXPORT_GATHER_DURATION)
+      : 0;
+    state.particleSystem.setProgressImmediate(gatherProgress);
+    state.particleSystem.setTransitionDirection(transitionDirection);
+    state.particleSystem.setSplatInterpolation(state.splatInterpolation);
+    state.particleSystem.update(1 / session.fps, timelineTime);
+    dom.progressSlider.value = Math.round(gatherProgress * 100);
+    dom.progressValue.textContent = `${Math.round(gatherProgress * 100)}%`;
+  }
+
+  if (state.splatPivot && state.particleSystem?.pivot) {
+    state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
+  }
+  state.renderer.render(state.scene, state.camera);
+}
+
+function restoreAfterExport(session) {
+  cancelGatherAnimation();
+  state.recordingActive = false;
+  state.exportPreparing = false;
+  state.exportInitialRenderer = null;
+  state.exportRendererTimeline = [];
+  state.exportStream?.getTracks().forEach(track => track.stop());
+  state.exportStream = null;
+  state.mediaRecorder = null;
+  state.activeWebCodecsOutput = null;
+  state.compositionCancelRequested = false;
+  setPreviewExportBusy(false);
+  setCompositionControlsActive(false);
+  setRecordingControlsActive(false);
+  setExactRendererState(session.restoreRenderer);
+  state.splatInterpolation = session.restoreInterpolation;
+  state.splatInterpolationTarget = session.restoreInterpolationTarget;
+  if (state.splatMesh) state.splatMesh.opacity = session.restoreSplatOpacity;
+  if (state.particleSystem) {
+    const restoreDirection = session.restoreInterpolationTarget >= session.restoreInterpolation ? 1 : -1;
+    state.particleSystem.setTransitionDirection(restoreDirection);
+    state.particleSystem.setSplatInterpolation(session.restoreInterpolation);
+    state.particleSystem.setProgressImmediate(session.restoreParticleProgress);
+  }
+  state.settings.originalFov = session.restoreOriginalFov;
+  state.settings.flightStartSpherical = session.restoreFlightStartSpherical;
+  restoreRendererAfterExport(session.originalWidth, session.originalHeight, session.pixelRatio);
+  restoreCameraState(session.restoreCamera);
+  state.rendererVisibility = { particles: null, spark: null };
+  syncModelRendererVisibility();
+  updateRendererUI();
+  hideLoading();
+}
+
+function finishExportBlob(blob, filename, session, type = 'video/mp4') {
+  restoreAfterExport(session);
+  if (!blob?.size) {
+    showToast(
+      state.lang === 'zh'
+        ? '浏览器没有生成视频数据，请尝试使用最新版 Safari 或 Chrome'
+        : 'No video data was generated. Try the latest Safari or Chrome.',
+      'error',
+      7000
+    );
+    return;
+  }
+  deliverVideoBlob(blob, filename);
+  showToast(
+    type.includes('mp4')
+      ? (state.lang === 'zh' ? 'MP4 已生成，请保存到手机' : 'MP4 ready to save')
+      : (state.lang === 'zh' ? '当前浏览器仅支持 WebM，视频已生成' : 'This browser supports WebM export; video ready'),
+    'success',
+    6000
+  );
+}
+
+async function compositeVideoWithWebCodecs(session) {
+  throwIfCompositionCancelled();
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    throw new Error('WebCodecs VideoEncoder / VideoFrame unavailable');
+  }
+
+  updateLoadingProgress(
+    0.005,
+    state.lang === 'zh' ? '正在加载视频合成模块…' : 'Loading video composition module…'
+  );
+  const mediabunny = await waitForCompositionTask(
+    import('mediabunny'),
+    COMPOSITION_MODULE_TIMEOUT_MS,
+    'Video composition module loading'
+  );
+  const {
+    Output,
+    BufferTarget,
+    Mp4OutputFormat,
+    CanvasSource,
+  } = mediabunny;
+  throwIfCompositionCancelled();
+  updateLoadingProgress(
+    0.01,
+    state.lang === 'zh' ? '正在初始化视频编码器…' : 'Initializing video encoder…'
+  );
+  const target = new BufferTarget();
+  const output = new Output({
+    format: new Mp4OutputFormat(),
+    target,
+  });
+  state.activeWebCodecsOutput = output;
+  const videoSource = new CanvasSource(state.renderer.domElement, {
+    codec: 'avc',
+    bitrate: session.bitrate,
+  });
+  output.addVideoTrack(videoSource);
+  const totalFrames = Math.max(1, Math.round(session.duration * session.fps));
+  try {
+    await waitForCompositionTask(
+      output.start(),
+      COMPOSITION_START_TIMEOUT_MS,
+      'Video encoder initialization'
+    );
+    throwIfCompositionCancelled();
+    updateLoadingProgress(0.02, `${t('compositing-video')} · 0%`);
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      throwIfCompositionCancelled();
+      const flightProgress = totalFrames === 1 ? 1 : frameIndex / (totalFrames - 1);
+      const timelineTime = flightProgress * session.duration;
+      renderExportFrame(session, timelineTime, flightProgress);
+      // Give Spark's worker one paint opportunity to finish camera-dependent
+      // sorting, then capture the settled frame. This rAF is not the app's
+      // animation loop and therefore cannot advance the export timeline.
+      await waitForCompositionTask(
+        new Promise(resolve => requestAnimationFrame(resolve)),
+        COMPOSITION_FRAME_TIMEOUT_MS,
+        'Export frame rendering'
+      );
+      throwIfCompositionCancelled();
+      state.renderer.render(state.scene, state.camera);
+      await waitForCompositionTask(
+        videoSource.add(frameIndex / session.fps, 1 / session.fps),
+        COMPOSITION_FRAME_TIMEOUT_MS,
+        'Export frame encoding'
+      );
+      throwIfCompositionCancelled();
+
+      const progress = (frameIndex + 1) / totalFrames;
+      updateLoadingProgress(
+        0.02 + progress * 0.94,
+        `${t('compositing-video')} · ${Math.round(progress * 100)}%`
+      );
+    }
+    updateLoadingProgress(0.98, t('finalizing-video'));
+    throwIfCompositionCancelled();
+    await waitForCompositionTask(
+      output.finalize(),
+      COMPOSITION_FINALIZE_TIMEOUT_MS,
+      'MP4 finalization'
+    );
+    throwIfCompositionCancelled();
+  } catch (error) {
+    await cancelWebCodecsOutput(output);
+    if (state.compositionCancelRequested || error?.name === 'ExportCancelledError') {
+      throw new ExportCancelledError();
+    }
+    throw error;
+  } finally {
+    state.activeWebCodecsOutput = null;
+  }
+
+  if (!target.buffer) throw new Error('WebCodecs produced no MP4 data');
+  updateLoadingProgress(1, t('done'));
+  return new Blob([target.buffer], { type: 'video/mp4' });
+}
+
+function startMediaRecorderFallback(session) {
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('This browser does not support MediaRecorder');
+  }
+  const canvas = state.renderer.domElement;
+  if (typeof canvas.captureStream !== 'function') {
+    throw new Error('Canvas video capture is not supported by this browser');
+  }
+
+  resetExportPlayback(session);
+  const stream = canvas.captureStream(session.fps);
+  state.exportStream = stream;
+  const mimeType = selectRecordingMimeType();
+  const recorderOptions = { videoBitsPerSecond: session.bitrate };
+  if (mimeType) recorderOptions.mimeType = mimeType;
+  const chunks = [];
+  const recorder = new MediaRecorder(stream, recorderOptions);
+  let recorderFailed = false;
+
+  recorder.ondataavailable = event => {
+    if (event.data?.size) chunks.push(event.data);
+  };
+  recorder.onerror = event => {
+    recorderFailed = true;
+    restoreAfterExport(session);
+    showToast(
+      `${state.lang === 'zh' ? '视频导出失败' : 'Video export failed'}: ${event.error?.message || 'Recorder error'}`,
+      'error',
+      6000
+    );
+  };
+  recorder.onstop = () => {
+    if (recorderFailed) return;
+    const actualType = recorder.mimeType || mimeType || 'video/webm';
+    const rawBlob = new Blob(chunks, { type: actualType });
+    const extension = actualType.includes('mp4') ? 'mp4' : 'webm';
+    const filename = `${state.lastLoadedName || 'splat'}_render.${extension}`;
+    const actualDuration = Math.min(
+      session.duration,
+      Math.max(state.recordTime, 1 / session.fps)
+    );
+    if (actualType.includes('webm')) {
+      fixWebmDuration(rawBlob, actualDuration * 1000, fixedBlob => {
+        finishExportBlob(fixedBlob, filename, session, actualType);
+      });
+    } else {
+      finishExportBlob(rawBlob, filename, session, actualType);
+    }
+  };
+
+  state.mediaRecorder = recorder;
+  state.exportInitialRenderer = session.initialRenderer;
+  state.exportRendererTimeline = session.rendererTimeline;
+  state.recordTime = 0;
+  state.recordingFps = session.fps;
+  state.lastRecordFrameTime = performance.now();
+  state.lastRecordRenderDelta = 1 / session.fps;
+  state.recordFrameAccumulator = 0;
+  state.virtualElapsedTime = 0;
+  state.recordingActive = true;
+  state.exportPreparing = false;
+  setCompositionControlsActive(false);
+  setRecordingControlsActive(true);
+  recorder.start(1000);
+  beginFlightGather();
+  hideLoading();
+  showToast(
+    state.lang === 'zh'
+      ? '正在使用兼容模式实时录制 1080p 视频，请保持页面打开…'
+      : 'Recording a 1080p video in compatibility mode. Keep this page open…',
+    'info',
+    6000
+  );
+}
+
+async function exportPathVideo({ fromPreview = false } = {}) {
+  if (state.settings.presetFlight === 'none') {
+    if (state.keyframes.length < 2 || !initCameraCurves()) {
+      showToast(state.lang === 'zh' ? '请至少添加两个有效关键帧' : 'Add at least two valid keyframes', 'warning', 3000);
+      return;
+    }
+  }
+  if (state.recordingActive || state.exportPreparing || state.compositingActive) {
+    showToast(state.lang === 'zh' ? '视频导出正在启动，请稍候' : 'Video export is starting. Please wait.', 'info', 2500);
+    return;
+  }
+  if (state.previewActive && !fromPreview) return;
+
+  const restoreCamera = captureCameraState();
+  const savedPreviewStart = state.previewStart
+    ? {
+        position: state.previewStart.position.clone(),
+        target: state.previewStart.target.clone(),
+        fov: state.previewStart.fov,
+      }
+    : {
+        position: restoreCamera.position.clone(),
+        target: restoreCamera.target.clone(),
+        fov: restoreCamera.fov,
+      };
+  const restoreRenderer = state.settings.renderer;
+  const restoreInterpolation = state.splatInterpolation;
+  const restoreInterpolationTarget = state.splatInterpolationTarget;
+  const restoreSplatOpacity = state.splatMesh?.opacity ?? restoreInterpolation;
+  const restoreParticleProgress = state.particleSystem?.getProgress?.() ?? 0;
+  const restoreOriginalFov = state.settings.originalFov;
+  const restoreFlightStartSpherical = { ...state.settings.flightStartSpherical };
+  const initialRenderer = fromPreview && state.previewInitialRenderer
+    ? state.previewInitialRenderer
+    : state.settings.renderer;
+  const rendererTimeline = fromPreview
+    ? state.previewRendererTimeline.map(event => ({ ...event }))
+    : [];
+  const restorePreviewTime = state.previewTime;
+
+  state.cancelScatterAnimation?.();
+  cancelGatherAnimation();
+  if (fromPreview) {
+    stopPreviewFlight({ reopenPanel: false, keepTimeline: true });
+    restorePreviewCameraStart();
+  }
+
+  if (state.settings.presetFlight !== 'none') {
     state.settings.originalFov = state.camera.fov;
     const offset = new THREE.Vector3().copy(state.camera.position).sub(state.controls.target);
     const spherical = new THREE.Spherical().setFromVector3(offset);
     state.settings.flightStartSpherical = {
       radius: spherical.radius,
       phi: spherical.phi,
-      theta: spherical.theta
+      theta: spherical.theta,
     };
   }
-  
-  state.controls.enabled = false; // Disable user interaction during export recording
+
   const mobileExport = isMobileViewport();
-  const mobileAspect = window.innerWidth / window.innerHeight;
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  const mobileAspect = originalWidth / originalHeight;
   const exportWidth = mobileExport
     ? (mobileAspect <= 1 ? 1080 : Math.round(1080 * mobileAspect / 2) * 2)
     : 1920;
   const exportHeight = mobileExport
     ? (mobileAspect <= 1 ? Math.round(1080 / mobileAspect / 2) * 2 : 1080)
     : 1080;
-  const exportFps = mobileExport ? 30 : 60;
+  const session = {
+    mobileExport,
+    exportWidth,
+    exportHeight,
+    fps: EXPORT_FPS,
+    bitrate: EXPORT_VIDEO_BITRATE,
+    duration: getCurrentFlightDuration(),
+    originalWidth,
+    originalHeight,
+    pixelRatio: state.renderer.getPixelRatio(),
+    startCamera: captureCameraState(),
+    restoreCamera,
+    restoreRenderer,
+    restoreInterpolation,
+    restoreInterpolationTarget,
+    restoreSplatOpacity,
+    restoreParticleProgress,
+    restoreOriginalFov,
+    restoreFlightStartSpherical,
+    initialRenderer,
+    rendererTimeline,
+    returnToPreview: fromPreview,
+    restorePreviewTime,
+    restorePreviewStart: savedPreviewStart,
+  };
+
+  state.controls.enabled = false;
   collapseCameraPathPanel();
-  showLoading(mobileExport ? '正在按当前屏幕比例准备 1080p 高清视频...' : 'Configuring 1080p WebGL render...');
-  
-  // Wait a moment for UI rendering
-  await new Promise(resolve => setTimeout(resolve, 300));
-  
-  // Save current window scale and pixel ratio
-  const originalWidth = window.innerWidth;
-  const originalHeight = window.innerHeight;
-  const pixelRatio = state.renderer.getPixelRatio();
-  
+  // Only expose the compositing UI after the preview state has been fully
+  // converted into a clean export session. Preparation errors must never leave
+  // a visible 0% overlay with no active encoder behind it.
+  state.exportPreparing = true;
+  setPreviewExportBusy(true);
+  state.compositionCancelRequested = false;
+  setCompositionControlsActive(true);
+  showLoading(t('compositing-video'));
+  updateLoadingProgress(0.01, `${t('compositing-video')} · 0%`);
+
   try {
-    if (typeof MediaRecorder === 'undefined') {
-      throw new Error('This browser does not support MediaRecorder');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    configureExportCanvas(session);
+    resetExportPlayback(session);
+    pauseRegularAnimationLoop();
+    const blob = await compositeVideoWithWebCodecs(session);
+    const filename = `${state.lastLoadedName || 'splat'}_render.mp4`;
+    try {
+      finishExportBlob(blob, filename, session, 'video/mp4');
+    } finally {
+      resumeRegularAnimationLoop();
     }
-
-    state.renderer.setPixelRatio(1);
-    state.renderer.setSize(exportWidth, exportHeight, false);
-    // Spark and Three.js must observe the same CSS and drawing-buffer aspect.
-    // Fit the export canvas inside the viewport without non-uniform stretching.
-    const displayScale = Math.min(originalWidth / exportWidth, originalHeight / exportHeight);
-    dom.container.style.setProperty('--export-canvas-width', `${Math.round(exportWidth * displayScale)}px`);
-    dom.container.style.setProperty('--export-canvas-height', `${Math.round(exportHeight * displayScale)}px`);
-    dom.container.classList.add('export-aspect-active');
-    state.camera.aspect = exportWidth / exportHeight;
-    state.camera.updateProjectionMatrix();
-    if (state.particleSystem) {
-      state.particleSystem.setViewportSize(exportWidth, exportHeight);
-      // Match the preview's physical point size. The interactive renderer already
-      // draws at `pixelRatio`, so omitting it here made exported glow sprites about
-      // 1.5× too large and visibly softer on high-DPI phones.
-      const previewBufferWidth = originalWidth * pixelRatio;
-      const previewBufferHeight = originalHeight * pixelRatio;
-      const exportScale = Math.min(
-        exportWidth / previewBufferWidth,
-        exportHeight / previewBufferHeight
+  } catch (webCodecsError) {
+    console.warn('WebCodecs composition failed; falling back to MediaRecorder:', webCodecsError);
+    resumeRegularAnimationLoop();
+    if (webCodecsError?.name === 'ExportCancelledError' || state.compositionCancelRequested) {
+      restoreAfterExport(session);
+      state.previewStart = session.restorePreviewStart;
+      state.previewInitialRenderer = session.initialRenderer;
+      state.previewRendererTimeline = session.rendererTimeline.map(event => ({ ...event }));
+      state.previewActive = false;
+      state.previewCompleted = true;
+      state.previewTime = session.returnToPreview ? session.restorePreviewTime : 0;
+      state.controls.enabled = false;
+      setPreviewControlsActive(true);
+      updatePreviewStopButton();
+      showToast(state.lang === 'zh' ? '已停止视频合成' : 'Video composition stopped', 'info', 3000);
+      return;
+    }
+    setCompositionControlsActive(false);
+    try {
+      state.exportPreparing = true;
+      updateLoadingProgress(0, t('fallback-recording'));
+      await new Promise(resolve => setTimeout(resolve, 120));
+      startMediaRecorderFallback(session);
+    } catch (fallbackError) {
+      restoreAfterExport(session);
+      showToast(
+        `${state.lang === 'zh' ? '视频导出失败' : 'Video export failed'}: ${fallbackError.message}`,
+        'error',
+        7000
       );
-      state.particleSystem.setPointSize(state.settings.pointSize * exportScale);
+      console.error('Both WebCodecs and MediaRecorder export failed:', fallbackError);
     }
-
-    // Warm Spark's first sort/upload before capture begins. Otherwise switching
-    // from particles to reality can make the first recorded Spark frames stall.
-    if (mobileExport && state.settings.renderer === 'particles' && state.splatMesh) {
-      const previousMeshVisible = state.splatMesh.visible;
-      const previousPivotVisible = state.splatPivot?.visible;
-      const previousRendererVisible = state.sparkRenderer?.visible;
-      const previousOpacity = state.splatMesh.opacity;
-      if (state.splatPivot) state.splatPivot.visible = true;
-      if (state.sparkRenderer) state.sparkRenderer.visible = true;
-      state.splatMesh.visible = true;
-      state.splatMesh.opacity = 0.001;
-      state.renderer.render(state.scene, state.camera);
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      state.renderer.render(state.scene, state.camera);
-      state.splatMesh.opacity = previousOpacity;
-      state.splatMesh.visible = previousMeshVisible;
-      if (state.splatPivot) state.splatPivot.visible = previousPivotVisible;
-      if (state.sparkRenderer) state.sparkRenderer.visible = previousRendererVisible;
-    }
-
-    state.renderer.render(state.scene, state.camera);
-
-    const canvas = state.renderer.domElement;
-    if (typeof canvas.captureStream !== 'function') {
-      throw new Error('Canvas video capture is not supported by this browser');
-    }
-    const stream = canvas.captureStream(exportFps);
-    state.exportStream = stream;
-
-    const mimeType = selectRecordingMimeType();
-    const recorderOptions = {
-      videoBitsPerSecond: mobileExport ? 15000000 : 20000000
-    };
-    if (mimeType) recorderOptions.mimeType = mimeType;
-
-    const chunks = [];
-    const recorder = new MediaRecorder(stream, recorderOptions);
-  
-    recorder.ondataavailable = (event) => {
-      if (event.data && event.data.size > 0) chunks.push(event.data);
-    };
-
-    recorder.onerror = (event) => {
-      state.recordingActive = false;
-      setRecordingControlsActive(false);
-      state.exportStream?.getTracks().forEach(track => track.stop());
-      restoreRendererAfterExport(originalWidth, originalHeight, pixelRatio);
-      hideLoading();
-      showToast(`${state.lang === 'zh' ? '视频导出失败' : 'Video export failed'}: ${event.error?.message || 'Recorder error'}`, 'error', 6000);
-    };
-
-    recorder.onstop = () => {
-      setRecordingControlsActive(false);
-      state.exportStream?.getTracks().forEach(track => track.stop());
-      state.exportStream = null;
-      const actualType = recorder.mimeType || mimeType || 'video/webm';
-      const rawBlob = new Blob(chunks, { type: actualType });
-      const totalDurationMs = state.settings.presetFlight !== 'none'
-        ? getPresetFlightDuration(state.settings.presetFlight) * 1000
-        : (state.keyframes.length - 1) * 2000;
-
-      const finishExport = (blobToDownload) => {
-        const isMp4 = actualType.includes('mp4');
-        const ext = isMp4 ? 'mp4' : 'webm';
-        const filename = `${state.lastLoadedName || 'splat'}_render.${ext}`;
-        restoreRendererAfterExport(originalWidth, originalHeight, pixelRatio);
-        hideLoading();
-
-        if (!blobToDownload.size) {
-          showToast(state.lang === 'zh' ? '浏览器没有生成视频数据，请尝试使用最新版 Safari 或 Chrome' : 'No video data was generated. Try the latest Safari or Chrome.', 'error', 7000);
-          return;
-        }
-
-        deliverVideoBlob(blobToDownload, filename);
-        showToast(isMp4
-          ? (state.lang === 'zh' ? 'MP4 已生成，请保存到手机' : 'MP4 ready to save')
-          : (state.lang === 'zh' ? '当前浏览器仅支持 WebM，视频已生成' : 'This browser supports WebM export; video ready'), 'success', 6000);
-      };
-
-      if (actualType.includes('webm')) {
-        fixWebmDuration(rawBlob, totalDurationMs, finishExport);
-      } else {
-        finishExport(rawBlob);
-      }
-    };
-
-    state.mediaRecorder = recorder;
-    state.recordTime = 0.0;
-    state.recordingFps = exportFps;
-    state.lastRecordFrameTime = performance.now();
-    state.lastRecordRenderDelta = 1 / exportFps;
-    state.recordFrameAccumulator = 0;
-    state.virtualElapsedTime = 0.0;
-    state.recordingActive = true;
-    setRecordingControlsActive(true);
-    recorder.start(1000);
-    playGatherOnlyAnimation();
-
-    hideLoading();
-    showToast(mobileExport
-      ? (state.lang === 'zh' ? '正在录制 1080p 高清运镜视频，请保持页面打开…' : 'Recording a 1080p camera flight. Keep this page open…')
-      : 'Recording 1080p MP4 camera flight...', 'info', 6000);
-  } catch (error) {
-    state.recordingActive = false;
-    setRecordingControlsActive(false);
-    state.exportStream?.getTracks().forEach(track => track.stop());
-    state.exportStream = null;
-    restoreRendererAfterExport(originalWidth, originalHeight, pixelRatio);
-    hideLoading();
-    showToast(`${state.lang === 'zh' ? '此手机浏览器暂不支持视频导出' : 'Video export is not supported in this browser'}: ${error.message}`, 'error', 7000);
-    console.error('Video export setup failed:', error);
   }
 }
 // ============================================================
@@ -2786,18 +3375,21 @@ function setupEventListeners() {
   dom.btnAddKeyframe.addEventListener('click', addKeyframe);
   dom.btnClearKeyframes.addEventListener('click', clearKeyframes);
   dom.btnPreviewPath.addEventListener('click', () => {
-    if (state.previewActive) {
+    if (state.previewActive || state.previewCompleted) {
       stopPreviewFlight();
     } else {
       startPreviewFlight();
     }
   });
-  dom.btnHeaderPreview.addEventListener('click', startPreviewFlight);
-  dom.btnPreviewToggleRenderer.addEventListener('click', () => toggleRendererMode('manual'));
-  dom.btnPreviewStop.addEventListener('click', stopPreviewFlight);
+  dom.btnHeaderPreview.addEventListener('click', () => startPreviewFlight());
+  dom.btnPreviewToggleRenderer.addEventListener('click', () => toggleRendererMode('preview'));
+  dom.btnPreviewStop.addEventListener('click', () => {
+    if (state.previewActive || state.previewCompleted) stopPreviewFlight();
+  });
   dom.btnPreviewExport.addEventListener('click', () => exportPathVideo({ fromPreview: true }));
-  dom.btnRecordingToggleRenderer.addEventListener('click', () => toggleRendererMode('manual'));
+  dom.btnRecordingToggleRenderer.addEventListener('click', () => toggleRendererMode('recording'));
   dom.btnRecordingStop.addEventListener('click', stopExportRecording);
+  dom.btnCancelComposition.addEventListener('click', requestStopComposition);
   dom.btnExportVideo.addEventListener('click', exportPathVideo);
 
   document.querySelectorAll('.mobile-setting-tag').forEach((tag) => {
