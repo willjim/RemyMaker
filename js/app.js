@@ -1992,7 +1992,7 @@ function interpolateCamera(pct) {
  * relative to user's real-time focus target.
  */
 function getPresetFlightDuration(presetName) {
-  return presetName === 'verticalLoop' ? 16.0 : 8.0;
+  return presetName === 'verticalLoop' ? 16.0 : 14.0;
 }
 
 function applyPresetFlight(presetName, t) {
