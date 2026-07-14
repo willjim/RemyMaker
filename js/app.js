@@ -416,7 +416,7 @@ const translations = {
     'point-cloud-enabled': '已切换至粒子模式',
     'load-model-first': '请先加载一个 3D 模型',
     'camera-path-active': '镜头运镜模式已开启：调整视角并点击“添加关键帧”！',
-    'max-keyframes-allowed': '最多只能录制 5 个关键帧',
+    'max-keyframes-allowed': '最多只能录制 8 个关键帧',
     'keyframe-recorded-prefix': '关键帧 ',
     'keyframe-recorded-suffix': ' 已成功录制！',
     'keyframes-cleared': '所有关键帧已清空',
@@ -580,7 +580,7 @@ const translations = {
     'point-cloud-enabled': 'Particle Mode enabled',
     'load-model-first': 'Please load a model first',
     'camera-path-active': 'Camera Path Mode active: Adjust view and record keyframes!',
-    'max-keyframes-allowed': 'Maximum 5 keyframes allowed',
+    'max-keyframes-allowed': 'Maximum 8 keyframes allowed',
     'keyframe-recorded-prefix': 'Keyframe ',
     'keyframe-recorded-suffix': ' recorded!',
     'keyframes-cleared': 'All keyframes cleared',
@@ -1871,10 +1871,12 @@ function openCameraPathPanel() {
   dom.cameraPathPanel.classList.remove('hidden');
   document.body.classList.add('camera-path-active');
 }
+const MAX_KEYFRAMES = 8;
+
 function addKeyframe() {
   if (!state.isModelLoaded) return;
-  if (state.keyframes.length >= 5) {
-    showToast('Maximum 5 keyframes allowed', 'warning');
+  if (state.keyframes.length >= MAX_KEYFRAMES) {
+    showToast(t('max-keyframes-allowed'), 'warning');
     return;
   }
   
