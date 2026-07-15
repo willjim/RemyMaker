@@ -60,18 +60,8 @@
       </button>
       <!-- Hidden File Input -->
       <input type="file" id="file-input" class="file-input-hidden" accept=".ply">
-      <!-- Download Button (Hidden) -->
-      <button id="btn-download" class="btn btn-secondary" title="Download current PLY/Splat file" disabled style="display: none;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-          <polyline points="7 10 12 15 17 10"/>
-          <line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-        <span class="btn-text">Download</span>
-      </button>
-
       <!-- 1. 点云模式 / Spark Mode Toggle -->
-      <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle Spark 2.0 3DGS mode">
+      <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle 3D Reality mode">
         <span class="btn-icon-emoji">✨</span><span class="btn-text">3D Reality</span>
       </button>
       <div class="toolbar-divider"></div>
@@ -354,7 +344,7 @@
       <div class="landing-card">
         <div class="landing-logo">✨</div>
         <h2>✨ Remy Custom Effects & Camera Tool</h2>
-        <p>Paste a Remy3D or Kiri Engine share URL below to begin exploring in 3D Point Cloud and Spark 3DGS.</p>
+        <p>Paste a Remy3D or Kiri Engine share URL below to explore Particle Mode and 3D Reality.</p>
         
         <!-- Center Input Box -->
         <div class="landing-input-box">
@@ -394,6 +384,6 @@
     <div class="toast-container" id="toast-container"></div>
   </div>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.28"></script>
+  <script type="module" src="js/app.js?v=3.30"></script>
 </body>
 </html>

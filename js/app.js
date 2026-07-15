@@ -4,7 +4,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { parsePLY, exportToPLY, cropPLYBufferDirect } from './plyParser.js';
+import { parsePLY } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=3.5';
 import { GestureControl } from './gestureControl.js';
 import { extractPLYFromUrl, downloadPLY } from './remyLoader.js';
@@ -107,7 +107,6 @@ function cacheDom() {
     btnGesture: document.getElementById('btn-gesture'),
     btnToggleSpark: document.getElementById('btn-toggle-spark'),
     btnSettings: document.getElementById('btn-settings'),
-    btnDownload: document.getElementById('btn-download'),
     settingsPanel: document.getElementById('settings-panel'),
     mobileCameraOptions: document.getElementById('mobile-camera-options'),
     desktopFlightAnchor: document.getElementById('desktop-flight-anchor'),
@@ -294,9 +293,7 @@ const translations = {
     'btn-load-text': '加载',
     'btn-upload-title': '上传本地 PLY 文件',
     'btn-upload-text': '上传 PLY',
-    'btn-download-title': '下载当前的 PLY/Splat 文件',
-    'btn-download-text': '下载',
-    'btn-spark-title': '切换 Spark 2.0 3DGS 模式',
+    'btn-spark-title': '切换 3D 实景模式',
     'btn-spark-text': '3D实景',
     'btn-pointcloud-text': '粒子模式',
     'btn-gesture-title': '启用/禁用手势控制',
@@ -399,15 +396,15 @@ const translations = {
     'loading-downloading': '正在获取 3DGS 数据，请稍候...',
     'loading-parsing': '正在读取 PLY 点云数据，请稍候...',
     'loading-processing': '正在构建 GPU 渲染管线...',
-    'loading-spark': '正在加载并初始化 Spark 2.0 3DGS 写实渲染引擎...',
+    'loading-spark': '正在加载并初始化渲染引擎...',
     // Alerts/Toasts
     'enter-valid-url': '请输入 Remy3D 或 Kiri Engine 分享链接',
     'enter-valid-url-2': '请输入有效的 Remy3D 或 Kiri Engine 分享链接',
     'failed-parse-ply': '解析 PLY 文件失败: ',
-    'failed-load-spark': '加载 Spark 2.0 引擎失败: ',
+    'failed-load-spark': '加载渲染引擎失败: ',
     'loaded-success-prefix': '',
     'loaded-success-suffix': ' 元素已加载',
-    'spark-load-failed': 'Spark 载入失败: ',
+    'spark-load-failed': '渲染引擎载入失败: ',
     'gesture-tracking-active': '✋ 手势控制已激活！张开/合拢手掌可控制消散，双手拳头微调模型缩放，比出“✌️”手势并保持0.7秒可切换模式',
     'flight-preview-finished': '镜头运镜预览已结束',
     'gesture-switched-spark': '手势触发：已切换至 3D实景',
@@ -426,10 +423,6 @@ const translations = {
     'previewing-camera-flight': '正在预览镜头自定义轨迹飞行...',
     'video-exported-success': 'MP4 运镜视频成功导出并已开始下载！',
     'recording-camera-flight-toast': '正在后台进行离屏 1080p 超清运镜录制中，请稍候...',
-    'converting-splat-ply': '正在将内存中的 Splat 数据转换并压缩为 PLY 格式...',
-    'download-success-prefix': '下载成功: ',
-    'download-success-suffix': '',
-    'export-failed-download-raw': 'Splat 到 PLY 转换失败，已自动为您下载原始 Splat 文件。',
     'drop-ply-only': '请拖放有效的 .ply 格式文件',
     'model-inverted': '模型方向已垂直翻转 (纠正上下颠倒)',
     'model-restored': '已恢复模型的默认方向',
@@ -441,12 +434,12 @@ const translations = {
     'parsing-share': '正在读取分享页面...',
     'downloading-prefix': '正在下载: ',
     'downloading-suffix': '',
-    'loading-spark-engine': '正在载入 Spark 2.0 渲染引擎...',
+    'loading-spark-engine': '正在载入渲染引擎...',
     'parsing-model-data': '正在解析模型点云数据...',
     'creating-particles': '正在生成 GPU 粒子云几何体...',
-    'loading-spark-3dgs': '正在加载写实 3DGS 实景...',
+    'loading-spark-3dgs': '正在加载 3D 实景...',
     'done': '完成！',
-    'spark-load-prefix': 'Spark 实景引擎加载中: ',
+    'spark-load-prefix': '渲染引擎加载中: ',
     'spark-load-suffix': '',
     'reapplying-settings': '正在重新应用设置...',
     'configuring-render': '正在配置 1080p 超清离屏渲染管线...'
@@ -458,9 +451,7 @@ const translations = {
     'btn-load-text': 'Load',
     'btn-upload-title': 'Upload local PLY file',
     'btn-upload-text': 'Upload PLY',
-    'btn-download-title': 'Download current PLY/Splat file',
-    'btn-download-text': 'Download',
-    'btn-spark-title': 'Toggle Spark 2.0 3DGS mode',
+    'btn-spark-title': 'Toggle 3D Reality mode',
     'btn-spark-text': '3D Reality',
     'btn-pointcloud-text': 'Particle Mode',
     'btn-gesture-title': 'Toggle hand gesture control',
@@ -557,21 +548,21 @@ const translations = {
     'remy-intro-content': 'Photos and videos are beautiful, but 3D imagery is even more precious. Remy is a 3D spatial capture App that preserves cherished memories for immersive replay. Built using Vibe Coding, this web app lets you import your Remy 3D captures to experiment with custom camera paths, glowing particle effects, and hand gestures. Let\'s make 3D captures a more playful digital medium. Have fun!',
     // Welcome Hint & Loading
     'welcome-title': '✨ Remy Custom Effects & Camera Tool',
-    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> or <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> share URL below to begin exploring in 3D Point Cloud and Spark 3DGS.',
+    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> or <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> share URL below to explore Particle Mode and 3D Reality.',
     'landing-url-placeholder': 'Paste Remy3D or Kiri Engine share URL here...',
     'loading-init': 'Loading...',
     'loading-downloading': 'Downloading 3DGS data, please wait...',
     'loading-parsing': 'Parsing PLY point cloud, please wait...',
     'loading-processing': 'Building GPU pipeline...',
-    'loading-spark': 'Loading Spark 2.0 3DGS rendering engine...',
+    'loading-spark': 'Loading and initializing the rendering engine...',
     // Alerts/Toasts
     'enter-valid-url': 'Please enter a Remy3D or Kiri Engine share URL',
     'enter-valid-url-2': 'Please enter a valid Remy3D or Kiri Engine share URL',
     'failed-parse-ply': 'Failed to parse PLY file: ',
-    'failed-load-spark': 'Failed to load Spark 2.0 engine: ',
+    'failed-load-spark': 'Failed to load rendering engine: ',
     'loaded-success-prefix': '',
     'loaded-success-suffix': ' elements loaded',
-    'spark-load-failed': 'Spark load failed: ',
+    'spark-load-failed': 'Rendering engine load failed: ',
     'gesture-tracking-active': '✋ Hand tracking active! Open/close hand to morph, two fists to scale model, Victory gesture (hold 0.7s) to toggle mode',
     'flight-preview-finished': 'Flight preview finished',
     'gesture-switched-spark': 'Gesture: Switched to 3D Reality',
@@ -590,10 +581,6 @@ const translations = {
     'previewing-camera-flight': 'Previewing camera flight path...',
     'video-exported-success': 'Video exported successfully!',
     'recording-camera-flight-toast': 'Recording 1080p MP4 camera flight...',
-    'converting-splat-ply': 'Converting splat data to standard PLY format...',
-    'download-success-prefix': 'Downloaded ',
-    'download-success-suffix': ' successfully',
-    'export-failed-download-raw': 'Export failed. Downloading raw splat file instead.',
     'drop-ply-only': 'Please drop a valid .ply file',
     'model-inverted': 'Model inverted vertically',
     'model-restored': 'Model orientation restored',
@@ -605,12 +592,12 @@ const translations = {
     'parsing-share': 'Parsing share page...',
     'downloading-prefix': 'Downloading: ',
     'downloading-suffix': '',
-    'loading-spark-engine': 'Loading Spark 2.0 Engine...',
+    'loading-spark-engine': 'Loading rendering engine...',
     'parsing-model-data': 'Parsing model data...',
     'creating-particles': 'Creating Particle Cloud...',
-    'loading-spark-3dgs': 'Loading Spark 3DGS...',
+    'loading-spark-3dgs': 'Loading 3D Reality...',
     'done': 'Done!',
-    'spark-load-prefix': 'Spark Load: ',
+    'spark-load-prefix': 'Rendering engine loading: ',
     'spark-load-suffix': '',
     'reapplying-settings': 'Re-applying settings...',
     'configuring-render': 'Configuring 1080p WebGL render...'
@@ -643,11 +630,6 @@ function applyTranslations(lang) {
     dom.btnUpload.title = dict['btn-upload-title'];
     const txt = dom.btnUpload.querySelector('.btn-text');
     if (txt) txt.textContent = dict['btn-upload-text'];
-  }
-  if (dom.btnDownload) {
-    dom.btnDownload.title = dict['btn-download-title'];
-    const txt = dom.btnDownload.querySelector('.btn-text');
-    if (txt) txt.textContent = dict['btn-download-text'];
   }
   if (dom.btnToggleSpark) {
     dom.btnToggleSpark.title = dict['btn-spark-title'];
@@ -907,13 +889,13 @@ function updateLoadingProgress(progress, text) {
     if (dict) {
       if (text === 'Parsing share page...') {
         translatedText = dict['parsing-share'];
-      } else if (text === 'Loading Spark 2.0 Engine...') {
+      } else if (text === 'Loading rendering engine...') {
         translatedText = dict['loading-spark-engine'];
       } else if (text === 'Parsing model data...') {
         translatedText = dict['parsing-model-data'];
       } else if (text === 'Creating Particle Cloud...') {
         translatedText = dict['creating-particles'];
-      } else if (text === 'Loading Spark 3DGS...') {
+      } else if (text === 'Loading 3D Reality...') {
         translatedText = dict['loading-spark-3dgs'];
       } else if (text === 'Done!') {
         translatedText = dict['done'];
@@ -922,8 +904,8 @@ function updateLoadingProgress(progress, text) {
         translatedText = dict['downloading-prefix'] + fileAndPercent + dict['downloading-suffix'];
       } else if (text.startsWith('Parsing: ')) {
         translatedText = dict['parsing-model-data'] + ' ' + text.replace('Parsing: ', '');
-      } else if (text.startsWith('Spark Load: ')) {
-        translatedText = dict['spark-load-prefix'] + text.replace('Spark Load: ', '') + dict['spark-load-suffix'];
+      } else if (text.startsWith('Rendering engine load: ')) {
+        translatedText = dict['spark-load-prefix'] + text.replace('Rendering engine load: ', '') + dict['spark-load-suffix'];
       }
     }
     dom.loadingText.textContent = translatedText;
@@ -951,10 +933,10 @@ function showToast(message, type = 'info', duration = 4000) {
         translatedMessage = dict['failed-parse-ply'] + message.replace('Failed to parse PLY file: ', '');
       } else if (message.startsWith('Failed to parse PLY: ')) {
         translatedMessage = dict['failed-parse-ply'] + message.replace('Failed to parse PLY: ', '');
-      } else if (message.startsWith('Failed to load Spark 2.0 engine: ')) {
-        translatedMessage = dict['failed-load-spark'] + message.replace('Failed to load Spark 2.0 engine: ', '');
-      } else if (message.startsWith('Spark load failed: ')) {
-        translatedMessage = dict['spark-load-failed'] + message.replace('Spark load failed: ', '');
+      } else if (message.startsWith('Failed to load rendering engine: ')) {
+        translatedMessage = dict['failed-load-spark'] + message.replace('Failed to load rendering engine: ', '');
+      } else if (message.startsWith('Rendering engine load failed: ')) {
+        translatedMessage = dict['spark-load-failed'] + message.replace('Rendering engine load failed: ', '');
       } else if (message.startsWith('Keyframe ') && message.endsWith(' recorded!')) {
         const num = message.replace('Keyframe ', '').replace(' recorded!', '');
         translatedMessage = dict['keyframe-recorded-prefix'] + num + dict['keyframe-recorded-suffix'];
@@ -964,9 +946,6 @@ function showToast(message, type = 'info', duration = 4000) {
         const parts = message.split('—');
         const num = parts[1].replace('elements loaded', '').trim();
         translatedMessage = parts[0] + '— ' + num + dict['loaded-success-suffix'];
-      } else if (message.startsWith('Downloaded ') && message.endsWith(' successfully')) {
-        const file = message.replace('Downloaded ', '').replace(' successfully', '');
-        translatedMessage = dict['download-success-prefix'] + file + dict['download-success-suffix'];
       } else if (message.startsWith('Error applying settings: ')) {
         translatedMessage = dict['error-applying-settings'] + message.replace('Error applying settings: ', '');
       }
@@ -1022,7 +1001,7 @@ async function loadFromUrl() {
       }
     }
     if (!buffer) {
-      throw new Error('Could not download any PLY file. Try uploading manually.');
+      throw new Error('Could not load model data from this share link.');
     }
     // Step 3: Parse and create particles
     await processBuffer(buffer, name, true);
@@ -1030,7 +1009,9 @@ async function loadFromUrl() {
     hideLoading();
     console.error('Load from URL failed:', error);
     showToast(
-      `Loading failed: ${error.message}. Try downloading the PLY file and uploading it directly.`,
+      state.lang === 'zh'
+        ? `模型加载失败：${error.message} 请检查分享链接后重试。`
+        : `Loading failed: ${error.message} Please verify the share link and try again.`,
       'error',
       6000
     );
@@ -1090,15 +1071,15 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   disposeModel();
   // 1. Ensure Spark 2.0 Engine is dynamically loaded on demand (prevents slow page loading)
   if (!state.sparkRenderer) {
-    updateLoadingProgress(0.72, 'Loading Spark 2.0 Engine...');
+    updateLoadingProgress(0.72, 'Loading rendering engine...');
     try {
       const { SparkRenderer, SplatMesh } = await import('@sparkjsdev/spark');
       state.sparkRenderer = new SparkRenderer({ renderer: state.renderer });
       state.scene.add(state.sparkRenderer);
       state.SplatMeshClass = SplatMesh;
     } catch (err) {
-      console.error('Failed to load Spark 2.0 dynamically:', err);
-      showToast(`Failed to load Spark 2.0 engine: ${err.message}`, 'error', 6000);
+      console.error('Failed to load rendering engine dynamically:', err);
+      showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
       return;
     }
   }
@@ -1170,7 +1151,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.modelScale = scale;
   state.modelCenter = center;
   // 4. Create and align Spark SplatMesh
-  updateLoadingProgress(0.92, 'Loading Spark 3DGS...');
+  updateLoadingProgress(0.92, 'Loading 3D Reality...');
   try {
     const currentSplatMesh = new state.SplatMeshClass({
       fileBytes: buffer.slice(0), // 3DGS mode keeps all contents (no cropping)
@@ -1222,9 +1203,6 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
         state.isModelLoaded = true;
         state.rendererVisibility.particles = null;
         state.rendererVisibility.spark = null;
-        if (dom.btnDownload) {
-          dom.btnDownload.disabled = false;
-        }
         // Show stats and UI
         dom.statsPanel.classList.add('visible');
         updateRendererUI();
@@ -1240,7 +1218,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
       },
       onProgress: (event) => {
         if (event.total > 0) {
-          updateLoadingProgress(0.92 + (event.loaded / event.total) * 0.07, `Spark Load: ${Math.round((event.loaded / event.total) * 100)}%`);
+          updateLoadingProgress(0.92 + (event.loaded / event.total) * 0.07, `Rendering engine load: ${Math.round((event.loaded / event.total) * 100)}%`);
         }
       }
     });
@@ -1248,7 +1226,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   } catch (err) {
     hideLoading();
     console.error(err);
-    showToast(`Spark load failed: ${err.message}`, 'error', 6000);
+    showToast(`Rendering engine load failed: ${err.message}`, 'error', 6000);
   }
 }
 // ============================================================
@@ -3095,69 +3073,6 @@ function setupEventListeners() {
   dom.fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) loadFromFile(file);
-  });
-  // Download PLY/Splat file
-  dom.btnDownload.addEventListener('click', () => {
-    if (!state.lastLoadedBuffer) return;
-    
-    // Detect if it is a compressed splat file
-    const headerText = new TextDecoder().decode(new Uint8Array(state.lastLoadedBuffer.slice(0, 1024)));
-    const isSplat = headerText.includes('element chunk');
-    
-    if (isSplat) {
-      showToast('Converting splat data to standard PLY format...', 'info', 2000);
-      
-      // We parse the entire splat file in memory (no cropping, maximum resolution) to export it
-      try {
-        const data = parsePLY(state.lastLoadedBuffer, null, {
-          maxParticles: 2000000, // export all particles
-          cropOutliers: false,   // export complete scene
-          minOpacity: 0.0        // do not filter out low-opacity particles
-        });
-        
-        const plyBuffer = exportToPLY(data);
-        const filename = `${state.lastLoadedName}.ply`;
-        
-        const blob = new Blob([plyBuffer], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        showToast(`Downloaded ${filename} successfully`, 'success');
-      } catch (err) {
-        console.error('Export to PLY failed:', err);
-        showToast(`Export failed: ${err.message}. Downloading raw splat file instead.`, 'error');
-        
-        // Fallback to downloading raw splat file
-        const filename = `${state.lastLoadedName}.splat`;
-        const blob = new Blob([state.lastLoadedBuffer], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
-    } else {
-      // Standard PLY - download raw
-      const filename = `${state.lastLoadedName}.ply`;
-      const blob = new Blob([state.lastLoadedBuffer], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast(`Downloaded ${filename} successfully`, 'success');
-    }
   });
   // Gesture toggle
   dom.btnGesture.addEventListener('click', toggleGestureControl);
