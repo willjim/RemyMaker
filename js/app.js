@@ -13,6 +13,50 @@ import { LandingBackground } from './landingBackground.js';
 
 const MAX_INTERACTIVE_PIXEL_RATIO = 1.5;
 const RENDERER_VISIBILITY_EPSILON = 0.002;
+
+function detectTabletDevice({
+  userAgent = navigator.userAgent || '',
+  platform = navigator.platform || '',
+  maxTouchPoints = navigator.maxTouchPoints || 0,
+  viewportWidth = window.innerWidth,
+  viewportHeight = window.innerHeight,
+  coarsePointer = window.matchMedia('(pointer: coarse)').matches,
+} = {}) {
+  const isModernIPad = platform === 'MacIntel' && maxTouchPoints > 1;
+  const isIPad = /iPad/i.test(userAgent) || isModernIPad;
+  const isAndroidTablet = /Android/i.test(userAgent) && !/Mobile/i.test(userAgent);
+  const isKnownTablet = /Tablet|PlayBook|Silk|Kindle|Nexus 7|Nexus 9|Pixel C|SM-T\d|Lenovo TB-/i.test(userAgent);
+  const shortViewportSide = Math.min(viewportWidth, viewportHeight);
+  const longViewportSide = Math.max(viewportWidth, viewportHeight);
+  const isTabletSizedTouch = coarsePointer && shortViewportSide >= 600 && longViewportSide >= 700;
+  return isIPad || isAndroidTablet || isKnownTablet || isTabletSizedTouch;
+}
+
+const IS_TABLET_DEVICE = detectTabletDevice();
+
+function applyTabletDesktopLayout() {
+  if (!IS_TABLET_DEVICE) return;
+  document.documentElement.classList.add('tablet-desktop-layout');
+  document.body.classList.add('tablet-desktop-layout');
+  const mediaRuleType = globalThis.CSSRule?.MEDIA_RULE ?? 4;
+
+  // Mobile rules intentionally include `(pointer: coarse)` for phones in
+  // landscape. Disable only those coarse-pointer rule groups on tablets so
+  // the regular responsive desktop toolbar and panels remain active.
+  for (const styleSheet of Array.from(document.styleSheets)) {
+    let rules;
+    try {
+      rules = styleSheet.cssRules;
+    } catch (_) {
+      continue;
+    }
+    for (const rule of Array.from(rules || [])) {
+      if (rule.type === mediaRuleType && rule.media.mediaText.includes('pointer: coarse')) {
+        rule.media.mediaText = 'not all';
+      }
+    }
+  }
+}
 // ============================================================
 // App State
 // ============================================================
@@ -327,6 +371,7 @@ const translations = {
     'preset-rhombic': '13. 菱形钻石轨迹',
     'preset-heart': '14. 3D 心形循环飞行',
     'preset-turbulence': '15. 乱噪波流体飞行',
+    'preset-inceptionPush': '16. Inception 缓慢推进旋转',
     'btn-add-keyframe': '添加关键帧',
     'btn-clear-keyframes': '清空',
     'btn-preview-path': '预览',
@@ -485,6 +530,7 @@ const translations = {
     'preset-rhombic': '13. Rhombic Diamond Path',
     'preset-heart': '14. 3D Cardiomorphic Loop',
     'preset-turbulence': '15. Turbulence Noise Flight',
+    'preset-inceptionPush': '16. Inception Push & Roll',
     'btn-add-keyframe': 'Add Keyframe',
     'btn-clear-keyframes': 'Clear',
     'btn-preview-path': 'Preview',
@@ -707,6 +753,7 @@ function applyTranslations(lang) {
       dom.selectPresetFlight.options[13].textContent = dict['preset-rhombic'];
       dom.selectPresetFlight.options[14].textContent = dict['preset-heart'];
       dom.selectPresetFlight.options[15].textContent = dict['preset-turbulence'];
+      dom.selectPresetFlight.options[16].textContent = dict['preset-inceptionPush'];
     }
     
     if (dom.btnAddKeyframe) {
@@ -1992,6 +2039,7 @@ function applyPresetFlight(presetName, t) {
   let r = r0;
   let p = phi0;
   let th = theta0 + phiVal; // default azimuthal rotation around target
+  let cameraRoll = 0;
   
   // Reset camera FOV to original before computing
   state.camera.fov = state.settings.originalFov;
@@ -2114,6 +2162,18 @@ function applyPresetFlight(presetName, t) {
       p = phi0 + 0.1 * Math.sin(2 * phiVal) + 0.05 * Math.cos(phiVal);
       th = theta0 + phiVal + 0.15 * Math.sin(3 * phiVal);
       break;
+
+    case 'inceptionPush': {
+      // Inception-style dolly: ease forward along the current line of sight while
+      // the image plane slowly rolls. Keeping theta/phi fixed avoids turning this
+      // into another orbit and preserves the user's chosen composition.
+      const eased = t * t * (3 - 2 * t);
+      r = r0 * (1.0 - 0.5 * eased);
+      p = phi0;
+      th = theta0;
+      cameraRoll = 2 * Math.PI * eased;
+      break;
+    }
       
     default:
       return;
@@ -2128,6 +2188,7 @@ function applyPresetFlight(presetName, t) {
   
   state.camera.position.copy(cameraPos);
   state.camera.lookAt(focusPoint);
+  if (cameraRoll !== 0) state.camera.rotateZ(cameraRoll);
   
   // 5. Dynamic Min/Max camera space near/far clipping boundaries (optimized to avoid redundant projection matrix re-computations)
   const d = cameraPos.distanceTo(focusPoint);
@@ -2344,7 +2405,7 @@ function startPreviewFlight() {
 }
 
 function isMobileViewport() {
-  return window.matchMedia('(max-width: 600px), (pointer: coarse)').matches;
+  return !IS_TABLET_DEVICE && window.matchMedia('(max-width: 600px), (pointer: coarse)').matches;
 }
 
 function selectRecordingMimeType() {
@@ -3553,6 +3614,7 @@ function setupEventListeners() {
 // Initialize App
 // ============================================================
 function init() {
+  applyTabletDesktopLayout();
   cacheDom();
   syncResponsiveControlLayout();
   applyTranslations(state.lang);

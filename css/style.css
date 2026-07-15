@@ -669,6 +669,8 @@ body.compositing-mode-active .composition-cancel-button:disabled {
   display: flex;
   align-items: center;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
@@ -686,14 +688,15 @@ body.compositing-mode-active .composition-cancel-button:disabled {
 }
 
 .landing-input-box input {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
   background: transparent;
   border: none;
   outline: none;
   padding: 10px 14px;
   color: var(--text-primary);
   font-size: 14px;
-  width: 100%;
 }
 
 .landing-input-box input::placeholder {
@@ -702,6 +705,7 @@ body.compositing-mode-active .composition-cancel-button:disabled {
 
 .landing-input-box button {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 10px 20px;
@@ -839,7 +843,12 @@ body.compositing-mode-active .composition-cancel-button:disabled {
   }
 }
 
-@media (max-width: 900px), (pointer: coarse) {
+@media (max-width: 600px), (pointer: coarse) {
+  .welcome-hint {
+    width: calc(100vw - 28px);
+    max-width: none;
+  }
+
   .toolbar {
     position: fixed;
     top: auto;
@@ -1077,8 +1086,9 @@ body.compositing-mode-active .composition-cancel-button:disabled {
   }
 
   .landing-card {
-    width: calc(100vw - 28px);
-    padding: 24px 16px;
+    width: 100%;
+    padding: 24px 0;
+    margin-inline: auto;
     box-sizing: border-box;
   }
 
@@ -1101,7 +1111,7 @@ body.compositing-mode-active .composition-cancel-button:disabled {
   }
 
   .landing-input-box input {
-    width: 100%;
+    width: auto;
     min-height: 44px;
     min-width: 0;
     padding-right: 4px;
@@ -1585,12 +1595,14 @@ body.recording-mode-active .progress-control {
   position: absolute;
   bottom: 24px;
   right: 24px;
-  width: 320px;
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(190px, calc(100dvh - 48px));
+  overflow: auto;
   background: var(--bg-glass);
   backdrop-filter: blur(20px);
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-lg);
-  padding: 16px;
+  padding: 14px;
   box-sizing: border-box;
   z-index: 105;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -1697,7 +1709,7 @@ body.recording-mode-active .progress-control {
 }
 
 /* Mobile editing workspace: compact, model-first controls inspired by timeline editors. */
-@media (max-width: 900px), (pointer: coarse) {
+@media (max-width: 600px), (pointer: coarse) {
   #btn-guide {
     display: none !important;
   }
