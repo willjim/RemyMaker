@@ -4,19 +4,18 @@ RemyMaker 是一款面向桌面端与手机端的 3D Gaussian Splatting 特效�
 
 ## 在线体验
 
-**Demo：[https://remymaker.pages.dev/](https://remymaker.pages.dev/)**
+**Demo：[点击前往](https://remymaker.pages.dev/)**
 
 建议使用最新版 Chrome、Edge 或 Safari。视频导出能力和最终格式取决于浏览器对 MediaRecorder、MP4 与 WebM 的支持。
 
 ## 功能亮点
 
 - 粒子模式与 3D 实景平滑切换
-- 粒子大小、亮度、密度、透明度、羽化与背景裁剪调节
-- 9 种粒子消散与重组特效，15 套镜头运镜预设，包括环绕、8 字、螺旋与 Dolly Zoom
+- 粒子大小、亮度、密度、背景裁剪调节
+- 9 种粒子消散重组特效，16 套镜头运镜预设，包括环绕、Dolly Zoom、盗梦空间运镜等
 - 支持选择 2–8 个关键帧，进行无限制的自定义运镜
 - 运镜预览、粒子聚合与视频导出组合工作流
-- 桌面端 1080p、60 FPS、20 Mbps 视频导出
-- 手机端按屏幕比例导出 1080p、30 FPS、15 Mbps 视频
+- 1080p、60 FPS 视频导出
 - 支持中英文界面与响应式手机布局
 - 桌面端支持 MediaPipe 手势控制
 

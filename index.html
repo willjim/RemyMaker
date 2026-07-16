@@ -6,7 +6,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.13">
+  <link rel="stylesheet" href="css/style.css?v=3.14">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -50,16 +50,16 @@
       <div class="toolbar-divider" id="toolbar-url-divider"></div>
       
       <!-- Upload Button (Hidden) -->
-      <button id="btn-upload" class="btn btn-secondary" title="Upload local PLY file" style="display: none;">
+      <button id="btn-upload" class="btn btn-secondary" title="Upload local PLY or Splat file" style="display: none;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
           <line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <span class="btn-text">Upload PLY</span>
+        <span class="btn-text">Upload Model</span>
       </button>
       <!-- Hidden File Input -->
-      <input type="file" id="file-input" class="file-input-hidden" accept=".ply">
+      <input type="file" id="file-input" class="file-input-hidden" accept=".ply,.splat">
       <!-- 1. 点云模式 / Spark Mode Toggle -->
       <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle 3D Reality mode">
         <span class="btn-icon-emoji">✨</span><span class="btn-text">3D Reality</span>
@@ -129,6 +129,11 @@
           <option value="turbulence">15. Turbulence Noise Flight</option>
           <option value="inceptionPush">16. Inception Push & Roll</option>
         </select>
+      </div>
+
+      <div id="desktop-camera-scatter-item" class="setting-item camera-option-item desktop-camera-scatter-item">
+        <label for="camera-scatter-effect">Scatter Effect</label>
+        <select id="camera-scatter-effect" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer; margin-top: 5px;"></select>
       </div>
       
       <div class="keyframe-list" id="keyframe-list">
@@ -385,6 +390,6 @@
     <div class="toast-container" id="toast-container"></div>
   </div>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.33"></script>
+  <script type="module" src="js/app.js?v=3.36"></script>
 </body>
 </html>

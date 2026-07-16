@@ -4,7 +4,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { parsePLY } from './plyParser.js';
+import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=3.5';
 import { GestureControl } from './gestureControl.js';
 import { extractPLYFromUrl, downloadPLY } from './remyLoader.js';
@@ -175,6 +175,8 @@ function cacheDom() {
     settingSplatScale: document.getElementById('setting-splat-scale'),
     settingSplatScaleVal: document.getElementById('setting-splat-scale-val'),
     settingScatterEffect: document.getElementById('setting-scatter-effect'),
+    cameraScatterEffect: document.getElementById('camera-scatter-effect'),
+    desktopCameraScatterItem: document.getElementById('desktop-camera-scatter-item'),
 
     loadingOverlay: document.getElementById('loading-overlay'),
     loadingText: document.getElementById('loading-text'),
@@ -301,6 +303,15 @@ function syncResponsiveControlLayout() {
   }
 }
 
+function initializeScatterEffectControls() {
+  if (!dom.settingScatterEffect || !dom.cameraScatterEffect) return;
+  if (dom.cameraScatterEffect.options.length === 0) {
+    const clonedOptions = Array.from(dom.settingScatterEffect.options, option => option.cloneNode(true));
+    dom.cameraScatterEffect.append(...clonedOptions);
+  }
+  dom.cameraScatterEffect.value = dom.settingScatterEffect.value;
+}
+
 function syncModelRendererVisibility() {
   if (!state.isModelLoaded) return;
   const showParticles = state.splatInterpolation < (1.0 - RENDERER_VISIBILITY_EPSILON);
@@ -335,8 +346,8 @@ const translations = {
     'url-placeholder': '粘贴 Remy3D 或 Kiri Engine 分享链接...',
     'btn-load-title': '从链接加载模型',
     'btn-load-text': '加载',
-    'btn-upload-title': '上传本地 PLY 文件',
-    'btn-upload-text': '上传 PLY',
+    'btn-upload-title': '上传本地 PLY 或 Splat 文件',
+    'btn-upload-text': '上传模型',
     'btn-spark-title': '切换 3D 实景模式',
     'btn-spark-text': '3D实景',
     'btn-pointcloud-text': '粒子模式',
@@ -371,7 +382,7 @@ const translations = {
     'preset-rhombic': '13. 菱形钻石轨迹',
     'preset-heart': '14. 3D 心形循环飞行',
     'preset-turbulence': '15. 乱噪波流体飞行',
-    'preset-inceptionPush': '16. Inception 缓慢推进旋转',
+    'preset-inceptionPush': '16. 盗梦空间缓慢推进旋转',
     'btn-add-keyframe': '添加关键帧',
     'btn-clear-keyframes': '清空',
     'btn-preview-path': '预览',
@@ -382,6 +393,7 @@ const translations = {
     'compositing-video': '正在逐帧合成 1080p 视频',
     'finalizing-video': '正在封装 MP4 视频',
     'fallback-recording': '逐帧合成不可用，正在切换到实时录制',
+    'composition-failed-no-fallback': '逐帧视频合成失败，未切换到实时录制',
     // Rendering Settings
     'settings-title': '渲染设置',
     'label-max-particles': '最大粒子数 (点云模式)',
@@ -468,7 +480,7 @@ const translations = {
     'previewing-camera-flight': '正在预览镜头自定义轨迹飞行...',
     'video-exported-success': 'MP4 运镜视频成功导出并已开始下载！',
     'recording-camera-flight-toast': '正在后台进行离屏 1080p 超清运镜录制中，请稍候...',
-    'drop-ply-only': '请拖放有效的 .ply 格式文件',
+    'drop-ply-only': '请拖放有效的 .ply 或 .splat 格式文件',
     'model-inverted': '模型方向已垂直翻转 (纠正上下颠倒)',
     'model-restored': '已恢复模型的默认方向',
     'reprocessing-settings': '正在以新的参数重新解析并过滤粒子...',
@@ -494,8 +506,8 @@ const translations = {
     'url-placeholder': 'Paste Remy3D or Kiri Engine share URL...',
     'btn-load-title': 'Load model from URL',
     'btn-load-text': 'Load',
-    'btn-upload-title': 'Upload local PLY file',
-    'btn-upload-text': 'Upload PLY',
+    'btn-upload-title': 'Upload local PLY or Splat file',
+    'btn-upload-text': 'Upload Model',
     'btn-spark-title': 'Toggle 3D Reality mode',
     'btn-spark-text': '3D Reality',
     'btn-pointcloud-text': 'Particle Mode',
@@ -541,6 +553,7 @@ const translations = {
     'compositing-video': 'Compositing 1080p video frame by frame',
     'finalizing-video': 'Finalizing MP4 video',
     'fallback-recording': 'Frame composition unavailable; switching to live recording',
+    'composition-failed-no-fallback': 'Frame composition failed; live recording was not started',
     // Rendering Settings
     'settings-title': 'Rendering Settings',
     'label-max-particles': 'Max Particles (Particle Cloud)',
@@ -627,7 +640,7 @@ const translations = {
     'previewing-camera-flight': 'Previewing camera flight path...',
     'video-exported-success': 'Video exported successfully!',
     'recording-camera-flight-toast': 'Recording 1080p MP4 camera flight...',
-    'drop-ply-only': 'Please drop a valid .ply file',
+    'drop-ply-only': 'Please drop a valid .ply or .splat file',
     'model-inverted': 'Model inverted vertically',
     'model-restored': 'Model orientation restored',
     'reprocessing-settings': 'Re-processing with new settings...',
@@ -807,6 +820,8 @@ function applyTranslations(lang) {
     if (labelSplatScale) labelSplatScale.textContent = dict['label-splat-scale'];
     const labelScatter = dom.scatterEffectItem?.querySelector('label[for="setting-scatter-effect"]');
     if (labelScatter) labelScatter.textContent = dict['label-scatter-effect'];
+    const cameraScatterLabel = dom.desktopCameraScatterItem?.querySelector('label[for="camera-scatter-effect"]');
+    if (cameraScatterLabel) cameraScatterLabel.textContent = dict['label-scatter-effect'];
 
     const mobileTags = document.querySelectorAll('.mobile-setting-tag');
     const tagLabels = lang === 'zh'
@@ -823,12 +838,13 @@ function applyTranslations(lang) {
       dom.settingMaxParticles.options[3].textContent = dict['opt-particles-500k'];
     }
 
-    if (dom.settingScatterEffect) {
-      for (let i = 0; i < dom.settingScatterEffect.options.length; i++) {
-        const opt = dom.settingScatterEffect.options[i];
-        const val = opt.value;
-        if (dict[`effect-${val}`]) {
-          opt.textContent = dict[`effect-${val}`];
+    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
+      if (effectSelect) {
+        for (const opt of effectSelect.options) {
+          const val = opt.value;
+          if (dict[`effect-${val}`]) {
+            opt.textContent = dict[`effect-${val}`];
+          }
         }
       }
     }
@@ -1072,11 +1088,16 @@ async function loadFromFile(file) {
   showLoading(`Loading: ${file.name}`);
   try {
     const buffer = await file.arrayBuffer();
-    await processBuffer(buffer, file.name.replace(/\.ply$/i, ''), true);
+    await processBuffer(buffer, file.name.replace(/\.(?:ply|splat)$/i, ''), true);
   } catch (error) {
     hideLoading();
     console.error('Load from file failed:', error);
-    showToast(`Failed to parse PLY file: ${error.message}`, 'error');
+    showToast(
+      state.lang === 'zh'
+        ? `模型文件解析失败：${error.message}`
+        : `Failed to parse model file: ${error.message}`,
+      'error'
+    );
   }
 }
 /**
@@ -1100,7 +1121,7 @@ function disposeModel() {
   state.modelCenter = null;
 }
 /**
- * Process a PLY buffer: parse and load BOTH particle cloud and Spark 2.0 splats.
+ * Process a PLY or standard Splat buffer and load both available render modes.
  */
 async function processBuffer(buffer, name, isFreshLoad = false) {
   // Cache raw buffer for quick reloading on settings changes
@@ -1139,7 +1160,9 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   await new Promise(resolve => setTimeout(resolve, 50));
   let data;
   try {
-    data = parsePLY(buffer, (p) => {
+    const header = new TextDecoder('ascii').decode(new Uint8Array(buffer, 0, Math.min(3, buffer.byteLength)));
+    const parseModel = header === 'ply' ? parsePLY : parseSplat;
+    data = parseModel(buffer, (p) => {
       updateLoadingProgress(0.78 + p * 0.1, `Parsing: ${Math.round(p * 100)}%`);
     }, {
       maxParticles: state.settings.maxParticles,
@@ -1168,7 +1191,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   } catch (err) {
     hideLoading();
     console.error(err);
-    showToast(`Failed to parse PLY: ${err.message}`, 'error');
+    showToast(`Failed to parse model data: ${err.message}`, 'error');
     return;
   }
   // 3. Create Particle System
@@ -2527,6 +2550,10 @@ const COMPOSITION_FRAME_TIMEOUT_MS = 15_000;
 const COMPOSITION_FINALIZE_TIMEOUT_MS = 30_000;
 const COMPOSITION_CANCEL_TIMEOUT_MS = 600;
 
+function supportsWebCodecsComposition() {
+  return typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined';
+}
+
 class ExportCancelledError extends Error {
   constructor() {
     super('Video composition cancelled');
@@ -2568,21 +2595,53 @@ function throwIfCompositionCancelled() {
 function waitForCompositionTask(task, timeoutMs, label) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timeout = null;
+    let cancelPoll = null;
+    let visibleStartedAt = 0;
+    let remainingTimeoutMs = timeoutMs;
+
+    const pauseTimeout = () => {
+      if (timeout === null) return;
+      clearTimeout(timeout);
+      timeout = null;
+      remainingTimeoutMs = Math.max(0, remainingTimeoutMs - (performance.now() - visibleStartedAt));
+    };
+
+    const resumeTimeout = () => {
+      if (settled || document.hidden || timeout !== null) return;
+      if (remainingTimeoutMs <= 0) {
+        finish(reject, new Error(`${label} timed out after ${timeoutMs}ms of active page time`));
+        return;
+      }
+      visibleStartedAt = performance.now();
+      timeout = setTimeout(() => {
+        timeout = null;
+        remainingTimeoutMs = 0;
+        finish(reject, new Error(`${label} timed out after ${timeoutMs}ms of active page time`));
+      }, remainingTimeoutMs);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) pauseTimeout();
+      else resumeTimeout();
+    };
+
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
-      clearInterval(cancelPoll);
-      clearTimeout(timeout);
+      pauseTimeout();
+      if (cancelPoll !== null) clearInterval(cancelPoll);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       callback(value);
     };
-    const cancelPoll = setInterval(() => {
+
+    cancelPoll = setInterval(() => {
       if (state.compositionCancelRequested) {
         finish(reject, new ExportCancelledError());
       }
     }, COMPOSITION_POLL_INTERVAL_MS);
-    const timeout = setTimeout(() => {
-      finish(reject, new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    resumeTimeout();
 
     Promise.resolve(task).then(
       value => finish(resolve, value),
@@ -2749,6 +2808,19 @@ function restoreAfterExport(session) {
   hideLoading();
 }
 
+function restoreCompositionPreviewControls(session) {
+  restoreAfterExport(session);
+  state.previewStart = session.restorePreviewStart;
+  state.previewInitialRenderer = session.initialRenderer;
+  state.previewRendererTimeline = session.rendererTimeline.map(event => ({ ...event }));
+  state.previewActive = false;
+  state.previewCompleted = true;
+  state.previewTime = session.returnToPreview ? session.restorePreviewTime : 0;
+  state.controls.enabled = false;
+  setPreviewControlsActive(true);
+  updatePreviewStopButton();
+}
+
 function finishExportBlob(blob, filename, session, type = 'video/mp4') {
   restoreAfterExport(session);
   if (!blob?.size) {
@@ -2773,7 +2845,7 @@ function finishExportBlob(blob, filename, session, type = 'video/mp4') {
 
 async function compositeVideoWithWebCodecs(session) {
   throwIfCompositionCancelled();
-  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+  if (!supportsWebCodecsComposition()) {
     throw new Error('WebCodecs VideoEncoder / VideoFrame unavailable');
   }
 
@@ -3036,6 +3108,7 @@ async function exportPathVideo({ fromPreview = false } = {}) {
     restorePreviewTime,
     restorePreviewStart: savedPreviewStart,
   };
+  const useWebCodecs = supportsWebCodecsComposition();
 
   state.controls.enabled = false;
   collapseCameraPathPanel();
@@ -3045,14 +3118,28 @@ async function exportPathVideo({ fromPreview = false } = {}) {
   state.exportPreparing = true;
   setPreviewExportBusy(true);
   state.compositionCancelRequested = false;
-  setCompositionControlsActive(true);
-  showLoading(t('compositing-video'));
-  updateLoadingProgress(0.01, `${t('compositing-video')} · 0%`);
+  setCompositionControlsActive(useWebCodecs);
+  showLoading(useWebCodecs ? t('compositing-video') : t('fallback-recording'));
+  updateLoadingProgress(
+    useWebCodecs ? 0.01 : 0,
+    useWebCodecs ? `${t('compositing-video')} · 0%` : t('fallback-recording')
+  );
 
   try {
     await new Promise(resolve => setTimeout(resolve, 100));
     configureExportCanvas(session);
     resetExportPlayback(session);
+
+    // Real-time recording is only a compatibility path for browsers that do
+    // not expose WebCodecs at all. Once WebCodecs is selected, an encoder or
+    // background-tab error must not silently start a wall-clock recording.
+    if (!useWebCodecs) {
+      setCompositionControlsActive(false);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      startMediaRecorderFallback(session);
+      return;
+    }
+
     pauseRegularAnimationLoop();
     const blob = await compositeVideoWithWebCodecs(session);
     const filename = `${state.lastLoadedName || 'splat'}_render.mp4`;
@@ -3061,38 +3148,24 @@ async function exportPathVideo({ fromPreview = false } = {}) {
     } finally {
       resumeRegularAnimationLoop();
     }
-  } catch (webCodecsError) {
-    console.warn('WebCodecs composition failed; falling back to MediaRecorder:', webCodecsError);
+  } catch (exportError) {
     resumeRegularAnimationLoop();
-    if (webCodecsError?.name === 'ExportCancelledError' || state.compositionCancelRequested) {
-      restoreAfterExport(session);
-      state.previewStart = session.restorePreviewStart;
-      state.previewInitialRenderer = session.initialRenderer;
-      state.previewRendererTimeline = session.rendererTimeline.map(event => ({ ...event }));
-      state.previewActive = false;
-      state.previewCompleted = true;
-      state.previewTime = session.returnToPreview ? session.restorePreviewTime : 0;
-      state.controls.enabled = false;
-      setPreviewControlsActive(true);
-      updatePreviewStopButton();
+    const cancelled = exportError?.name === 'ExportCancelledError' || state.compositionCancelRequested;
+    restoreCompositionPreviewControls(session);
+    if (cancelled) {
       showToast(state.lang === 'zh' ? '已停止视频合成' : 'Video composition stopped', 'info', 3000);
       return;
     }
-    setCompositionControlsActive(false);
-    try {
-      state.exportPreparing = true;
-      updateLoadingProgress(0, t('fallback-recording'));
-      await new Promise(resolve => setTimeout(resolve, 120));
-      startMediaRecorderFallback(session);
-    } catch (fallbackError) {
-      restoreAfterExport(session);
-      showToast(
-        `${state.lang === 'zh' ? '视频导出失败' : 'Video export failed'}: ${fallbackError.message}`,
-        'error',
-        7000
-      );
-      console.error('Both WebCodecs and MediaRecorder export failed:', fallbackError);
-    }
+    const errorPrefix = useWebCodecs
+      ? t('composition-failed-no-fallback')
+      : (state.lang === 'zh' ? '视频导出失败' : 'Video export failed');
+    showToast(`${errorPrefix}: ${exportError.message}`, 'error', 7000);
+    console.error(
+      useWebCodecs
+        ? 'WebCodecs composition failed without starting MediaRecorder:'
+        : 'MediaRecorder compatibility export failed:',
+      exportError
+    );
   }
 }
 // ============================================================
@@ -3321,10 +3394,10 @@ function setupEventListeners() {
   document.addEventListener('drop', (e) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
-    if (file && file.name.toLowerCase().endsWith('.ply')) {
+    if (file && /\.(?:ply|splat)$/i.test(file.name)) {
       loadFromFile(file);
     } else if (file) {
-      showToast('Please drop a .ply file', 'error');
+      showToast(t('drop-ply-only'), 'error');
     }
   });
   // Paste URL
@@ -3539,10 +3612,13 @@ function setupEventListeners() {
     }
   });
   
-  // Scatter Effect change handler
-  dom.settingScatterEffect.addEventListener('change', (e) => {
+  // Both desktop scatter-effect menus share one state and preview action.
+  const applyScatterEffectSelection = (value) => {
+    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
+      if (effectSelect && effectSelect.value !== value) effectSelect.value = value;
+    }
     state.cancelScatterAnimation?.();
-    if (e.target.value === 'none') {
+    if (value === 'none') {
       state.settings.particleEffectEnabled = false;
       state.particleSystem?.setProgressImmediate(0);
       dom.progressSlider.value = 0;
@@ -3550,7 +3626,7 @@ function setupEventListeners() {
       return;
     }
     state.settings.particleEffectEnabled = true;
-    const effectIndex = parseFloat(e.target.value);
+    const effectIndex = parseFloat(value);
     state.settings.scatterEffect = effectIndex;
     if (state.isModelLoaded && state.particleSystem) {
       state.particleSystem.setScatterEffect(effectIndex);
@@ -3561,7 +3637,9 @@ function setupEventListeners() {
       scatterDirection = 'forward';
       playFullDemoScatterAnimation();
     }
-  });
+  };
+  dom.settingScatterEffect.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
+  dom.cameraScatterEffect?.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
   // Crop factor range slider - continuous input for display, change event for reload
   if (dom.settingCropFactor) {
     dom.settingCropFactor.addEventListener('input', (e) => {
@@ -3616,6 +3694,7 @@ function setupEventListeners() {
 function init() {
   applyTabletDesktopLayout();
   cacheDom();
+  initializeScatterEffectControls();
   syncResponsiveControlLayout();
   applyTranslations(state.lang);
   initThreeJS();

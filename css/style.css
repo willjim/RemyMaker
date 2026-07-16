@@ -844,6 +844,10 @@ body.compositing-mode-active .composition-cancel-button:disabled {
 }
 
 @media (max-width: 600px), (pointer: coarse) {
+  .desktop-camera-scatter-item {
+    display: none !important;
+  }
+
   .welcome-hint {
     width: calc(100vw - 28px);
     max-width: none;
@@ -1325,6 +1329,11 @@ body.compositing-mode-active .composition-cancel-button:disabled {
 #desktop-flight-anchor,
 #desktop-scatter-anchor {
   display: none;
+}
+
+.desktop-camera-scatter-item {
+  display: flex;
+  flex-direction: column;
 }
 
 /* ========================================

@@ -1,7 +1,7 @@
 /**
- * PLY Binary Parser
- * Supports standard PLY (uint8 colors) and Gaussian Splatting PLY (SH DC coefficients).
- * Extracts vertex positions (x, y, z) and colors.
+ * PLY and Splat binary parsers.
+ * Supports standard PLY, Gaussian Splatting PLY and row-based .splat files.
+ * Extracts vertex positions and colors for particle rendering.
  */
 const SH_C0 = 0.28209479177387814;
 const MAX_PARTICLES = 500000;
@@ -42,6 +42,123 @@ export function parsePLY(buffer, onProgress, options = {}) {
     data.recommendedCropFactor = options.cropFactor !== undefined ? options.cropFactor : 2.5;
   }
   return data;
+}
+
+/**
+ * Parse the common row-based .splat format used by Gaussian Splat viewers.
+ * Each little-endian 32-byte row stores position, scale, RGBA and quaternion.
+ * Particle mode only needs position and RGB; the original buffer is passed
+ * separately to the 3DGS renderer so its scale and rotation remain intact.
+ */
+export function parseSplat(buffer, onProgress, options = {}) {
+  const rowSize = 32;
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < rowSize || buffer.byteLength % rowSize !== 0) {
+    throw new Error('Invalid Splat file: expected 32-byte Gaussian records');
+  }
+
+  const {
+    maxParticles = MAX_PARTICLES,
+    cropOutliers = true,
+    cropFactor = 1.0,
+    minOpacity = 0.10,
+  } = options;
+  const view = new DataView(buffer);
+  const inputCount = buffer.byteLength / rowSize;
+  const sampleStep = Math.max(1, Math.ceil(inputCount / 10000));
+  let meanX = 0;
+  let meanY = 0;
+  let meanZ = 0;
+  let avgDist = 0;
+  let recommendedCropFactor = 2.5;
+
+  if (cropOutliers) {
+    let validCount = 0;
+    for (let i = 0; i < inputCount; i += sampleStep) {
+      const offset = i * rowSize;
+      const x = view.getFloat32(offset, true);
+      const y = view.getFloat32(offset + 4, true);
+      const z = view.getFloat32(offset + 8, true);
+      const opacity = view.getUint8(offset + 27) / 255;
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && opacity >= minOpacity) {
+        meanX += x;
+        meanY += y;
+        meanZ += z;
+        validCount++;
+      }
+    }
+    if (validCount > 0) {
+      meanX /= validCount;
+      meanY /= validCount;
+      meanZ /= validCount;
+      const distances = [];
+      for (let i = 0; i < inputCount; i += sampleStep) {
+        const offset = i * rowSize;
+        const x = view.getFloat32(offset, true);
+        const y = view.getFloat32(offset + 4, true);
+        const z = view.getFloat32(offset + 8, true);
+        const opacity = view.getUint8(offset + 27) / 255;
+        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && opacity >= minOpacity) {
+          distances.push(Math.hypot(x - meanX, y - meanY, z - meanZ));
+        }
+      }
+      if (distances.length > 0) {
+        distances.sort((a, b) => a - b);
+        avgDist = distances[Math.floor(distances.length * 0.5)];
+        let farCount = 0;
+        let sumSqDiff = 0;
+        for (const distance of distances) {
+          sumSqDiff += (distance - avgDist) ** 2;
+          if (distance > avgDist * 1.8) farCount++;
+        }
+        const coefficientOfVariation = avgDist > 0
+          ? Math.sqrt(sumSqDiff / distances.length) / avgDist
+          : 0;
+        const farRatio = farCount / distances.length;
+        if (coefficientOfVariation > 0.8) {
+          recommendedCropFactor = farRatio < 0.05 ? 1.5 : (farRatio < 0.12 ? 2.0 : 3.0);
+        }
+      }
+    }
+  }
+
+  const finalCropFactor = options.autoCropFactor
+    ? recommendedCropFactor
+    : (options.cropFactor ?? cropFactor);
+  const inputStep = Math.max(1, Math.ceil(inputCount / Math.max(1, maxParticles)));
+  const capacity = Math.ceil(inputCount / inputStep);
+  const positions = new Float32Array(capacity * 3);
+  const colors = new Float32Array(capacity * 3);
+  let outputCount = 0;
+
+  for (let i = 0; i < inputCount; i += inputStep) {
+    const offset = i * rowSize;
+    const x = view.getFloat32(offset, true);
+    const y = view.getFloat32(offset + 4, true);
+    const z = view.getFloat32(offset + 8, true);
+    const opacity = view.getUint8(offset + 27) / 255;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (Math.abs(x) > 100 || Math.abs(y) > 100 || Math.abs(z) > 100 || opacity < minOpacity) continue;
+    if (cropOutliers && avgDist > 0 && Math.hypot(x - meanX, y - meanY, z - meanZ) > avgDist * finalCropFactor) {
+      continue;
+    }
+    positions[outputCount * 3] = x;
+    positions[outputCount * 3 + 1] = y;
+    positions[outputCount * 3 + 2] = z;
+    colors[outputCount * 3] = view.getUint8(offset + 24) / 255;
+    colors[outputCount * 3 + 1] = view.getUint8(offset + 25) / 255;
+    colors[outputCount * 3 + 2] = view.getUint8(offset + 26) / 255;
+    outputCount++;
+    if (onProgress && i % 50000 === 0) onProgress(i / inputCount);
+  }
+
+  if (outputCount === 0) throw new Error('Splat file contains no visible Gaussian records');
+  onProgress?.(1);
+  return {
+    positions: positions.slice(0, outputCount * 3),
+    colors: colors.slice(0, outputCount * 3),
+    count: outputCount,
+    recommendedCropFactor: finalCropFactor,
+  };
 }
 /**
  * Parse the PLY header to extract metadata.
