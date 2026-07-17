@@ -1343,7 +1343,7 @@ body.compositing-mode-active .composition-cancel-button:disabled {
   position: absolute;
   top: 96px;
   left: 20px;
-  z-index: 100;
+  z-index: 110;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1504,23 +1504,44 @@ body.recording-mode-active .progress-control {
 
 .keyframe-list {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 200px;
-  overflow-y: auto;
-  margin-bottom: 4px;
-  padding-right: 4px;
+  flex-direction: row;
+  gap: 6px;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 2px 0;
+  padding: 0 0 4px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.keyframe-list:empty {
+  display: none;
+}
+
+.keyframe-list::-webkit-scrollbar {
+  height: 4px;
+}
+
+.keyframe-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
 }
 
 .keyframe-item {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
+  justify-content: flex-start;
+  gap: 4px;
+  width: max-content;
+  padding: 6px 8px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: 11px;
+  scroll-snap-align: end;
 }
 
 .keyframe-item span {
@@ -1534,6 +1555,8 @@ body.recording-mode-active .progress-control {
   color: #ef4444;
   cursor: pointer;
   font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
   opacity: 0.7;
   transition: opacity 0.2s;
 }

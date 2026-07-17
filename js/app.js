@@ -94,7 +94,12 @@ const state = {
   modelZoomScale: 1.0,      // current overall model scale factor
   initialZoomDist: null,    // distance when zoom gesture started
   initialZoomScale: 1.0,    // scale when zoom gesture started
-  keyframes: [],            // array of { position: THREE.Vector3, target: THREE.Vector3 }
+  keyframes: [],            // array of { position, target }
+  cameraSphericalPoints: null,
+  cameraSphericalTangents: null,
+  cameraLockedTarget: null,
+  cameraTimingCurve: null,
+  cameraTimingLength: 0,
   cameraModeActive: false,  // true when camera path panel is visible
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
@@ -1130,6 +1135,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.modelZoomScale = 1.0;
   state.initialZoomDist = null;
   state.keyframes = [];
+  invalidateCustomCameraPath();
   if (state.cameraModeActive) {
     toggleCameraMode();
   } else {
@@ -1921,6 +1927,14 @@ function openCameraPathPanel() {
 }
 const MAX_KEYFRAMES = 8;
 
+function invalidateCustomCameraPath() {
+  state.cameraSphericalPoints = null;
+  state.cameraSphericalTangents = null;
+  state.cameraLockedTarget = null;
+  state.cameraTimingCurve = null;
+  state.cameraTimingLength = 0;
+}
+
 function addKeyframe() {
   if (!state.isModelLoaded) return;
   if (state.keyframes.length >= MAX_KEYFRAMES) {
@@ -1930,14 +1944,16 @@ function addKeyframe() {
   
   state.keyframes.push({
     position: state.camera.position.clone(),
-    target: state.controls.target.clone()
+    target: state.controls.target.clone(),
   });
-  
+
+  invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast(`Keyframe ${state.keyframes.length} recorded!`, 'success');
 }
 function clearKeyframes() {
   state.keyframes = [];
+  invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast('All keyframes cleared', 'info');
 }
@@ -1951,7 +1967,7 @@ function updateKeyframeUI() {
     const label = document.createElement('span');
     label.textContent = `${state.lang === 'zh' ? '视角' : 'Viewpoint'} ${i + 1}`;
     item.appendChild(label);
-    
+
     const removeBtn = document.createElement('button');
     removeBtn.className = 'btn-remove';
     removeBtn.textContent = '✕';
@@ -1965,11 +1981,7 @@ function updateKeyframeUI() {
   });
 
   requestAnimationFrame(() => {
-    if (isMobileViewport()) {
-      dom.keyframeList.scrollLeft = dom.keyframeList.scrollWidth;
-    } else {
-      dom.keyframeList.scrollTop = dom.keyframeList.scrollHeight;
-    }
+    dom.keyframeList.scrollLeft = dom.keyframeList.scrollWidth;
   });
   
   dom.keyframeCount.textContent = state.keyframes.length;
@@ -1985,16 +1997,97 @@ function updateKeyframeUI() {
 }
 function removeKeyframe(index) {
   state.keyframes.splice(index, 1);
+  invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast('Keyframe removed', 'info');
 }
+
+function createMonotoneTangents(values) {
+  const pointCount = values.length;
+  const tangents = new Array(pointCount).fill(0);
+  if (pointCount < 2) return tangents;
+
+  const slopes = new Array(pointCount - 1);
+  for (let i = 0; i < pointCount - 1; i++) slopes[i] = values[i + 1] - values[i];
+  tangents[0] = slopes[0];
+  tangents[pointCount - 1] = slopes[pointCount - 2];
+  for (let i = 1; i < pointCount - 1; i++) {
+    tangents[i] = (slopes[i - 1] + slopes[i]) * 0.5;
+  }
+
+  // Fritsch-Carlson limiting keeps every scalar segment inside its endpoint
+  // range. This prevents theta from overshooting into an unintended full turn.
+  for (let i = 0; i < slopes.length; i++) {
+    const slope = slopes[i];
+    if (Math.abs(slope) < 1e-8) {
+      tangents[i] = 0;
+      tangents[i + 1] = 0;
+      continue;
+    }
+    let startRatio = tangents[i] / slope;
+    let endRatio = tangents[i + 1] / slope;
+    if (startRatio < 0) {
+      tangents[i] = 0;
+      startRatio = 0;
+    }
+    if (endRatio < 0) {
+      tangents[i + 1] = 0;
+      endRatio = 0;
+    }
+    const ratioLength = Math.hypot(startRatio, endRatio);
+    if (ratioLength > 3) {
+      const scale = 3 / ratioLength;
+      tangents[i] = scale * startRatio * slope;
+      tangents[i + 1] = scale * endRatio * slope;
+    }
+  }
+  return tangents;
+}
+
+function createSphericalTangents(points) {
+  const radiusTangents = createMonotoneTangents(points.map(point => point.x));
+  const thetaTangents = createMonotoneTangents(points.map(point => point.y));
+  const phiTangents = createMonotoneTangents(points.map(point => point.z));
+  return points.map((_, index) => new THREE.Vector3(
+    radiusTangents[index],
+    thetaTangents[index],
+    phiTangents[index]
+  ));
+}
+
+function interpolateSphericalPoint(progress) {
+  const points = state.cameraSphericalPoints;
+  const tangents = state.cameraSphericalTangents;
+  if (!points?.length || !tangents?.length) return null;
+  const segmentCount = points.length - 1;
+  const scaledProgress = THREE.MathUtils.clamp(progress, 0, 1) * segmentCount;
+  const segmentIndex = Math.min(Math.floor(scaledProgress), segmentCount - 1);
+  const amount = progress >= 1 ? 1 : scaledProgress - segmentIndex;
+  const amount2 = amount * amount;
+  const amount3 = amount2 * amount;
+  const h00 = 2 * amount3 - 3 * amount2 + 1;
+  const h10 = amount3 - 2 * amount2 + amount;
+  const h01 = -2 * amount3 + 3 * amount2;
+  const h11 = amount3 - amount2;
+  return new THREE.Vector3(
+    h00 * points[segmentIndex].x + h10 * tangents[segmentIndex].x
+      + h01 * points[segmentIndex + 1].x + h11 * tangents[segmentIndex + 1].x,
+    h00 * points[segmentIndex].y + h10 * tangents[segmentIndex].y
+      + h01 * points[segmentIndex + 1].y + h11 * tangents[segmentIndex + 1].y,
+    h00 * points[segmentIndex].z + h10 * tangents[segmentIndex].z
+      + h01 * points[segmentIndex + 1].z + h11 * tangents[segmentIndex + 1].z
+  );
+}
+
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
-  const targets = state.keyframes.map(kf => kf.target);
   const sphericalPoints = [];
+  const lockedTarget = state.keyframes[0].target.clone();
+  const cameraOffsets = [];
   let lastTheta = 0;
   state.keyframes.forEach((kf, idx) => {
     const offset = new THREE.Vector3().copy(kf.position).sub(kf.target);
+    cameraOffsets.push(offset.clone());
     const spherical = new THREE.Spherical().setFromVector3(offset);
     
     if (idx === 0) {
@@ -2009,20 +2102,35 @@ function initCameraCurves() {
     
     // Store spherical coordinates (radius, theta, phi) in a Vector3 for spline pathing
     sphericalPoints.push(new THREE.Vector3(spherical.radius, spherical.theta, spherical.phi));
+
   });
-  state.cameraSphericalCurve = new THREE.CatmullRomCurve3(sphericalPoints);
-  state.cameraSphericalCurve.curveType = 'centripetal';
-  state.targetCurve = new THREE.CatmullRomCurve3(targets);
-  state.targetCurve.curveType = 'centripetal';
+  state.cameraSphericalPoints = sphericalPoints;
+  state.cameraSphericalTangents = createSphericalTangents(sphericalPoints);
+  state.cameraLockedTarget = lockedTarget;
+
+  // This curve is only a shared clock. Arc-length mapping over the stabilized
+  // camera positions removes the apparent slowdown around Catmull-Rom control
+  // points while keeping orbit and target interpolation on the same timeline.
+  const stabilizedCameraPositions = cameraOffsets.map(offset => (
+    lockedTarget.clone().add(offset)
+  ));
+  state.cameraTimingCurve = new THREE.CatmullRomCurve3(stabilizedCameraPositions);
+  state.cameraTimingCurve.curveType = 'centripetal';
+  state.cameraTimingLength = state.cameraTimingCurve.getLength();
   
   return true;
 }
 function interpolateCamera(pct) {
-  if (!state.cameraSphericalCurve || !state.targetCurve) return;
-  
-  // getPointAt(pct) uses arc-length parameterization for perfectly constant velocity (no acceleration drops)
-  const sphereCoords = state.cameraSphericalCurve.getPointAt(pct);
-  const newTarget = state.targetCurve.getPointAt(pct);
+  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraLockedTarget || !state.cameraTimingCurve) return;
+
+  // Map output time to one arc-length-normalized camera clock. The focus target
+  // stays locked, while the no-overshoot spherical curve advances smoothly.
+  const clampedPct = THREE.MathUtils.clamp(pct, 0, 1);
+  const curveTime = state.cameraTimingLength > 0.000001
+    ? state.cameraTimingCurve.getUtoTmapping(clampedPct)
+    : clampedPct;
+  const sphereCoords = interpolateSphericalPoint(curveTime);
+  const newTarget = state.cameraLockedTarget;
   
   const spherical = new THREE.Spherical();
   spherical.radius = sphereCoords.x;
@@ -3539,6 +3647,7 @@ function setupEventListeners() {
       state.lang = state.lang === 'zh' ? 'en' : 'zh';
       localStorage.setItem('splat-lang', state.lang);
       applyTranslations(state.lang);
+      updateKeyframeUI();
     });
   }
   dom.btnHome?.addEventListener('click', () => {
