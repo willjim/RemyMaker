@@ -104,6 +104,8 @@ const state = {
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
   previewStart: null,
+  cameraPathFirstFrame: null,
+  restoreCameraPathFirstFrameOnOpen: false,
   previewCompleted: false,
   previewInitialRenderer: null,
   previewRendererTimeline: [],
@@ -1135,6 +1137,9 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.modelZoomScale = 1.0;
   state.initialZoomDist = null;
   state.keyframes = [];
+  state.previewStart = null;
+  state.cameraPathFirstFrame = null;
+  state.restoreCameraPathFirstFrameOnOpen = false;
   invalidateCustomCameraPath();
   if (state.cameraModeActive) {
     toggleCameraMode();
@@ -1902,6 +1907,7 @@ function toggleCameraMode() {
     if (state.particleSystem) {
       state.particleSystem.autoRotate = false;
     }
+    restoreRememberedCameraPathFirstFrame();
     showToast('Camera Path Mode active: Adjust view and record keyframes!', 'success');
   } else {
     // Restore autoRotate
@@ -1924,6 +1930,7 @@ function openCameraPathPanel() {
   dom.btnCameraMode.classList.add('active');
   dom.cameraPathPanel.classList.remove('hidden');
   document.body.classList.add('camera-path-active');
+  restoreRememberedCameraPathFirstFrame();
 }
 const MAX_KEYFRAMES = 8;
 
@@ -2332,21 +2339,63 @@ function applyPresetFlight(presetName, t) {
   }
 }
 
-function capturePreviewStart() {
-  state.previewStart = {
+function cloneCameraPathFrame(frame) {
+  if (!frame) return null;
+  return {
+    position: frame.position.clone(),
+    target: frame.target.clone(),
+    fov: frame.fov,
+    up: frame.up?.clone?.() || null,
+    quaternion: frame.quaternion?.clone?.() || null,
+    modelRotationY: Number.isFinite(frame.modelRotationY) ? frame.modelRotationY : 0,
+  };
+}
+
+function captureCurrentCameraPathFrame() {
+  return {
     position: state.camera.position.clone(),
     target: state.controls.target.clone(),
-    fov: state.camera.fov
+    fov: state.camera.fov,
+    up: state.camera.up.clone(),
+    quaternion: state.camera.quaternion.clone(),
+    modelRotationY: state.particleSystem?.pivot?.rotation.y
+      ?? state.splatPivot?.rotation.y
+      ?? 0,
   };
+}
+
+function rememberCameraPathFirstFrame(frame) {
+  state.cameraPathFirstFrame = cloneCameraPathFrame(frame);
+  state.previewStart = cloneCameraPathFrame(frame);
+}
+
+function capturePreviewStart() {
+  rememberCameraPathFirstFrame(captureCurrentCameraPathFrame());
 }
 
 function restorePreviewCameraStart() {
   if (!state.previewStart) return;
+  if (state.particleSystem) state.particleSystem.autoRotate = false;
+  if (state.particleSystem?.pivot) {
+    state.particleSystem.pivot.rotation.y = state.previewStart.modelRotationY || 0;
+  }
+  if (state.splatPivot) {
+    state.splatPivot.rotation.y = state.previewStart.modelRotationY || 0;
+  }
   state.camera.position.copy(state.previewStart.position);
   state.controls.target.copy(state.previewStart.target);
   state.camera.fov = state.previewStart.fov;
+  if (state.previewStart.up) state.camera.up.copy(state.previewStart.up);
+  if (state.previewStart.quaternion) state.camera.quaternion.copy(state.previewStart.quaternion);
   state.camera.updateProjectionMatrix();
   state.controls.update();
+}
+
+function restoreRememberedCameraPathFirstFrame() {
+  if (!state.restoreCameraPathFirstFrameOnOpen || !state.cameraPathFirstFrame) return;
+  state.previewStart = cloneCameraPathFrame(state.cameraPathFirstFrame);
+  restorePreviewCameraStart();
+  state.restoreCameraPathFirstFrameOnOpen = false;
 }
 
 function setPreviewControlsActive(active) {
@@ -2931,6 +2980,8 @@ function restoreCompositionPreviewControls(session) {
 
 function finishExportBlob(blob, filename, session, type = 'video/mp4') {
   restoreAfterExport(session);
+  rememberCameraPathFirstFrame(session.cameraPathFirstFrame || session.startCamera);
+  state.restoreCameraPathFirstFrameOnOpen = true;
   if (!blob?.size) {
     showToast(
       state.lang === 'zh'
@@ -3137,17 +3188,10 @@ async function exportPathVideo({ fromPreview = false } = {}) {
   if (state.previewActive && !fromPreview) return;
 
   const restoreCamera = captureCameraState();
-  const savedPreviewStart = state.previewStart
-    ? {
-        position: state.previewStart.position.clone(),
-        target: state.previewStart.target.clone(),
-        fov: state.previewStart.fov,
-      }
-    : {
-        position: restoreCamera.position.clone(),
-        target: restoreCamera.target.clone(),
-        fov: restoreCamera.fov,
-      };
+  const savedPreviewStart = fromPreview && state.previewStart
+    ? cloneCameraPathFrame(state.previewStart)
+    : captureCurrentCameraPathFrame();
+  rememberCameraPathFirstFrame(savedPreviewStart);
   const restoreRenderer = state.settings.renderer;
   const restoreInterpolation = state.splatInterpolation;
   const restoreInterpolationTarget = state.splatInterpolationTarget;
@@ -3215,6 +3259,7 @@ async function exportPathVideo({ fromPreview = false } = {}) {
     returnToPreview: fromPreview,
     restorePreviewTime,
     restorePreviewStart: savedPreviewStart,
+    cameraPathFirstFrame: cloneCameraPathFrame(savedPreviewStart),
   };
   const useWebCodecs = supportsWebCodecsComposition();
 
