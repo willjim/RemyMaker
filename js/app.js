@@ -950,9 +950,14 @@ function showLoading(text = 'Loading...') {
   }
   dom.loadingText.textContent = translatedText;
   dom.loadingBar.style.width = '0%';
+  dom.loadingBar.dataset.progressPercent = '0';
 }
 function updateLoadingProgress(progress, text) {
-  dom.loadingBar.style.width = `${Math.round(progress * 100)}%`;
+  const progressPercent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  if (dom.loadingBar.dataset.progressPercent !== String(progressPercent)) {
+    dom.loadingBar.style.width = `${progressPercent}%`;
+    dom.loadingBar.dataset.progressPercent = String(progressPercent);
+  }
   if (text) {
     let translatedText = text;
     const dict = translations[state.lang];
@@ -978,7 +983,9 @@ function updateLoadingProgress(progress, text) {
         translatedText = dict['spark-load-prefix'] + text.replace('Rendering engine load: ', '') + dict['spark-load-suffix'];
       }
     }
-    dom.loadingText.textContent = translatedText;
+    if (dom.loadingText.textContent !== translatedText) {
+      dom.loadingText.textContent = translatedText;
+    }
   }
 }
 function hideLoading() {
@@ -2921,14 +2928,19 @@ function renderExportFrame(session, timelineTime, flightProgress) {
     state.particleSystem.setTransitionDirection(transitionDirection);
     state.particleSystem.setSplatInterpolation(state.splatInterpolation);
     state.particleSystem.update(1 / session.fps, timelineTime);
-    dom.progressSlider.value = Math.round(gatherProgress * 100);
-    dom.progressValue.textContent = `${Math.round(gatherProgress * 100)}%`;
+    if (!state.compositingActive) {
+      dom.progressSlider.value = Math.round(gatherProgress * 100);
+      dom.progressValue.textContent = `${Math.round(gatherProgress * 100)}%`;
+    }
   }
 
   if (state.splatPivot && state.particleSystem?.pivot) {
     state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
   }
-  state.renderer.render(state.scene, state.camera);
+  return Boolean(
+    state.splatMesh?.visible
+    && (state.splatMesh.opacity ?? 0) > RENDERER_VISIBILITY_EPSILON
+  );
 }
 
 function restoreAfterExport(session) {
@@ -3052,9 +3064,13 @@ async function compositeVideoWithWebCodecs(session) {
       throwIfCompositionCancelled();
       const flightProgress = totalFrames === 1 ? 1 : frameIndex / (totalFrames - 1);
       const timelineTime = flightProgress * session.duration;
-      renderExportFrame(session, timelineTime, flightProgress);
+      const needsSparkSettlePass = renderExportFrame(session, timelineTime, flightProgress);
+      if (needsSparkSettlePass) {
+        // The first pass submits the new camera state to Spark's sorting worker.
+        state.renderer.render(state.scene, state.camera);
+      }
       // Give Spark's worker one paint opportunity to finish camera-dependent
-      // sorting, then capture the settled frame. This rAF is not the app's
+      // sorting and let the progress UI update. This rAF is not the app's
       // animation loop and therefore cannot advance the export timeline.
       await waitForCompositionTask(
         new Promise(resolve => requestAnimationFrame(resolve)),
@@ -3062,6 +3078,9 @@ async function compositeVideoWithWebCodecs(session) {
         'Export frame rendering'
       );
       throwIfCompositionCancelled();
+      // Always render immediately before CanvasSource reads the drawing buffer.
+      // Particle-only frames use this single pass; Spark frames use it as the
+      // settled second pass after the worker has updated splat ordering.
       state.renderer.render(state.scene, state.camera);
       await waitForCompositionTask(
         videoSource.add(frameIndex / session.fps, 1 / session.fps),

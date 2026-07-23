@@ -91,6 +91,14 @@ html, body {
   flex: 0 0 auto;
 }
 
+/*
+ * WebCodecs still reads the WebGL drawing buffer while the canvas is hidden.
+ * Avoid compositing every encoded frame into the page behind the progress UI.
+ */
+body.compositing-mode-active #canvas-container {
+  visibility: hidden;
+}
+
 /* ========================================
    Toolbar
    ======================================== */
@@ -593,6 +601,18 @@ body.compositing-mode-active .composition-cancel-button {
 body.compositing-mode-active .composition-cancel-button:disabled {
   opacity: 0.65;
   cursor: wait;
+}
+
+body.compositing-mode-active .loading-overlay {
+  background: #06060f;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition: none;
+}
+
+body.compositing-mode-active .loading-ring .ring,
+body.compositing-mode-active .loading-progress .bar {
+  animation: none;
 }
 
 @keyframes shimmer {
