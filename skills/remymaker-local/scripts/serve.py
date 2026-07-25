@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Serve the bundled RemyMaker snapshot with its local resolver endpoint."""
+"""Serve the bundled RemyMaker site with its local resolver endpoint."""
 
 import argparse
-import atexit
 import json
 import os
 import re
-import shutil
-import tarfile
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -133,11 +129,9 @@ def main():
     args = parser.parse_args()
 
     skill_dir = Path(__file__).resolve().parent.parent
-    archive = skill_dir / "assets" / "remymaker-site.tar.gz"
-    site_dir = Path(tempfile.mkdtemp(prefix="remymaker-site-"))
-    atexit.register(shutil.rmtree, str(site_dir), True)
-    with tarfile.open(str(archive), "r:gz") as bundle:
-        bundle.extractall(str(site_dir))
+    site_dir = skill_dir / "assets" / "remymaker-site"
+    if not (site_dir / "index.html").is_file():
+        raise SystemExit("Bundled RemyMaker site is missing index.html")
     os.chdir(str(site_dir))
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

@@ -14,7 +14,7 @@ Start the bundled site immediately. Do not ask the user to clone a repository, i
 3. Verify the address responds successfully. If the process tool already confirms a successful request, do not repeat the check.
 4. Reply in the user's language with a clickable Markdown link to that exact address. Keep the response short and state that closing/stopping the running process stops the site.
 
-The launcher chooses a free loopback port, extracts the bundled site into a temporary directory, serves static files, and implements the `/resolve` endpoint. It needs only Python 3's standard library. Internet access is still required in the browser for Remy/Kiri models and the app's CDN libraries.
+The launcher chooses a free loopback port, serves the bundled site from `assets/remymaker-site`, and implements the `/resolve` endpoint. It needs only Python 3's standard library. Internet access is still required in the browser for Remy/Kiri models and the app's CDN libraries.
 
 ## Troubleshoot
 
