@@ -7,7 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=3.5';
 import { GestureControl } from './gestureControl.js';
-import { extractPLYFromUrl, downloadPLY } from './remyLoader.js';
+import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.1';
 import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
@@ -1075,34 +1075,54 @@ async function loadFromUrl() {
   }
   showLoading('Extracting model URL...');
   try {
+    let lastDownloadError = null;
+    const downloadResolvedModel = async (resolvedModel) => {
+      const urlsToTry = [
+        resolvedModel.splatUrl,
+        resolvedModel.plyUrl,
+        resolvedModel.pcdUrl
+      ].filter(Boolean);
+
+      for (const tryUrl of urlsToTry) {
+        try {
+          return await downloadPLY(tryUrl, (p) => {
+            updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
+          });
+        } catch (error) {
+          lastDownloadError = error;
+          console.warn(`Failed to download ${tryUrl.substring(0, 60)}:`, error.message);
+        }
+      }
+      return null;
+    };
+
     // Step 1: Extract PLY/Splat URL from the share page
     updateLoadingProgress(0.1, 'Parsing share page...');
-    const result = await extractPLYFromUrl(url);
-    const { plyUrl, pcdUrl, splatUrl, name, initialCameraPosition } = result;
-    state.initialCameraPosition = initialCameraPosition || null;
-    if (!plyUrl && !pcdUrl && !splatUrl) {
+    let result = await extractPLYFromUrl(url);
+    state.initialCameraPosition = result.initialCameraPosition || null;
+    if (!result.plyUrl && !result.pcdUrl && !result.splatUrl) {
       throw new Error('No 3D model file URL found');
     }
     // Step 2: Download the file (try 3DGS.splat -> 3DGS.ply -> pcd.ply)
-    updateLoadingProgress(0.2, `Downloading: ${name}...`);
-    let buffer = null;
-    const urlsToTry = [splatUrl, plyUrl, pcdUrl].filter(Boolean);
-    for (const tryUrl of urlsToTry) {
-      try {
-        buffer = await downloadPLY(tryUrl, (p) => {
-          updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
-        });
-        break; // Success
-      } catch (e) {
-        console.warn(`Failed to download ${tryUrl.substring(0, 60)}:`, e.message);
-        continue;
-      }
-    }
+    updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
+    let buffer = await downloadResolvedModel(result);
+
+    // A Remy share page may be cached with an expired signed model URL.
+    // Re-resolve once before reporting a download failure.
     if (!buffer) {
-      throw new Error('Could not load model data from this share link.');
+      updateLoadingProgress(0.1, 'Parsing share page...');
+      result = await extractPLYFromUrl(url, { forceRefresh: true });
+      state.initialCameraPosition = result.initialCameraPosition || null;
+      updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
+      buffer = await downloadResolvedModel(result);
+    }
+
+    if (!buffer) {
+      const reason = lastDownloadError?.message ? ` (${lastDownloadError.message})` : '';
+      throw new Error(`Could not load model data from this share link.${reason}`);
     }
     // Step 3: Parse and create particles
-    await processBuffer(buffer, name, true);
+    await processBuffer(buffer, result.name, true);
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);

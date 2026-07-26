@@ -45,9 +45,13 @@ export async function onRequestGet({ request }) {
     const referer = isKiri
       ? 'https://www.kiriengine.app/'
       : 'https://www.remy3d.cn/';
-    const upstream = await fetch(shareUrl.toString(), {
+    const upstreamUrl = new URL(shareUrl);
+    upstreamUrl.searchParams.set('_remymaker_refresh', Date.now().toString());
+    const upstream = await fetch(upstreamUrl.toString(), {
       headers: {
         Accept: 'text/html,application/xhtml+xml',
+        'Cache-Control': 'no-cache, no-store, max-age=0',
+        Pragma: 'no-cache',
         Referer: referer,
         'User-Agent': 'Mozilla/5.0 AppleWebKit/537.36 Chrome/120 Safari/537.36'
       },
