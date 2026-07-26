@@ -3,10 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#06060f">
+  <script>
+    if (/MicroMessenger/i.test(navigator.userAgent || '')) {
+      document.documentElement.classList.add('wechat-browser');
+    }
+  </script>
+  <style>
+    html,
+    body {
+      margin: 0;
+      background: #06060f;
+    }
+  </style>
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.22">
+  <link rel="stylesheet" href="css/style.css?v=3.24">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -392,6 +406,43 @@
         </div>
       </div>
     </div>
+    <!-- ========== WeChat Browser Download Notice (Landing Only) ========== -->
+    <div
+      class="wechat-open-overlay"
+      id="wechat-open-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wechat-open-title"
+    >
+      <div class="wechat-open-guide">
+        <svg class="wechat-open-arrow" viewBox="0 0 150 124" aria-hidden="true">
+          <defs>
+            <marker
+              id="wechat-arrowhead"
+              markerWidth="12"
+              markerHeight="12"
+              refX="0"
+              refY="6"
+              orient="auto"
+              markerUnits="userSpaceOnUse"
+            >
+              <path d="M0,0 L12,6 L0,12 Z"></path>
+            </marker>
+          </defs>
+          <path
+            class="wechat-open-arrow-path"
+            d="M18 110 C3 72 34 48 63 64 C89 79 70 106 45 94 C18 82 33 39 69 25 C91 16 115 18 137 7"
+            marker-end="url(#wechat-arrowhead)"
+          ></path>
+        </svg>
+        <div class="wechat-open-copy">
+          <strong id="wechat-open-title">请点击…在浏览器中打开</strong>
+          <span>继续在微信中使用</span>
+          <span>将无法下载导出的视频</span>
+        </div>
+      </div>
+      <button class="wechat-open-dismiss" id="wechat-open-dismiss" type="button">我知道了</button>
+    </div>
     <!-- ========== Loading Overlay ========== -->
     <div class="loading-overlay" id="loading-overlay">
       <div class="loading-ring">
@@ -410,7 +461,12 @@
     <!-- ========== Toast Container ========== -->
     <div class="toast-container" id="toast-container"></div>
   </div>
+  <script>
+    document.getElementById('wechat-open-dismiss')?.addEventListener('click', function () {
+      document.getElementById('wechat-open-overlay')?.classList.add('dismissed');
+    });
+  </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.48"></script>
+  <script type="module" src="js/app.js?v=3.49"></script>
 </body>
 </html>

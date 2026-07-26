@@ -106,7 +106,8 @@ const state = {
   modelZoomScale: 1.0,      // current overall model scale factor
   initialZoomDist: null,    // distance when zoom gesture started
   initialZoomScale: 1.0,    // scale when zoom gesture started
-  keyframes: [],            // array of { position, target }
+  keyframes: [],            // full camera snapshots used by custom paths and viewpoint recall
+  selectedKeyframeIndex: null,
   cameraSphericalPoints: null,
   cameraSphericalTangents: null,
   cameraLockedTarget: null,
@@ -1164,6 +1165,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.modelZoomScale = 1.0;
   state.initialZoomDist = null;
   state.keyframes = [];
+  state.selectedKeyframeIndex = null;
   state.previewStart = null;
   state.cameraPathFirstFrame = null;
   state.restoreCameraPathFirstFrameOnOpen = false;
@@ -1981,10 +1983,8 @@ function addKeyframe() {
     return;
   }
   
-  state.keyframes.push({
-    position: state.camera.position.clone(),
-    target: state.controls.target.clone(),
-  });
+  state.keyframes.push(captureCurrentCameraPathFrame());
+  state.selectedKeyframeIndex = state.keyframes.length - 1;
 
   invalidateCustomCameraPath();
   updateKeyframeUI();
@@ -1992,6 +1992,7 @@ function addKeyframe() {
 }
 function clearKeyframes() {
   state.keyframes = [];
+  state.selectedKeyframeIndex = null;
   invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast('All keyframes cleared', 'info');
@@ -2002,16 +2003,26 @@ function updateKeyframeUI() {
   state.keyframes.forEach((kf, i) => {
     const item = document.createElement('div');
     item.className = 'keyframe-item';
+    item.classList.toggle('selected', state.selectedKeyframeIndex === i);
+    item.setAttribute('aria-current', state.selectedKeyframeIndex === i ? 'true' : 'false');
     
-    const label = document.createElement('span');
-    label.textContent = `${state.lang === 'zh' ? '视角' : 'Viewpoint'} ${i + 1}`;
-    item.appendChild(label);
+    const jumpButton = document.createElement('button');
+    jumpButton.type = 'button';
+    jumpButton.className = 'keyframe-jump';
+    jumpButton.textContent = `${state.lang === 'zh' ? '视角' : 'Viewpoint'} ${i + 1}`;
+    jumpButton.title = state.lang === 'zh'
+      ? `跳转到视角 ${i + 1}`
+      : `Go to viewpoint ${i + 1}`;
+    jumpButton.setAttribute('aria-pressed', state.selectedKeyframeIndex === i ? 'true' : 'false');
+    jumpButton.addEventListener('click', () => jumpToKeyframe(i));
+    item.appendChild(jumpButton);
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'btn-remove';
     removeBtn.textContent = '✕';
     removeBtn.title = 'Remove keyframe';
-    removeBtn.addEventListener('click', () => {
+    removeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
       removeKeyframe(i);
     });
     item.appendChild(removeBtn);
@@ -2039,8 +2050,36 @@ function updateKeyframeUI() {
     dom.btnExportVideo.disabled = state.keyframes.length < 2;
   }
 }
+
+function updateSelectedKeyframeUI() {
+  Array.from(dom.keyframeList.children).forEach((item, index) => {
+    const selected = state.selectedKeyframeIndex === index;
+    item.classList.toggle('selected', selected);
+    item.setAttribute('aria-current', selected ? 'true' : 'false');
+    item.querySelector('.keyframe-jump')?.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  });
+}
+
+function jumpToKeyframe(index) {
+  const frame = state.keyframes[index];
+  if (!frame || state.previewActive || state.recordingActive || state.compositingActive) return;
+  applyCameraPathFrame(frame);
+  state.selectedKeyframeIndex = index;
+  updateSelectedKeyframeUI();
+  showToast(
+    state.lang === 'zh' ? `已跳转到视角 ${index + 1}` : `Viewpoint ${index + 1} restored`,
+    'info',
+    1800
+  );
+}
+
 function removeKeyframe(index) {
   state.keyframes.splice(index, 1);
+  if (state.selectedKeyframeIndex === index) {
+    state.selectedKeyframeIndex = null;
+  } else if (state.selectedKeyframeIndex > index) {
+    state.selectedKeyframeIndex -= 1;
+  }
   invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast('Keyframe removed', 'info');
@@ -2382,23 +2421,72 @@ function cloneCameraPathFrame(frame) {
     position: frame.position.clone(),
     target: frame.target.clone(),
     fov: frame.fov,
+    zoom: frame.zoom,
+    near: frame.near,
+    far: frame.far,
     up: frame.up?.clone?.() || null,
     quaternion: frame.quaternion?.clone?.() || null,
+    modelQuaternion: frame.modelQuaternion?.clone?.() || null,
     modelRotationY: Number.isFinite(frame.modelRotationY) ? frame.modelRotationY : 0,
   };
 }
 
 function captureCurrentCameraPathFrame() {
+  const modelPivot = state.particleSystem?.pivot || state.splatPivot;
   return {
     position: state.camera.position.clone(),
     target: state.controls.target.clone(),
     fov: state.camera.fov,
+    zoom: state.camera.zoom,
+    near: state.camera.near,
+    far: state.camera.far,
     up: state.camera.up.clone(),
     quaternion: state.camera.quaternion.clone(),
-    modelRotationY: state.particleSystem?.pivot?.rotation.y
-      ?? state.splatPivot?.rotation.y
-      ?? 0,
+    modelQuaternion: modelPivot?.quaternion?.clone?.() || null,
+    modelRotationY: modelPivot?.rotation.y ?? 0,
   };
+}
+
+function applyCameraPathFrame(frame) {
+  if (!frame) return;
+  if (state.particleSystem) state.particleSystem.autoRotate = false;
+
+  [state.particleSystem?.pivot, state.splatPivot].forEach((pivot) => {
+    if (!pivot) return;
+    if (frame.modelQuaternion) {
+      pivot.quaternion.copy(frame.modelQuaternion);
+    } else {
+      pivot.rotation.y = frame.modelRotationY || 0;
+    }
+  });
+
+  state.camera.position.copy(frame.position);
+  state.controls.target.copy(frame.target);
+  if (Number.isFinite(frame.fov)) state.camera.fov = frame.fov;
+  if (Number.isFinite(frame.zoom)) state.camera.zoom = frame.zoom;
+  if (Number.isFinite(frame.near)) state.camera.near = frame.near;
+  if (Number.isFinite(frame.far)) state.camera.far = frame.far;
+  if (frame.up) state.camera.up.copy(frame.up);
+  state.camera.updateProjectionMatrix();
+
+  // Flush any remaining damping delta from the user's previous drag, then
+  // reapply every saved value so neither damping nor a pending pan can offset
+  // the recalled frame by a fraction of a pixel.
+  const dampingEnabled = state.controls.enableDamping;
+  state.controls.enableDamping = false;
+  state.controls.update();
+  state.controls.enableDamping = dampingEnabled;
+
+  state.camera.position.copy(frame.position);
+  state.controls.target.copy(frame.target);
+  if (Number.isFinite(frame.fov)) state.camera.fov = frame.fov;
+  if (Number.isFinite(frame.zoom)) state.camera.zoom = frame.zoom;
+  if (Number.isFinite(frame.near)) state.camera.near = frame.near;
+  if (Number.isFinite(frame.far)) state.camera.far = frame.far;
+  if (frame.up) state.camera.up.copy(frame.up);
+  if (frame.quaternion) state.camera.quaternion.copy(frame.quaternion);
+  state.camera.updateProjectionMatrix();
+  state.camera.updateMatrixWorld(true);
 }
 
 function rememberCameraPathFirstFrame(frame) {
@@ -2412,20 +2500,7 @@ function capturePreviewStart() {
 
 function restorePreviewCameraStart() {
   if (!state.previewStart) return;
-  if (state.particleSystem) state.particleSystem.autoRotate = false;
-  if (state.particleSystem?.pivot) {
-    state.particleSystem.pivot.rotation.y = state.previewStart.modelRotationY || 0;
-  }
-  if (state.splatPivot) {
-    state.splatPivot.rotation.y = state.previewStart.modelRotationY || 0;
-  }
-  state.camera.position.copy(state.previewStart.position);
-  state.controls.target.copy(state.previewStart.target);
-  state.camera.fov = state.previewStart.fov;
-  if (state.previewStart.up) state.camera.up.copy(state.previewStart.up);
-  if (state.previewStart.quaternion) state.camera.quaternion.copy(state.previewStart.quaternion);
-  state.camera.updateProjectionMatrix();
-  state.controls.update();
+  applyCameraPathFrame(state.previewStart);
 }
 
 function restoreRememberedCameraPathFirstFrame() {
@@ -3409,6 +3484,12 @@ async function exportPathVideo({ fromPreview = false } = {}) {
 // Event Handlers
 // ============================================================
 function setupEventListeners() {
+  state.controls?.addEventListener('start', () => {
+    if (state.selectedKeyframeIndex === null) return;
+    state.selectedKeyframeIndex = null;
+    updateSelectedKeyframeUI();
+  });
+
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
   dom.urlInput.addEventListener('keydown', (e) => {
