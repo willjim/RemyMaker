@@ -74,6 +74,7 @@ RemyMaker 的实现离不开以下优秀项目与工具，在此向所有维护�
 - [Spark](https://sparkjs.dev/) — 3D Gaussian Splatting 渲染
 - [MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/guide) — 手势识别
 - [GSAP](https://gsap.com/) — 镜头路径与界面动画
+- [Tabler Icons](https://github.com/tabler/tabler-icons) — MIT 许可的界面 SVG 图标
 - [fix-webm-duration](https://github.com/yusitnikov/fix-webm-duration) — WebM 时长修复
 - [Cloudflare Pages](https://pages.cloudflare.com/) — 网页托管与 Functions 运行环境
 - [KIRI Engine](https://www.kiriengine.app) 全体小伙伴
