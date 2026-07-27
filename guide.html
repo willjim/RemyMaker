@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title class="lang-zh">使用指南 — 3DGS & 粒子点云可视化系统</title>
+  <title class="lang-zh">使用指南 — Remy 3D 照片自定义特效运镜工具</title>
   <title class="lang-en">User Guide — 3DGS & Particle Viewer</title>
   <style>
     :root {
@@ -349,9 +349,9 @@
 
   <div class="container">
     <header>
-      <h1 class="lang-zh">3DGS & 粒子点云可视化系统</h1>
+      <h1 class="lang-zh">Remy 3D 照片自定义特效运镜工具</h1>
       <h1 class="lang-en">3DGS & Particle Point Cloud Viewer</h1>
-      <p class="subtitle lang-zh">用户操作与使用指南手册</p>
+      <p class="subtitle lang-zh">用户操作与使用指南</p>
       <p class="subtitle lang-en">User Operations & Guidelines Manual</p>
     </header>
 
@@ -360,11 +360,11 @@
       <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-open"></use></svg> 1. 快速入门：加载 3D 模型</h2>
       <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-open"></use></svg> 1. Quick Start: Loading 3D Models</h2>
       
-      <p class="lang-zh">系统支持从网络分享链接直接提取并展示 3DGS（三维高斯泼溅）与常规三维点云模型：</p>
+      <p class="lang-zh">系统支持从网络分享链接直接解析并展示 3D 照片模型：</p>
       <p class="lang-en">The system supports directly fetching and rendering 3DGS (Gaussian Splatting) and regular 3D point cloud models from online share URLs:</p>
       
       <ol class="lang-zh">
-        <li><strong>通过分享链接加载</strong>：在首页中央的 AI 对话输入框（或者在模型加载后的顶部菜单栏）粘贴 Remy3D 或 Kiri Engine 分享地址（如 <code>https://remy3d.com/share/...</code>），然后点击 <strong>Load</strong> 按钮。系统会启动内置代理自动解析并加载模型。</li>
+        <li><strong>通过分享链接加载</strong>：在首页中央的输入框（或者在模型加载后的顶部菜单栏）粘贴 Remy3D 或 Kiri Engine 分享地址，然后点击「<strong>加载</strong>」按钮。系统会自动解析并加载模型。</li>
       </ol>
       <ol class="lang-en">
         <li><strong>Load via Share Link</strong>: Paste a Remy3D or Kiri Engine share URL (e.g., <code>https://remy3d.com/share/...</code>) in the centered AI input box (or in the top toolbar after loading), then click the <strong>Load</strong> button. The system automatically fetches, parses, and loads the model.</li>
@@ -380,11 +380,10 @@
         <li><strong>视角旋转</strong>：在 3D 画布区域，按住 <strong>鼠标左键</strong> 并拖拽。</li>
         <li><strong>视角平移</strong>：按住 <strong>鼠标右键</strong> 并拖拽。</li>
         <li><strong>场景缩放</strong>：滚动 <strong>鼠标中键滚轮</strong>。系统支持极小距离缩放，可将视角拉得极近来观测模型微小细节。</li>
-        <li><strong>初始视角自动缩放对齐</strong>：当模型加载时，无论背景切割设置多大，默认视角都会<strong>精准缩放对齐到主体的 1x radius 距离</strong>，让人物面部或物体核心细节直接贴近屏幕中央。</li>
-        <li><strong>渲染引擎切换与背景裁剪规则</strong>：
+        <li><strong>渲染模式切换</strong>：
           <ul>
-            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D 实景模式</span>：照片级写实的高保真三维高斯着色。<strong>在此模式下，系统将自动保留 100% 完整的原始背景和环境内容（无裁剪）</strong>，并自动拉伸相机的远截面（Far Clip），保证宏大背景不会被截断。</li>
-            <li><span class="badge badge-cloud"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-atom"></use></svg>Point Cloud 模式</span>：展现充满未来科技感的荧光圆点粒子状态。<strong>在此模式下，系统默认将背景点云控制在干净的 2.5x 模型半径内</strong>，完美剔除环境噪点。</li>
+            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D 实景</span>：照片级写实的高保真 3D 高斯着色画面。</li>
+            <li><span class="badge badge-cloud"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-atom"></use></svg>粒子模式</span>：展现充满未来科技感的荧光圆点粒子状态。</li>
           </ul>
         </li>
       </ul>
@@ -407,12 +406,12 @@
       <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. 电影级运镜录制与 15 套内置闭环运镜预设</h2>
       <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. Cinematic Flight Path Recording & 15 Built-in Presets</h2>
       
-      <p class="lang-zh">点击顶部 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-video"></use></svg>Camera Path</strong> 开启运镜控制台，录制属于您的电影航拍视频：</p>
+      <p class="lang-zh">点击顶部的 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-video"></use></svg>镜头运镜</strong> 开启运镜控制台，制作属于您的电影级运镜视频：</p>
       <p class="lang-en">Click the <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-video"></use></svg>Camera Path</strong> button at the top to open the flight path console and record your own aerial tracking videos:</p>
       
       <div class="tip-box lang-zh" style="background: rgba(123, 44, 191, 0.03); border-left: 4px solid var(--secondary-color);">
-        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>新增：15 套 GSAP 复合型闭环运镜</h3>
-        <p>我们内置了 15 套高级运镜预设（包含 Dolly Zoom 希区柯克滑动变焦、8字形无限循环、螺旋上升收缩、钟摆等）。这些预设轨迹<strong>完全基于您当前的缩放大小（Zoom）与仰角（Pitch）</strong>动态计算，且运行期间支持鼠标右键拖拽实时平移运镜轴心。</p>
+        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>新增：15 套复合型闭环运镜</h3>
+        <p>我们内置了 15 套高级运镜预设（包含希区柯克滑动变焦、8 字形无限循环、螺旋上升收缩、钟摆等）。这些预设轨迹<strong>完全基于您当前的缩放大小与仰角</strong>动态计算，且运行期间支持鼠标右键拖拽实时平移运镜轴心。</p>
       </div>
       <div class="tip-box lang-en" style="background: rgba(123, 44, 191, 0.03); border-left: 4px solid var(--secondary-color);">
         <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>New: 15 Built-in GSAP Closed Loop Flight Paths</h3>
@@ -420,9 +419,9 @@
       </div>
 
       <ol class="lang-zh">
-        <li><strong>使用内置运镜预设</strong>：在 <strong>Flight Path Preset</strong> 下拉菜单中选择一套内置运镜（如 <em>Hitchcock Dolly Zoom</em>），点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-player-play"></use></svg>Preview</strong> 即可开始预览。<strong>在预览运行期间，网页会自动锁定页面缩放防误触</strong>。</li>
-        <li><strong>自定义记录关键帧</strong>：选择 <em>None (Custom Keyframes)</em> 模式下，调整视角后点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>Add Keyframe</strong> 增加第一视角（支持 2 ~ 8 个关键帧），并点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-player-play"></use></svg>Preview</strong> 沿轨迹平滑飞行。</li>
-        <li><strong>60帧 导出视频</strong>：无论选择预设还是自定义路径，点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-movie"></use></svg>Export 1080p MP4</strong> 都会自动启用离屏 1080p 渲染并生成匀速 60fps MP4 视频，录制完将自动触发浏览器下载。</li>
+        <li><strong>使用内置运镜预设</strong>：在<strong>运镜预设</strong>下拉菜单中选择一套内置运镜（如希区柯克变焦），点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-player-play"></use></svg>预览</strong>即可开始预览。<strong>在预览运行期间，网页会自动锁定页面缩放防止误触</strong>。</li>
+        <li><strong>自定义记录关键帧</strong>：选择<strong>自定义关键帧</strong>模式，调整视角后点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>添加关键帧</strong>记录视角（桌面端不限制关键帧数量，手机端最多 10 个），再点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-player-play"></use></svg>预览</strong>即可沿轨迹平滑运镜。</li>
+        <li><strong>每秒 60 帧导出视频</strong>：无论选择预设还是自定义路径，点击 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-movie"></use></svg>导出视频</strong>都会自动启用 1080p 渲染并生成每秒 60 帧的 MP4 视频，完成后即可保存。</li>
       </ol>
       <ol class="lang-en">
         <li><strong>Built-in Presets</strong>: Select a flight path preset from the <strong>Flight Path Preset</strong> dropdown (e.g., <em>Hitchcock Dolly Zoom</em>), then click <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-player-play"></use></svg>Preview</strong> to begin. <strong>During the preview, page zoom controls are locked to avoid misclicks</strong>.</li>
@@ -433,10 +432,10 @@
 
     <!-- 4. 手势控制 / Gesture Control -->
     <div class="card">
-      <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg> 4. 核心体验：智能 AI 手势追踪</h2>
+      <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg> 4. 核心体验：智能手势追踪</h2>
       <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg> 4. Core Experience: Intelligent AI Gesture Tracking</h2>
       
-      <p class="lang-zh">点击工具栏的 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg>Gesture</strong> 按钮授权摄像头。开启后，在摄像头前展示特定手势即可控制场景：</p>
+      <p class="lang-zh">点击工具栏的 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg>手势控制</strong>按钮并授权摄像头。开启后，在摄像头前展示特定手势即可控制场景：</p>
       <p class="lang-en">Click the <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg>Gesture</strong> button in the toolbar to grant camera access. Once enabled, display specific gestures in front of the camera to control the scene:</p>
       
       <div class="tip-box lang-zh">
@@ -465,39 +464,39 @@
           <!-- Palm -->
           <tr>
             <td class="icon-col"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg></td>
-            <td class="gesture-name lang-zh">张开手掌 (Open Palm)</td>
+            <td class="gesture-name lang-zh">张开手掌</td>
             <td class="gesture-name lang-en">Open Palm</td>
-            <td class="lang-zh"><strong>粒子散开消散</strong>：在点云模式下，模型粒子将根据您的手指张开幅度向四周扩散消散。</td>
+            <td class="lang-zh"><strong>粒子散开消散</strong>：在粒子模式下，模型粒子将根据您的手指张开幅度向四周扩散消散。</td>
             <td class="lang-en"><strong>Particle Dispersal</strong>: In Point Cloud mode, particles will scatter outwards based on how wide you open your palm.</td>
           </tr>
           <!-- Fist -->
           <tr>
             <td class="icon-col"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-grab"></use></svg></td>
-            <td class="gesture-name lang-zh">攥拳头 (Closed Fist)</td>
+            <td class="gesture-name lang-zh">攥拳头</td>
             <td class="gesture-name lang-en">Closed Fist</td>
-            <td class="lang-zh"><strong>粒子聚拢收缩</strong>：在点云模式下，已散开的粒子会向中心收缩，拼回原本的密集人形。</td>
+            <td class="lang-zh"><strong>粒子聚拢收缩</strong>：在粒子模式下，已散开的粒子会向中心收缩，拼回原本的密集模型。</td>
             <td class="lang-en"><strong>Particle Assembly</strong>: In Point Cloud mode, scattered particles will gather back towards the center to restore the dense model.</td>
           </tr>
           <!-- Victory -->
           <tr>
             <td class="icon-col"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-two-fingers"></use></svg></td>
-            <td class="gesture-name lang-zh">剪刀手 (Victory)</td>
+            <td class="gesture-name lang-zh">剪刀手</td>
             <td class="gesture-name lang-en">Victory</td>
-            <td class="lang-zh"><strong>切换渲染模式</strong>：在摄像头前比出该手势并<strong>保持超过0.7秒</strong>可触发切换。会在 3DGS 实景模式与粒子点云模式之间进行切换。</td>
+            <td class="lang-zh"><strong>切换渲染模式</strong>：在摄像头前比出该手势并<strong>保持超过 0.7 秒</strong>可触发切换。会在 3D 实景与粒子模式之间进行切换。</td>
             <td class="lang-en"><strong>Toggle Render Mode</strong>: Strike the Victory sign and <strong>hold it for over 0.7 seconds</strong> to toggle rendering between 3DGS mode and Point Cloud mode.</td>
           </tr>
           <!-- Two Fists Zoom -->
           <tr>
             <td class="icon-col"><span class="icon-pair" aria-hidden="true"><svg class="ui-icon"><use href="#icon-hand-grab"></use></svg><svg class="ui-icon"><use href="#icon-hand-grab"></use></svg></span></td>
-            <td class="gesture-name lang-zh">双手攥拳 (Two Fists)</td>
+            <td class="gesture-name lang-zh">双手攥拳</td>
             <td class="gesture-name lang-en">Two Fists</td>
-            <td class="lang-zh"><strong>双手距离缩放</strong>：同时展示两只手的攥拳状态。当两拳距离靠近或拉远时，可以无极调整 3D 模型的物理尺寸大小。</td>
+            <td class="lang-zh"><strong>双手距离缩放</strong>：同时展示两只手的攥拳状态。当两拳距离靠近或拉远时，可以无级调整 3D 模型的物理尺寸大小。</td>
             <td class="lang-en"><strong>Two-Hand Distance Zoom</strong>: Present two closed fists. Bring your fists closer or further apart to dynamically scale the 3D model size.</td>
           </tr>
           <!-- Pointing Up -->
           <tr>
             <td class="icon-col"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-finger"></use></svg></td>
-            <td class="gesture-name lang-zh">食指指向 (Pointing Up)</td>
+            <td class="gesture-name lang-zh">食指指向</td>
             <td class="gesture-name lang-en">Pointing Up</td>
             <td class="lang-zh"><strong>遥控相机视角</strong>：比出单指指向上方后，在空中移手，相机会精确跟踪您的食指指尖轨迹进行平滑视角旋转。</td>
             <td class="lang-en"><strong>Remote Camera Rotation</strong>: Show a pointing finger and move your hand. The camera will smoothly follow the trajectory of your index finger tip.</td>

@@ -802,7 +802,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 .landing-logo {
   margin-bottom: 14px;
   color: var(--accent-cyan);
-  font-size: 28px;
+  font-size: 40px;
   font-weight: 700;
   letter-spacing: -0.02em;
   filter: drop-shadow(0 0 20px rgba(0, 245, 212, 0.5));
@@ -890,7 +890,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
    ======================================== */
 .toast-container {
   position: absolute;
-  top: 76px;
+  top: 96px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 300;
@@ -1272,7 +1272,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   }
 
   .landing-logo {
-    font-size: 24px;
+    font-size: 40px;
   }
 
   .landing-card p {
