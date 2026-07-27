@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.24">
+  <link rel="stylesheet" href="css/style.css?v=3.29">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -37,6 +37,54 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 </head>
 <body class="landing-mode">
+  <!-- Selected Tabler Icons, MIT License: https://github.com/tabler/tabler-icons/blob/main/LICENSE -->
+  <svg class="svg-icon-sprite" aria-hidden="true">
+    <symbol id="icon-sparkles" viewBox="0 0 24 24">
+      <path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6"/>
+    </symbol>
+    <symbol id="icon-video" viewBox="0 0 24 24">
+      <path d="M15 10l4.553 -2.276a1 1 0 0 1 1.447 .894v6.764a1 1 0 0 1 -1.447 .894l-4.553 -2.276v-4"/>
+      <path d="M3 8a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -8"/>
+    </symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24">
+      <path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/>
+      <path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/>
+    </symbol>
+    <symbol id="icon-book" viewBox="0 0 24 24">
+      <path d="M3 19a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/>
+      <path d="M3 6a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/>
+      <path d="M3 6l0 13M12 6l0 13M21 6l0 13"/>
+    </symbol>
+    <symbol id="icon-atom" viewBox="0 0 24 24">
+      <path d="M12 12v.01"/>
+      <path d="M19.071 4.929c-1.562 -1.562 -6 .337 -9.9 4.243c-3.905 3.905 -5.804 8.337 -4.242 9.9c1.562 1.561 6 -.338 9.9 -4.244c3.905 -3.905 5.804 -8.337 4.242 -9.9"/>
+      <path d="M4.929 4.929c-1.562 1.562 .337 6 4.243 9.9c3.905 3.905 8.337 5.804 9.9 4.242c1.561 -1.562 -.338 -6 -4.244 -9.9c-3.905 -3.905 -8.337 -5.804 -9.9 -4.242"/>
+    </symbol>
+    <symbol id="icon-hand-stop" viewBox="0 0 24 24">
+      <path d="M8 13v-7.5a1.5 1.5 0 0 1 3 0v6.5"/>
+      <path d="M11 5.5v-2a1.5 1.5 0 1 1 3 0v8.5"/>
+      <path d="M14 5.5a1.5 1.5 0 0 1 3 0v6.5"/>
+      <path d="M17 7.5a1.5 1.5 0 0 1 3 0v8.5a6 6 0 0 1 -6 6h-1.792a6 6 0 0 1 -5.012 -2.7l-.196 -.3c-.312 -.479 -1.407 -2.388 -3.286 -5.728a1.5 1.5 0 0 1 .536 -2.022a1.867 1.867 0 0 1 2.28 .28l1.47 1.47"/>
+    </symbol>
+    <symbol id="icon-hand-grab" viewBox="0 0 24 24">
+      <path d="M8 11v-3.5a1.5 1.5 0 0 1 3 0v2.5M11 9.5v-3a1.5 1.5 0 0 1 3 0v3.5M14 7.5a1.5 1.5 0 0 1 3 0v2.5"/>
+      <path d="M17 9.5a1.5 1.5 0 0 1 3 0v4.5a6 6 0 0 1 -6 6h-1.792a6 6 0 0 1 -5.012 -2.7l-.196 -.3c-.312 -.479 -1.407 -2.388 -3.286 -5.728a1.5 1.5 0 0 1 .536 -2.022a1.867 1.867 0 0 1 2.28 .28l1.47 1.47"/>
+    </symbol>
+    <symbol id="icon-hand-two-fingers" viewBox="0 0 24 24">
+      <path d="M8 13v-8.5a1.5 1.5 0 0 1 3 0v7.5M17 11.5a1.5 1.5 0 0 1 3 0v4.5a6 6 0 0 1 -6 6h-1.792a6 6 0 0 1 -5.012 -2.7l-.196 -.3c-.312 -.479 -1.407 -2.388 -3.286 -5.728a1.5 1.5 0 0 1 .536 -2.022a1.867 1.867 0 0 1 2.28 .28l1.47 1.47M14 10.5a1.5 1.5 0 0 1 3 0v1.5M11 5.5v-2a1.5 1.5 0 1 1 3 0v8.5"/>
+    </symbol>
+    <symbol id="icon-hand-finger" viewBox="0 0 24 24">
+      <path d="M8 13v-8.5a1.5 1.5 0 0 1 3 0v7.5M11 11.5v-2a1.5 1.5 0 1 1 3 0v2.5M14 10.5a1.5 1.5 0 0 1 3 0v1.5"/>
+      <path d="M17 11.5a1.5 1.5 0 0 1 3 0v4.5a6 6 0 0 1 -6 6h-1.792a6 6 0 0 1 -5.012 -2.7l-.196 -.3c-.312 -.479 -1.407 -2.388 -3.286 -5.728a1.5 1.5 0 0 1 .536 -2.022a1.867 1.867 0 0 1 2.28 .28l1.47 1.47"/>
+    </symbol>
+    <symbol id="icon-loader" viewBox="0 0 24 24">
+      <path d="M12 3a9 9 0 1 0 9 9"/>
+    </symbol>
+    <symbol id="icon-circle-check" viewBox="0 0 24 24">
+      <path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"/>
+      <path d="M9 12l2 2l4 -4"/>
+    </symbol>
+  </svg>
   <div class="app-container no-select">
     <!-- Three.js Canvas -->
     <div id="canvas-container"></div>
@@ -76,19 +124,19 @@
       <input type="file" id="file-input" class="file-input-hidden" accept=".ply,.splat">
       <!-- 1. 点云模式 / Spark Mode Toggle -->
       <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle 3D Reality mode">
-        <span class="btn-icon-emoji">✨</span><span class="btn-text">3D Reality</span>
+        <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span class="btn-text">3D Reality</span>
       </button>
       <div class="toolbar-divider"></div>
 
       <!-- 2. 镜头运镜 / Camera Path Mode Toggle -->
       <button id="btn-camera-mode" class="btn btn-secondary" title="Open camera path export mode">
-        <span class="btn-icon-emoji">🎥</span><span class="btn-text">Camera Path</span>
+        <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-video"></use></svg><span class="btn-text">Camera Path</span>
       </button>
       <div class="toolbar-divider"></div>
 
       <!-- 3. 渲染设置 / Settings Toggle -->
       <button id="btn-settings" class="btn btn-secondary" title="Open rendering & filtering settings">
-        <span class="btn-icon-emoji">⚙️</span><span class="btn-text">Settings</span>
+        <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span class="btn-text">Settings</span>
       </button>
       <div class="toolbar-divider"></div>
 
@@ -100,13 +148,13 @@
 
       <!-- 4. 手势控制 / Gesture Toggle -->
       <button id="btn-gesture" class="btn btn-secondary" title="Toggle hand gesture control">
-        <span class="btn-icon-emoji">🤚</span><span class="btn-text">Gesture</span>
+        <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg><span class="btn-text">Gesture</span>
       </button>
       <div class="toolbar-divider"></div>
 
       <!-- 5. 使用指南 / Guide Link -->
       <a id="btn-guide" href="guide.html" target="_blank" class="btn btn-secondary" title="Open user guide" style="text-decoration: none;">
-        <span class="btn-icon-emoji">📖</span><span class="btn-text">Guide</span>
+        <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-book"></use></svg><span class="btn-text">Guide</span>
       </a>
     </div>
     <!-- Language Switcher (Top Right Corner) -->
@@ -347,14 +395,17 @@
         >
         <!-- Auto-play Scatter Button -->
         <button id="btn-play-scatter" class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px; display: flex; align-items: center; justify-content: center; height: 24px; min-width: 32px; margin: 0;" title="Auto-play scatter effect (0-100-0)">
-          <span class="btn-icon-emoji" style="margin: 0; font-size: 10px; font-family: inherit; font-weight: 600;">播放</span>
+          <span class="scatter-play-label" style="margin: 0; font-size: 10px; font-family: inherit; font-weight: 600;">播放</span>
         </button>
       </div>
     </div>
     <!-- ========== Remy Intro Panel ========== -->
     <div class="remy-intro-panel" id="remy-intro-panel">
       <div class="remy-intro-header">
-        <span class="remy-intro-title" id="remy-intro-title">✨ 关于 Remy</span>
+        <span class="remy-intro-title" id="remy-intro-title">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>
+          <span class="remy-intro-title-text">关于 Remy</span>
+        </span>
         <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="remy-visit-link" id="remy-visit-link">→前往 Remy 官网</a>
         <button id="btn-minimize-remy" class="remy-minimize-btn" title="最小化 / Minimize">×</button>
       </div>
@@ -373,17 +424,17 @@
         </div>
       </div>
       <div class="gesture-guide" id="gesture-guide">
-        <div class="gesture-guide-item" id="guide-palm">🖐️ 张开手掌：粒子消散</div>
-        <div class="gesture-guide-item" id="guide-fist">✊ 握拳：粒子聚集</div>
-        <div class="gesture-guide-item" id="guide-victory">✌️ 剪刀手：切换模式</div>
-        <div class="gesture-guide-item" id="guide-zoom">✊✊ 双拳缩放：缩放模型</div>
-        <div class="gesture-guide-item" id="guide-pointing">☝️ 食指：控制模型视角</div>
+        <div class="gesture-guide-item" id="guide-palm"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-stop"></use></svg><span class="gesture-guide-label">张开手掌：粒子消散</span></div>
+        <div class="gesture-guide-item" id="guide-fist"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-grab"></use></svg><span class="gesture-guide-label">握拳：粒子聚集</span></div>
+        <div class="gesture-guide-item" id="guide-victory"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-two-fingers"></use></svg><span class="gesture-guide-label">剪刀手：切换模式</span></div>
+        <div class="gesture-guide-item" id="guide-zoom"><span class="gesture-icon-pair" aria-hidden="true"><svg class="ui-icon"><use href="#icon-hand-grab"></use></svg><svg class="ui-icon"><use href="#icon-hand-grab"></use></svg></span><span class="gesture-guide-label">双拳缩放：缩放模型</span></div>
+        <div class="gesture-guide-item" id="guide-pointing"><svg class="ui-icon" aria-hidden="true"><use href="#icon-hand-finger"></use></svg><span class="gesture-guide-label">食指：控制模型视角</span></div>
       </div>
     </div>
     <!-- ========== Welcome Hint (Landing Centered Box) ========== -->
     <div class="welcome-hint" id="welcome-hint">
       <div class="landing-card">
-        <div class="landing-logo">✨RemyMaker</div>
+        <div class="landing-logo"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span>RemyMaker</span></div>
         <h2>Remy 自定义特效运镜工具</h2>
         <p>在下方输入框中粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> 或 <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 分享链接，即可开始您的 3D 粒子和 3DGS 实景体验。</p>
         
@@ -467,6 +518,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.50"></script>
+  <script type="module" src="js/app.js?v=3.51"></script>
 </body>
 </html>
