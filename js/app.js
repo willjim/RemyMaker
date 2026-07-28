@@ -85,6 +85,11 @@ const state = {
   sparkRenderer: null,
   splatMesh: null,
   splatPivot: null,
+  splatCropEdit: null,
+  splatCropSdf: null,
+  splatCropHelper: null,
+  subjectCropBounds: null,
+  sparkCropApi: null,
   lang: getInitialLanguage(), // default to Chinese unless English was explicitly selected
   isModelLoaded: false,
   isGestureActive: false,
@@ -143,6 +148,9 @@ const state = {
     maxParticles: 500000,
     cropOutliers: true,
     cropFactor: 2.5,
+    splatCropEnabled: true,
+    splatCropFactor: 1.0,
+    splatCropOffset: { x: 0, y: 0, z: 0 },
     minOpacity: 0.50,
     pointSize: 0.20,         // default point size 0.20 for soft overlapping glow dots (AdditiveBlending)
     pointDensity: 1.00,      // default point cloud density (100%)
@@ -157,6 +165,262 @@ const state = {
     particleEffectEnabled: false,
   }
 };
+
+function getSortedQuantile(sortedValues, quantile) {
+  if (!sortedValues.length) return 0;
+  const index = Math.max(0, Math.min(
+    sortedValues.length - 1,
+    Math.round((sortedValues.length - 1) * quantile)
+  ));
+  return sortedValues[index];
+}
+
+/**
+ * Estimate an axis-aligned subject ellipsoid from a bounded sample of visible
+ * splat centers. The two-pass robust-distance trim prevents a small number of
+ * remote scene splats from stretching the crop volume around the background.
+ */
+function estimateSubjectEllipsoid(positions) {
+  const pointCount = Math.floor((positions?.length || 0) / 3);
+  if (!pointCount) {
+    return {
+      center: new THREE.Vector3(),
+      radii: new THREE.Vector3(1, 1, 1),
+      sampleCount: 0,
+    };
+  }
+
+  const maxSamples = 24000;
+  const sampleCount = Math.min(pointCount, maxSamples);
+  const step = pointCount / sampleCount;
+  const samples = [];
+  const axes = [[], [], []];
+
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+    const pointIndex = Math.min(pointCount - 1, Math.floor(sampleIndex * step));
+    const offset = pointIndex * 3;
+    const x = positions[offset];
+    const y = positions[offset + 1];
+    const z = positions[offset + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    samples.push({ x, y, z });
+    axes[0].push(x);
+    axes[1].push(y);
+    axes[2].push(z);
+  }
+
+  if (!samples.length) {
+    return {
+      center: new THREE.Vector3(),
+      radii: new THREE.Vector3(1, 1, 1),
+      sampleCount: 0,
+    };
+  }
+
+  axes.forEach(axis => axis.sort((a, b) => a - b));
+  const firstCenter = new THREE.Vector3(
+    getSortedQuantile(axes[0], 0.5),
+    getSortedQuantile(axes[1], 0.5),
+    getSortedQuantile(axes[2], 0.5)
+  );
+  const deviations = [[], [], []];
+  for (const sample of samples) {
+    deviations[0].push(Math.abs(sample.x - firstCenter.x));
+    deviations[1].push(Math.abs(sample.y - firstCenter.y));
+    deviations[2].push(Math.abs(sample.z - firstCenter.z));
+  }
+  deviations.forEach(axis => axis.sort((a, b) => a - b));
+  const robustScale = new THREE.Vector3(
+    Math.max(getSortedQuantile(deviations[0], 0.5), 1e-5),
+    Math.max(getSortedQuantile(deviations[1], 0.5), 1e-5),
+    Math.max(getSortedQuantile(deviations[2], 0.5), 1e-5)
+  );
+
+  const scoredSamples = samples.map(sample => {
+    const dx = (sample.x - firstCenter.x) / robustScale.x;
+    const dy = (sample.y - firstCenter.y) / robustScale.y;
+    const dz = (sample.z - firstCenter.z) / robustScale.z;
+    return { sample, distance: Math.hypot(dx, dy, dz) };
+  }).sort((a, b) => a.distance - b.distance);
+  const coreLimit = getSortedQuantile(scoredSamples.map(item => item.distance), 0.78);
+  const coreSamples = scoredSamples
+    .filter(item => item.distance <= coreLimit)
+    .map(item => item.sample);
+  const subjectSamples = coreSamples.length >= 16 ? coreSamples : samples;
+  const subjectAxes = [[], [], []];
+  for (const sample of subjectSamples) {
+    subjectAxes[0].push(sample.x);
+    subjectAxes[1].push(sample.y);
+    subjectAxes[2].push(sample.z);
+  }
+  subjectAxes.forEach(axis => axis.sort((a, b) => a - b));
+  const center = new THREE.Vector3(
+    getSortedQuantile(subjectAxes[0], 0.5),
+    getSortedQuantile(subjectAxes[1], 0.5),
+    getSortedQuantile(subjectAxes[2], 0.5)
+  );
+  const subjectDeviations = [[], [], []];
+  for (const sample of subjectSamples) {
+    subjectDeviations[0].push(Math.abs(sample.x - center.x));
+    subjectDeviations[1].push(Math.abs(sample.y - center.y));
+    subjectDeviations[2].push(Math.abs(sample.z - center.z));
+  }
+  subjectDeviations.forEach(axis => axis.sort((a, b) => a - b));
+
+  const radii = new THREE.Vector3(
+    getSortedQuantile(subjectDeviations[0], 0.99) * 1.14,
+    getSortedQuantile(subjectDeviations[1], 0.99) * 1.14,
+    getSortedQuantile(subjectDeviations[2], 0.99) * 1.14
+  );
+  const longestRadius = Math.max(radii.x, radii.y, radii.z, 1e-3);
+  const minimumRadius = longestRadius * 0.08;
+  radii.set(
+    Math.max(radii.x, minimumRadius),
+    Math.max(radii.y, minimumRadius),
+    Math.max(radii.z, minimumRadius)
+  );
+
+  return { center, radii, sampleCount: samples.length };
+}
+
+function getSplatCropScale(factor = state.settings.splatCropFactor) {
+  // Coordinate-axis semantics: 1.0 means the detected X/Y/Z radii, 2.0
+  // doubles every radius, and 0.1 keeps ten percent of every radius.
+  return THREE.MathUtils.clamp(factor, 0.1, 10);
+}
+
+function isSplatCropEnabled() {
+  return state.settings.splatCropEnabled;
+}
+
+function updateCropToggleUI(button, enabled, mode) {
+  if (!button) return;
+  const isParticle = mode === 'particle';
+  const modeName = state.lang === 'zh'
+    ? (isParticle ? '粒子裁剪' : '3DGS 裁剪')
+    : (isParticle ? 'Particle crop' : '3DGS crop');
+  button.classList.toggle('active', enabled);
+  button.setAttribute('aria-pressed', String(enabled));
+  button.setAttribute(
+    'aria-label',
+    state.lang === 'zh'
+      ? `${enabled ? '关闭' : '打开'}${modeName}`
+      : `${enabled ? 'Disable' : 'Enable'} ${modeName}`
+  );
+  button.title = state.lang === 'zh'
+    ? `${modeName}：${enabled ? '开启' : '关闭'}`
+    : `${modeName}: ${enabled ? 'On' : 'Off'}`;
+}
+
+function disposeSplatCrop() {
+  if (state.splatCropHelper) {
+    state.splatCropHelper.removeFromParent();
+    state.splatCropHelper.geometry?.dispose();
+    state.splatCropHelper.material?.dispose();
+  }
+  state.splatCropEdit?.removeFromParent();
+  state.splatCropHelper = null;
+  state.splatCropEdit = null;
+  state.splatCropSdf = null;
+}
+
+function syncSplatCropHelperVisibility() {
+  if (!state.splatCropHelper) return;
+  const settingsVisible = dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden');
+  state.splatCropHelper.visible = Boolean(
+    isSplatCropEnabled()
+    && settingsVisible
+    && state.settings.renderer === 'spark'
+    && !state.previewActive
+    && !state.recordingActive
+    && !state.compositingActive
+  );
+}
+
+function updateSplatCropFromSettings() {
+  const bounds = state.subjectCropBounds;
+  if (!bounds || !state.splatCropEdit || !state.splatCropSdf) return;
+  const enabled = isSplatCropEnabled();
+  const cropScale = getSplatCropScale();
+  const cropRadii = bounds.radii.clone().multiplyScalar(cropScale);
+  const offset = state.settings.splatCropOffset;
+  const cropCenter = bounds.center.clone().add(new THREE.Vector3(
+    bounds.radii.x * offset.x,
+    bounds.radii.y * offset.y,
+    bounds.radii.z * offset.z
+  ));
+
+  state.splatCropEdit.visible = enabled;
+  state.splatCropSdf.position.copy(cropCenter);
+  state.splatCropSdf.scale.copy(cropRadii);
+  state.splatCropSdf.updateMatrixWorld(true);
+
+  if (state.splatCropHelper) {
+    state.splatCropHelper.position.copy(cropCenter);
+    state.splatCropHelper.scale.copy(cropRadii);
+    state.splatCropHelper.updateMatrixWorld(true);
+  }
+  syncSplatCropHelperVisibility();
+}
+
+function configureSplatCrop(mesh, data) {
+  const {
+    SplatEdit,
+    SplatEditSdf,
+    SplatEditSdfType,
+    SplatEditRgbaBlendMode,
+  } = state.sparkCropApi || {};
+  if (!SplatEdit || !SplatEditSdf || !SplatEditSdfType || !SplatEditRgbaBlendMode) {
+    console.warn('Spark SplatEdit is unavailable; 3DGS background crop was not applied.');
+    return;
+  }
+
+  if (!state.subjectCropBounds) {
+    state.subjectCropBounds = estimateSubjectEllipsoid(data.positions);
+    console.log('[3DGS Subject Crop]', {
+      center: state.subjectCropBounds.center.toArray(),
+      radii: state.subjectCropBounds.radii.toArray(),
+      sampleCount: state.subjectCropBounds.sampleCount,
+    });
+  }
+
+  const cropEdit = new SplatEdit({
+    name: 'RemyMaker Subject Ellipsoid Crop',
+    rgbaBlendMode: SplatEditRgbaBlendMode.MULTIPLY,
+    sdfSmooth: 0,
+    softEdge: 0,
+  });
+  const cropSdf = new SplatEditSdf({
+    type: SplatEditSdfType.ELLIPSOID,
+    invert: true,
+    opacity: 0,
+    color: new THREE.Color(1, 1, 1),
+    displace: new THREE.Vector3(0, 0, 0),
+  });
+  cropEdit.add(cropSdf);
+  mesh.add(cropEdit);
+
+  const helper = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 32, 18),
+    new THREE.MeshBasicMaterial({
+      color: 0x00a8ff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.72,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    })
+  );
+  helper.name = '3DGS Subject Crop Ellipsoid';
+  helper.renderOrder = 10000;
+  mesh.add(helper);
+
+  state.splatCropEdit = cropEdit;
+  state.splatCropSdf = cropSdf;
+  state.splatCropHelper = helper;
+  updateSplatCropFromSettings();
+}
 // ============================================================
 // DOM References
 // ============================================================
@@ -182,6 +446,16 @@ function cacheDom() {
     settingMaxParticles: document.getElementById('setting-max-particles'),
     settingCropFactor: document.getElementById('setting-crop-factor'),
     settingCropFactorVal: document.getElementById('setting-crop-factor-val'),
+    btnParticleCropToggle: document.getElementById('btn-particle-crop-toggle'),
+    settingSplatCropFactor: document.getElementById('setting-splat-crop-factor'),
+    settingSplatCropFactorVal: document.getElementById('setting-splat-crop-factor-val'),
+    btnSplatCropToggle: document.getElementById('btn-splat-crop-toggle'),
+    settingSplatCropOffsetX: document.getElementById('setting-splat-crop-offset-x'),
+    settingSplatCropOffsetY: document.getElementById('setting-splat-crop-offset-y'),
+    settingSplatCropOffsetZ: document.getElementById('setting-splat-crop-offset-z'),
+    settingSplatCropOffsetXVal: document.getElementById('setting-splat-crop-offset-x-val'),
+    settingSplatCropOffsetYVal: document.getElementById('setting-splat-crop-offset-y-val'),
+    settingSplatCropOffsetZVal: document.getElementById('setting-splat-crop-offset-z-val'),
     settingMinOpacity: document.getElementById('setting-min-opacity'),
     settingMinOpacityVal: document.getElementById('setting-min-opacity-val'),
     settingPointSize: document.getElementById('setting-point-size'),
@@ -426,7 +700,12 @@ const translations = {
     'opt-particles-150k': '150,000 (推荐)',
     'opt-particles-300k': '300,000 (高精)',
     'opt-particles-500k': '500,000 (极精)',
-    'label-crop-factor': '过滤背景范围 (裁剪)',
+    'label-crop-factor': '粒子裁剪背景',
+    'label-splat-crop-factor': '3DGS 裁剪背景',
+    'label-splat-crop-center': '调整 3DGS 裁剪中心',
+    'label-splat-crop-offset-x': '水平 X',
+    'label-splat-crop-offset-y': '垂直 Y',
+    'label-splat-crop-offset-z': '深度 Z',
     'label-min-opacity': '最小不透明度 (3DGS模式)',
     'label-point-size': '点云粒子大小',
     'label-point-density': '点云粒子密度',
@@ -588,7 +867,12 @@ const translations = {
     'opt-particles-150k': '150,000 (Recommended)',
     'opt-particles-300k': '300,000 (High Detail)',
     'opt-particles-500k': '500,000 (Maximum)',
-    'label-crop-factor': 'Filter Background (Crop)',
+    'label-crop-factor': 'Particle Background Crop',
+    'label-splat-crop-factor': '3DGS Background Crop',
+    'label-splat-crop-center': 'Adjust 3DGS Crop Center',
+    'label-splat-crop-offset-x': 'Horizontal X',
+    'label-splat-crop-offset-y': 'Vertical Y',
+    'label-splat-crop-offset-z': 'Depth Z',
     'label-min-opacity': 'Min Opacity (3DGS)',
     'label-point-size': 'Base Particle Size',
     'label-point-density': 'Point Cloud Density',
@@ -839,6 +1123,19 @@ function applyTranslations(lang) {
     if (labelParticles) labelParticles.textContent = dict['label-max-particles'];
     const labelCrop = dom.settingsPanel.querySelector('label[for="setting-crop-factor"]');
     if (labelCrop) labelCrop.textContent = dict['label-crop-factor'];
+    const labelSplatCrop = dom.settingsPanel.querySelector('label[for="setting-splat-crop-factor"]');
+    if (labelSplatCrop) labelSplatCrop.textContent = dict['label-splat-crop-factor'];
+    const splatCropCenterSummary = dom.settingsPanel.querySelector('.splat-crop-center-summary');
+    if (splatCropCenterSummary) splatCropCenterSummary.textContent = dict['label-splat-crop-center'];
+    const splatCropOffsetLabels = [
+      ['setting-splat-crop-offset-x', 'label-splat-crop-offset-x'],
+      ['setting-splat-crop-offset-y', 'label-splat-crop-offset-y'],
+      ['setting-splat-crop-offset-z', 'label-splat-crop-offset-z'],
+    ];
+    for (const [inputId, translationKey] of splatCropOffsetLabels) {
+      const label = dom.settingsPanel.querySelector(`label[for="${inputId}"]`);
+      if (label) label.textContent = dict[translationKey];
+    }
     const labelMinOpacity = dom.settingsPanel.querySelector('label[for="setting-min-opacity"]');
     if (labelMinOpacity) labelMinOpacity.textContent = dict['label-min-opacity'];
     const labelPointSize = dom.settingsPanel.querySelector('label[for="setting-point-size"]');
@@ -865,6 +1162,8 @@ function applyTranslations(lang) {
     mobileTags.forEach((tag, index) => {
       tag.textContent = tagLabels[index];
     });
+    updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
     
     if (dom.settingMaxParticles) {
       dom.settingMaxParticles.options[0].textContent = dict['opt-particles-50k'];
@@ -1166,6 +1465,7 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  disposeSplatCrop();
   if (state.splatPivot) {
     state.scene.remove(state.splatPivot);
     state.splatPivot = null;
@@ -1196,6 +1496,23 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.previewStart = null;
   state.cameraPathFirstFrame = null;
   state.restoreCameraPathFirstFrameOnOpen = false;
+  if (isFreshLoad) {
+    state.subjectCropBounds = null;
+    state.settings.splatCropEnabled = true;
+    state.settings.splatCropFactor = 1.0;
+    state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
+    if (dom.settingSplatCropFactor) dom.settingSplatCropFactor.value = '1.00';
+    if (dom.settingSplatCropFactorVal) dom.settingSplatCropFactorVal.textContent = '1.00x';
+    updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
+    for (const [input, display] of [
+      [dom.settingSplatCropOffsetX, dom.settingSplatCropOffsetXVal],
+      [dom.settingSplatCropOffsetY, dom.settingSplatCropOffsetYVal],
+      [dom.settingSplatCropOffsetZ, dom.settingSplatCropOffsetZVal],
+    ]) {
+      if (input) input.value = '0';
+      if (display) display.textContent = '0%';
+    }
+  }
   invalidateCustomCameraPath();
   if (state.cameraModeActive) {
     toggleCameraMode();
@@ -1208,10 +1525,24 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   if (!state.sparkRenderer) {
     updateLoadingProgress(0.72, 'Loading rendering engine...');
     try {
-      const { SparkRenderer, SplatMesh } = await import('@sparkjsdev/spark');
+      const sparkModule = await import('@sparkjsdev/spark');
+      const {
+        SparkRenderer,
+        SplatMesh,
+        SplatEdit,
+        SplatEditSdf,
+        SplatEditSdfType,
+        SplatEditRgbaBlendMode,
+      } = sparkModule;
       state.sparkRenderer = new SparkRenderer({ renderer: state.renderer });
       state.scene.add(state.sparkRenderer);
       state.SplatMeshClass = SplatMesh;
+      state.sparkCropApi = {
+        SplatEdit,
+        SplatEditSdf,
+        SplatEditSdfType,
+        SplatEditRgbaBlendMode,
+      };
     } catch (err) {
       console.error('Failed to load rendering engine dynamically:', err);
       showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
@@ -1241,18 +1572,13 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
     
     // Dynamically apply recommended crop factor for fresh model loads
     if (isFreshLoad && data && data.recommendedCropFactor !== undefined) {
-      const factor = data.recommendedCropFactor;
+      const factor = THREE.MathUtils.clamp(data.recommendedCropFactor, 0.5, 3.0);
       state.settings.cropFactor = factor;
-      if (factor >= 3.0) {
-        state.settings.cropOutliers = false;
-      } else {
-        state.settings.cropOutliers = true;
-      }
       if (dom.settingCropFactor) {
         dom.settingCropFactor.value = factor.toFixed(2);
       }
       if (dom.settingCropFactorVal) {
-        dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
+        dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
       }
     }
   } catch (err) {
@@ -1309,6 +1635,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
         
         // Set default opacity based on current interpolation setting
         mesh.opacity = state.splatInterpolation;
+        configureSplatCrop(mesh, data);
         // Add splat mesh to the pivot group (ensuring matching world-space rotation Y direction)
         state.splatPivot = new THREE.Group();
         state.splatPivot.add(mesh);
@@ -1331,9 +1658,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
           state.camera.position.copy(camPos);
           console.log('Using initial camera position from cameras.json (flipped Y):', camPos);
         } else {
-          const cropFactor = state.settings.cropOutliers ? state.settings.cropFactor : 1.0;
-          const targetDistance = 1.0 / cropFactor;
-          state.camera.position.set(0, 0.15 * targetDistance, targetDistance);
+          state.camera.position.set(0, 0.15, 1.0);
         }
         state.controls.target.set(0, 0, 0);
         state.controls.update();
@@ -1861,6 +2186,7 @@ function updateRendererUI() {
       updateRemyPositionDeferred();
     }
   }
+  syncSplatCropHelperVisibility();
 }
 function setRendererMode(mode, source = 'timeline') {
   if (mode !== 'particles' && mode !== 'spark') return;
@@ -1952,6 +2278,7 @@ function toggleCameraMode() {
     dom.settingsPanel.classList.add('hidden');
     dom.btnSettings.classList.remove('active');
     document.body.classList.remove('settings-panel-active');
+    syncSplatCropHelperVisibility();
     
     // Pause auto-rotation immediately
     if (state.particleSystem) {
@@ -3753,6 +4080,7 @@ function setupEventListeners() {
     dom.settingsPanel.classList.toggle('hidden');
     dom.btnSettings.classList.toggle('active');
     document.body.classList.toggle('settings-panel-active', !dom.settingsPanel.classList.contains('hidden'));
+    syncSplatCropHelperVisibility();
     
     // Auto-hide camera path panel if settings are opened
     if (state.cameraModeActive) {
@@ -3986,38 +4314,79 @@ function setupEventListeners() {
   dom.settingScatterEffect.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
   dom.cameraScatterEffect?.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
   // Crop factor range slider - continuous input for display, change event for reload
+  let particleCropReloadTimer = null;
+  const reloadParticleCrop = () => {
+    if (!state.lastLoadedBuffer) return;
+    if (particleCropReloadTimer) clearTimeout(particleCropReloadTimer);
+    showLoading('Reloading...');
+    particleCropReloadTimer = setTimeout(async () => {
+      particleCropReloadTimer = null;
+      try {
+        await processBuffer(state.lastLoadedBuffer, state.lastLoadedName);
+      } catch (err) {
+        hideLoading();
+        showToast(`Error: ${err.message}`, 'error');
+      }
+    }, 50);
+  };
+
   if (dom.settingCropFactor) {
     dom.settingCropFactor.addEventListener('input', (e) => {
-      const factor = parseFloat(e.target.value);
-      dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
+      const factor = THREE.MathUtils.clamp(parseFloat(e.target.value), 0.5, 3.0);
+      state.settings.cropFactor = factor;
+      dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
     });
     
-    dom.settingCropFactor.addEventListener('change', async (e) => {
-      const factor = parseFloat(e.target.value);
-      if (factor >= 3.0) {
-        state.settings.cropOutliers = false;
-        state.settings.cropFactor = 3.0;
-      } else {
-        state.settings.cropOutliers = true;
-        state.settings.cropFactor = factor;
-      }
-      
-      // Update displayed value to represent the stored value
-      dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
-      
-      // Immediately reload model with the new crop settings
-      if (state.lastLoadedBuffer) {
-        showLoading('Reloading...');
-        setTimeout(async () => {
-          try {
-            await processBuffer(state.lastLoadedBuffer, state.lastLoadedName);
-          } catch (err) {
-            hideLoading();
-            showToast(`Error: ${err.message}`, 'error');
-          }
-        }, 50);
-      }
+    dom.settingCropFactor.addEventListener('change', (e) => {
+      const factor = THREE.MathUtils.clamp(parseFloat(e.target.value), 0.5, 3.0);
+      state.settings.cropFactor = factor;
+      dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
+      if (state.settings.cropOutliers) reloadParticleCrop();
     });
+  }
+
+  dom.btnParticleCropToggle?.addEventListener('click', () => {
+    state.settings.cropOutliers = !state.settings.cropOutliers;
+    updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
+    reloadParticleCrop();
+  });
+
+  // Spark SplatEdit crop is independent from particle parsing and updates live.
+  if (dom.settingSplatCropFactor) {
+    const applySplatCropFactor = (value) => {
+      const factor = THREE.MathUtils.clamp(parseFloat(value), 0.1, 10);
+      state.settings.splatCropFactor = factor;
+      dom.settingSplatCropFactorVal.textContent = `${factor.toFixed(2)}x`;
+      updateSplatCropFromSettings();
+    };
+    dom.settingSplatCropFactor.addEventListener('input', (e) => applySplatCropFactor(e.target.value));
+    dom.settingSplatCropFactor.addEventListener('change', (e) => applySplatCropFactor(e.target.value));
+  }
+
+  dom.btnSplatCropToggle?.addEventListener('click', () => {
+    state.settings.splatCropEnabled = !state.settings.splatCropEnabled;
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropFromSettings();
+  });
+
+  const splatCropOffsetControls = [
+    ['x', dom.settingSplatCropOffsetX, dom.settingSplatCropOffsetXVal],
+    ['y', dom.settingSplatCropOffsetY, dom.settingSplatCropOffsetYVal],
+    ['z', dom.settingSplatCropOffsetZ, dom.settingSplatCropOffsetZVal],
+  ];
+  for (const [axis, input, display] of splatCropOffsetControls) {
+    if (!input) continue;
+    const applyOffset = (value) => {
+      const offset = THREE.MathUtils.clamp(parseFloat(value), -1, 1);
+      state.settings.splatCropOffset[axis] = offset;
+      if (display) {
+        const percent = Math.round(offset * 100);
+        display.textContent = `${percent > 0 ? '+' : ''}${percent}%`;
+      }
+      updateSplatCropFromSettings();
+    };
+    input.addEventListener('input', (e) => applyOffset(e.target.value));
+    input.addEventListener('change', (e) => applyOffset(e.target.value));
   }
   
   // Prevent webpage zoom/scroll during flight preview
