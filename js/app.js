@@ -97,6 +97,7 @@ const state = {
   manualControl: false,     // true when user drags the slider
   splatInterpolation: 0.0,   // default starts fully at Particle Cloud (0.0)
   splatInterpolationTarget: 0.0,
+  sparkPrewarmActive: false,
   fps: 0,
   frameCount: 0,
   lastFpsTime: 0,
@@ -612,7 +613,11 @@ function initializeScatterEffectControls() {
 function syncModelRendererVisibility() {
   if (!state.isModelLoaded) return;
   const showParticles = state.splatInterpolation < (1.0 - RENDERER_VISIBILITY_EPSILON);
-  const showSpark = state.splatInterpolation > RENDERER_VISIBILITY_EPSILON;
+  // Keep transparent 3DGS rendering alive briefly before an exported
+  // particle -> reality switch. Spark can then settle its camera sorting and
+  // SplatEdit crop before the first visible 3DGS frame is encoded.
+  const showSpark = state.sparkPrewarmActive
+    || state.splatInterpolation > RENDERER_VISIBILITY_EPSILON;
 
   if (
     state.rendererVisibility.particles === showParticles &&
@@ -2007,17 +2012,26 @@ function animate() {
     state.lastGesture = currentGesture;
   }
   if (state.previewActive) {
+    setSparkPrewarmActive(false);
     applyRendererTimelineAtTime(
       state.previewTime,
       state.previewInitialRenderer,
       state.previewRendererTimeline
     );
   } else if (state.recordingActive) {
+    setSparkPrewarmActive(shouldPrewarmSparkAtTime(
+      state.recordTime,
+      state.exportInitialRenderer,
+      state.exportRendererTimeline,
+      state.recordingFps
+    ));
     applyRendererTimelineAtTime(
       state.recordTime,
       state.exportInitialRenderer,
       state.exportRendererTimeline
     );
+  } else {
+    setSparkPrewarmActive(false);
   }
   if (state.previewActive) {
     updateFlightGatherProgress(state.previewTime);
@@ -2094,6 +2108,7 @@ function animate() {
     
     if (state.recordTime >= totalDuration) {
       state.recordingActive = false;
+      setSparkPrewarmActive(false);
       state.controls.enabled = true; // Restore OrbitControls
       // Stop after this animation turn has rendered its exact t=1 endpoint.
       const recorder = state.mediaRecorder;
@@ -2220,6 +2235,36 @@ function getRendererAtTime(time, initialRenderer, timeline = []) {
 
 function applyRendererTimelineAtTime(time, initialRenderer, timeline = []) {
   setRendererMode(getRendererAtTime(time, initialRenderer, timeline), 'timeline');
+}
+
+const SPARK_EXPORT_PREWARM_FRAMES = 6;
+
+function shouldPrewarmSparkAtTime(
+  time,
+  initialRenderer,
+  timeline = [],
+  fps = EXPORT_FPS
+) {
+  if (getRendererAtTime(time, initialRenderer, timeline) === 'spark') return false;
+  const prewarmDuration = SPARK_EXPORT_PREWARM_FRAMES / Math.max(1, fps);
+  return timeline.some(event => (
+    event.renderer === 'spark'
+    && event.time > time + 0.0001
+    && event.time - time <= prewarmDuration + 0.0001
+  ));
+}
+
+function setSparkPrewarmActive(active) {
+  const nextActive = Boolean(active);
+  if (state.sparkPrewarmActive === nextActive) return;
+  state.sparkPrewarmActive = nextActive;
+  if (nextActive) {
+    // Re-apply the latest crop matrix before Spark becomes visible. Crop
+    // center/size remain model-edit data and never mutate camera-path state.
+    updateSplatCropFromSettings();
+  }
+  state.rendererVisibility.spark = null;
+  syncModelRendererVisibility();
 }
 
 function recordPreviewRendererSwitch(renderer) {
@@ -2517,7 +2562,11 @@ function initCameraCurves() {
   const cameraOffsets = [];
   let lastTheta = 0;
   state.keyframes.forEach((kf, idx) => {
-    const offset = new THREE.Vector3().copy(kf.position).sub(kf.target);
+    // The editable 3DGS crop center is deliberately not involved in camera
+    // math. Measure every saved position from the one locked path target:
+    // target translation remains filtered, while every keyframe position is
+    // still an exact endpoint instead of being displaced by its own target.
+    const offset = new THREE.Vector3().copy(kf.position).sub(lockedTarget);
     cameraOffsets.push(offset.clone());
     const spherical = new THREE.Spherical().setFromVector3(offset);
     
@@ -3370,6 +3419,7 @@ function configureExportCanvas(session) {
 
 function resetExportPlayback(session) {
   cancelGatherAnimation();
+  setSparkPrewarmActive(false);
   state.recordTime = 0;
   state.virtualElapsedTime = 0;
   state.camera.position.copy(session.startCamera.position);
@@ -3386,6 +3436,12 @@ function resetExportPlayback(session) {
 }
 
 function renderExportFrame(session, timelineTime, flightProgress) {
+  setSparkPrewarmActive(shouldPrewarmSparkAtTime(
+    timelineTime,
+    session.initialRenderer,
+    session.rendererTimeline,
+    session.fps
+  ));
   applyRendererTimelineAtTime(
     timelineTime,
     session.initialRenderer,
@@ -3426,13 +3482,17 @@ function renderExportFrame(session, timelineTime, flightProgress) {
     state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
   }
   return Boolean(
-    state.splatMesh?.visible
-    && (state.splatMesh.opacity ?? 0) > RENDERER_VISIBILITY_EPSILON
+    state.sparkPrewarmActive
+    || (
+      state.splatMesh?.visible
+      && (state.splatMesh.opacity ?? 0) > RENDERER_VISIBILITY_EPSILON
+    )
   );
 }
 
 function restoreAfterExport(session) {
   cancelGatherAnimation();
+  setSparkPrewarmActive(false);
   state.recordingActive = false;
   state.exportPreparing = false;
   state.exportInitialRenderer = null;
