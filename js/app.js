@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
-import { ParticleSystem } from './particleSystem.js?v=3.5';
+import { ParticleSystem } from './particleSystem.js?v=3.6';
 import { GestureControl } from './gestureControl.js?v=1.1';
 import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.1';
 import fixWebmDuration from 'fix-webm-duration';
@@ -88,6 +88,8 @@ const state = {
   splatCropEdit: null,
   splatCropSdf: null,
   splatCropHelper: null,
+  splatCropHandles: null,
+  splatCropDrag: null,
   subjectCropBounds: null,
   sparkCropApi: null,
   lang: getInitialLanguage(), // default to Chinese unless English was explicitly selected
@@ -117,8 +119,9 @@ const state = {
   cameraSphericalPoints: null,
   cameraSphericalTangents: null,
   cameraLockedTarget: null,
-  cameraTimingCurve: null,
-  cameraTimingLength: 0,
+  cameraArcLengthProgress: null,
+  cameraArcLengthDistances: null,
+  cameraArcLengthTotal: 0,
   cameraModeActive: false,  // true when camera path panel is visible
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
@@ -150,7 +153,8 @@ const state = {
     cropOutliers: true,
     cropFactor: 2.5,
     splatCropEnabled: true,
-    splatCropFactor: 1.0,
+    splatCropShape: 'ellipsoid',
+    splatCropRadiiScale: { x: 1, y: 1, z: 1 },
     splatCropOffset: { x: 0, y: 0, z: 0 },
     minOpacity: 0.50,
     pointSize: 0.20,         // default point size 0.20 for soft overlapping glow dots (AdditiveBlending)
@@ -284,10 +288,75 @@ function estimateSubjectEllipsoid(positions) {
   return { center, radii, sampleCount: samples.length };
 }
 
-function getSplatCropScale(factor = state.settings.splatCropFactor) {
-  // Coordinate-axis semantics: 1.0 means the detected X/Y/Z radii, 2.0
-  // doubles every radius, and 0.1 keeps ten percent of every radius.
-  return THREE.MathUtils.clamp(factor, 0.1, 10);
+function analyzeParticleCropBounds(positions, count) {
+  const safeCount = Math.min(count || 0, Math.floor((positions?.length || 0) / 3));
+  if (!positions || safeCount <= 0) {
+    return {
+      center: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      recommendedFactor: 2.5,
+    };
+  }
+
+  const sampleLimit = Math.min(10000, safeCount);
+  const sampleStep = Math.max(1, Math.floor(safeCount / sampleLimit));
+  const samples = [];
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+
+  for (let i = 0; i < safeCount && samples.length < sampleLimit; i += sampleStep) {
+    const offset = i * 3;
+    const x = positions[offset];
+    const y = positions[offset + 1];
+    const z = positions[offset + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    samples.push([x, y, z]);
+    sumX += x;
+    sumY += y;
+    sumZ += z;
+  }
+
+  if (samples.length === 0) {
+    return {
+      center: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      recommendedFactor: 2.5,
+    };
+  }
+
+  const center = {
+    x: sumX / samples.length,
+    y: sumY / samples.length,
+    z: sumZ / samples.length,
+  };
+  const distances = samples
+    .map(([x, y, z]) => Math.hypot(x - center.x, y - center.y, z - center.z))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  if (distances.length === 0) {
+    return { center, radius: 0, recommendedFactor: 2.5 };
+  }
+
+  const radius = distances[Math.floor(distances.length * 0.5)];
+  if (!(radius > 0)) {
+    return { center, radius: 0, recommendedFactor: 2.5 };
+  }
+
+  let farCount = 0;
+  let sumSqDiff = 0;
+  for (const distance of distances) {
+    sumSqDiff += (distance - radius) ** 2;
+    if (distance > radius * 1.8) farCount++;
+  }
+  const coefficientOfVariation = Math.sqrt(sumSqDiff / distances.length) / radius;
+  const farRatio = farCount / distances.length;
+  let recommendedFactor = 2.5;
+  if (coefficientOfVariation > 0.8) {
+    recommendedFactor = farRatio < 0.05 ? 1.5 : (farRatio < 0.12 ? 2.0 : 3.0);
+  }
+
+  return { center, radius, recommendedFactor };
 }
 
 function isSplatCropEnabled() {
@@ -313,37 +382,245 @@ function updateCropToggleUI(button, enabled, mode) {
     : `${modeName}: ${enabled ? 'On' : 'Off'}`;
 }
 
+function normalizeSplatCropShape(shape) {
+  return shape === 'box' ? 'box' : 'ellipsoid';
+}
+
+function updateSplatCropShapeUI() {
+  const shape = normalizeSplatCropShape(state.settings.splatCropShape);
+  const buttons = [
+    [dom.btnSplatCropShapeEllipsoid, 'ellipsoid'],
+    [dom.btnSplatCropShapeBox, 'box'],
+  ];
+  for (const [button, buttonShape] of buttons) {
+    if (!button) continue;
+    const selected = buttonShape === shape;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+}
+
+function disposeObject3DResources(root) {
+  if (!root) return;
+  const geometries = new Set();
+  const materials = new Set();
+  root.traverse((object) => {
+    if (object.geometry) geometries.add(object.geometry);
+    const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of objectMaterials) {
+      if (material) materials.add(material);
+    }
+  });
+  geometries.forEach((geometry) => geometry.dispose());
+  materials.forEach((material) => material.dispose());
+}
+
+function createSplatCropHelper(shape) {
+  const normalizedShape = normalizeSplatCropShape(shape);
+  const surfaceGeometry = normalizedShape === 'box'
+    ? new THREE.BoxGeometry(2, 2, 2)
+    : new THREE.SphereGeometry(1, 32, 18);
+  const helper = new THREE.Group();
+
+  // Front/back face culling provides a depth cue without writing into the
+  // depth buffer (which would otherwise hide Spark splats rendered later).
+  const farLines = new THREE.Mesh(
+    surfaceGeometry,
+    new THREE.MeshBasicMaterial({
+      color: 0x00a8ff,
+      wireframe: true,
+      side: THREE.BackSide,
+      transparent: true,
+      opacity: 0.055,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    })
+  );
+  farLines.name = '3DGS Crop Far-Side Guide';
+  farLines.renderOrder = 9997;
+
+  const nearLines = new THREE.Mesh(
+    surfaceGeometry,
+    new THREE.MeshBasicMaterial({
+      color: 0x00a8ff,
+      wireframe: true,
+      side: THREE.FrontSide,
+      transparent: true,
+      opacity: 0.82,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    })
+  );
+  nearLines.name = '3DGS Crop Near-Side Guide';
+  nearLines.renderOrder = 9999;
+
+  helper.add(farLines, nearLines);
+  helper.name = normalizedShape === 'box'
+    ? '3DGS Subject Crop Box'
+    : '3DGS Subject Crop Ellipsoid';
+  helper.userData.cropShape = normalizedShape;
+  return helper;
+}
+
+const SPLAT_CROP_AXIS_COLORS = {
+  x: 0xff5365,
+  y: 0x3dc76f,
+  z: 0x347eff,
+};
+
+function createSplatCropHandles(bounds) {
+  const handles = new THREE.Group();
+  handles.name = '3DGS Crop Face Handles';
+  const handleLength = Math.max(bounds.radii.x, bounds.radii.y, bounds.radii.z, 1e-3) * 0.2;
+  const shaftLength = handleLength * 0.58;
+  const coneLength = handleLength * 0.34;
+  const shaftRadius = handleLength * 0.055;
+  const coneRadius = handleLength * 0.15;
+  const defaultDirection = new THREE.Vector3(0, 1, 0);
+
+  for (const axis of ['x', 'y', 'z']) {
+    for (const sign of [-1, 1]) {
+      const direction = new THREE.Vector3(
+        axis === 'x' ? sign : 0,
+        axis === 'y' ? sign : 0,
+        axis === 'z' ? sign : 0
+      );
+      const handle = new THREE.Group();
+      handle.name = `3DGS Crop ${axis.toUpperCase()} ${sign > 0 ? 'Positive' : 'Negative'} Handle`;
+      handle.userData.cropHandle = { axis, sign };
+      handle.quaternion.setFromUnitVectors(defaultDirection, direction);
+
+      const material = new THREE.MeshBasicMaterial({
+        color: SPLAT_CROP_AXIS_COLORS[axis],
+        transparent: true,
+        opacity: 0.96,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftLength, 12),
+        material
+      );
+      shaft.position.y = shaftLength * 0.5;
+      shaft.renderOrder = 10002;
+
+      const head = new THREE.Mesh(
+        new THREE.ConeGeometry(coneRadius, coneLength, 16),
+        material
+      );
+      head.position.y = shaftLength + coneLength * 0.5;
+      head.renderOrder = 10002;
+      // Only the visible shaft and cone participate in raycasting so the
+      // surrounding empty area cannot accidentally start a crop drag.
+      handle.add(shaft, head);
+      handles.add(handle);
+    }
+  }
+  return handles;
+}
+
+function updateSplatCropHandlePositions(cropCenter, cropRadii) {
+  if (!state.splatCropHandles) return;
+  for (const handle of state.splatCropHandles.children) {
+    const { axis, sign } = handle.userData.cropHandle || {};
+    if (!axis || !sign) continue;
+    handle.position.copy(cropCenter);
+    handle.position[axis] += cropRadii[axis] * sign;
+  }
+  state.splatCropHandles.updateMatrixWorld(true);
+}
+
+function createSplatCropSdf(shape) {
+  const { SplatEditSdf, SplatEditSdfType } = state.sparkCropApi || {};
+  if (!SplatEditSdf || !SplatEditSdfType) return null;
+  const normalizedShape = normalizeSplatCropShape(shape);
+  return new SplatEditSdf({
+    type: normalizedShape === 'box' ? SplatEditSdfType.BOX : SplatEditSdfType.ELLIPSOID,
+    invert: true,
+    opacity: 0,
+    color: new THREE.Color(1, 1, 1),
+    displace: new THREE.Vector3(0, 0, 0),
+  });
+}
+
+function replaceSplatCropHelper() {
+  if (!state.splatMesh) return;
+  if (state.splatCropHelper) {
+    state.splatCropHelper.removeFromParent();
+    disposeObject3DResources(state.splatCropHelper);
+  }
+  state.splatCropHelper = createSplatCropHelper(state.settings.splatCropShape);
+  state.splatMesh.add(state.splatCropHelper);
+}
+
+function applySplatCropShape(shape) {
+  const normalizedShape = normalizeSplatCropShape(shape);
+  state.settings.splatCropShape = normalizedShape;
+  updateSplatCropShapeUI();
+  if (!state.splatCropEdit || !state.splatMesh) return;
+
+  state.splatCropSdf?.removeFromParent();
+  const nextSdf = createSplatCropSdf(normalizedShape);
+  if (!nextSdf) return;
+  state.splatCropEdit.add(nextSdf);
+  state.splatCropSdf = nextSdf;
+  replaceSplatCropHelper();
+  state.splatMesh.updateGenerator?.();
+  updateSplatCropFromSettings();
+}
+
 function disposeSplatCrop() {
   if (state.splatCropHelper) {
     state.splatCropHelper.removeFromParent();
-    state.splatCropHelper.geometry?.dispose();
-    state.splatCropHelper.material?.dispose();
+    disposeObject3DResources(state.splatCropHelper);
+  }
+  if (state.splatCropHandles) {
+    state.splatCropHandles.removeFromParent();
+    disposeObject3DResources(state.splatCropHandles);
   }
   state.splatCropEdit?.removeFromParent();
+  endSplatCropDrag();
   state.splatCropHelper = null;
+  state.splatCropHandles = null;
   state.splatCropEdit = null;
   state.splatCropSdf = null;
 }
 
 function syncSplatCropHelperVisibility() {
-  if (!state.splatCropHelper) return;
   const settingsVisible = dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden');
-  state.splatCropHelper.visible = Boolean(
+  const mobileCropEditorVisible = !isMobileViewport() || Boolean(
+    document.getElementById('setting-crop-item')?.classList.contains('mobile-active')
+    && document.getElementById('splat-crop-controls')?.classList.contains('mobile-expanded')
+  );
+  const visible = Boolean(
     isSplatCropEnabled()
     && settingsVisible
+    && mobileCropEditorVisible
     && state.settings.renderer === 'spark'
     && !state.previewActive
     && !state.recordingActive
     && !state.compositingActive
   );
+  if (state.splatCropHelper) state.splatCropHelper.visible = visible;
+  if (state.splatCropHandles) state.splatCropHandles.visible = visible;
+  if (!visible && state.renderer?.domElement && !state.splatCropDrag) {
+    state.renderer.domElement.style.cursor = '';
+  }
 }
 
 function updateSplatCropFromSettings() {
   const bounds = state.subjectCropBounds;
   if (!bounds || !state.splatCropEdit || !state.splatCropSdf) return;
   const enabled = isSplatCropEnabled();
-  const cropScale = getSplatCropScale();
-  const cropRadii = bounds.radii.clone().multiplyScalar(cropScale);
+  const radiiScale = state.settings.splatCropRadiiScale;
+  const cropRadii = bounds.radii.clone().multiply(new THREE.Vector3(
+    THREE.MathUtils.clamp(radiiScale.x, 0.1, 10),
+    THREE.MathUtils.clamp(radiiScale.y, 0.1, 10),
+    THREE.MathUtils.clamp(radiiScale.z, 0.1, 10)
+  ));
   const offset = state.settings.splatCropOffset;
   const cropCenter = bounds.center.clone().add(new THREE.Vector3(
     bounds.radii.x * offset.x,
@@ -361,6 +638,7 @@ function updateSplatCropFromSettings() {
     state.splatCropHelper.scale.copy(cropRadii);
     state.splatCropHelper.updateMatrixWorld(true);
   }
+  updateSplatCropHandlePositions(cropCenter, cropRadii);
   syncSplatCropHelperVisibility();
 }
 
@@ -386,40 +664,178 @@ function configureSplatCrop(mesh, data) {
   }
 
   const cropEdit = new SplatEdit({
-    name: 'RemyMaker Subject Ellipsoid Crop',
+    name: 'RemyMaker Subject Crop',
     rgbaBlendMode: SplatEditRgbaBlendMode.MULTIPLY,
     sdfSmooth: 0,
     softEdge: 0,
   });
-  const cropSdf = new SplatEditSdf({
-    type: SplatEditSdfType.ELLIPSOID,
-    invert: true,
-    opacity: 0,
-    color: new THREE.Color(1, 1, 1),
-    displace: new THREE.Vector3(0, 0, 0),
-  });
+  const cropSdf = createSplatCropSdf(state.settings.splatCropShape);
+  if (!cropSdf) return;
   cropEdit.add(cropSdf);
   mesh.add(cropEdit);
 
-  const helper = new THREE.Mesh(
-    new THREE.SphereGeometry(1, 32, 18),
-    new THREE.MeshBasicMaterial({
-      color: 0x00a8ff,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.72,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    })
-  );
-  helper.name = '3DGS Subject Crop Ellipsoid';
-  helper.renderOrder = 10000;
+  const helper = createSplatCropHelper(state.settings.splatCropShape);
   mesh.add(helper);
+  const handles = createSplatCropHandles(state.subjectCropBounds);
+  mesh.add(handles);
 
   state.splatCropEdit = cropEdit;
   state.splatCropSdf = cropSdf;
   state.splatCropHelper = helper;
+  state.splatCropHandles = handles;
+  updateSplatCropFromSettings();
+}
+
+const splatCropRaycaster = new THREE.Raycaster();
+const splatCropPointer = new THREE.Vector2();
+
+function getSplatCropHandleFromObject(object) {
+  let current = object;
+  while (current && current !== state.splatCropHandles) {
+    if (current.userData?.cropHandle) return current;
+    current = current.parent;
+  }
+  return null;
+}
+
+function getSplatCropHandleAtPointer(event) {
+  const canvas = state.renderer?.domElement;
+  if (!canvas || !state.camera || !state.splatCropHandles?.visible) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  splatCropPointer.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  state.scene?.updateMatrixWorld(true);
+  state.camera.updateMatrixWorld(true);
+  splatCropRaycaster.setFromCamera(splatCropPointer, state.camera);
+  const intersections = splatCropRaycaster.intersectObjects(state.splatCropHandles.children, true);
+  return intersections.length ? getSplatCropHandleFromObject(intersections[0].object) : null;
+}
+
+function vectorToCanvasPoint(vector, rect) {
+  const projected = vector.clone().project(state.camera);
+  return {
+    x: rect.left + (projected.x + 1) * 0.5 * rect.width,
+    y: rect.top + (1 - (projected.y + 1) * 0.5) * rect.height,
+  };
+}
+
+function beginSplatCropDrag(event) {
+  if (event.button !== undefined && event.button !== 0) return;
+  if (!event.isPrimary) return;
+  const handle = getSplatCropHandleAtPointer(event);
+  if (!handle || !state.subjectCropBounds || !state.splatMesh) return;
+
+  const { axis, sign } = handle.userData.cropHandle;
+  const bounds = state.subjectCropBounds;
+  const radiiScale = state.settings.splatCropRadiiScale;
+  const startRadii = bounds.radii.clone().multiply(new THREE.Vector3(
+    radiiScale.x,
+    radiiScale.y,
+    radiiScale.z
+  ));
+  const startCenter = bounds.center.clone().add(new THREE.Vector3(
+    bounds.radii.x * state.settings.splatCropOffset.x,
+    bounds.radii.y * state.settings.splatCropOffset.y,
+    bounds.radii.z * state.settings.splatCropOffset.z
+  ));
+  const rect = state.renderer.domElement.getBoundingClientRect();
+  const centerWorld = state.splatMesh.localToWorld(startCenter.clone());
+  const faceLocal = startCenter.clone();
+  faceLocal[axis] += startRadii[axis] * sign;
+  const faceWorld = state.splatMesh.localToWorld(faceLocal);
+  const centerPoint = vectorToCanvasPoint(centerWorld, rect);
+  const facePoint = vectorToCanvasPoint(faceWorld, rect);
+  let directionX = facePoint.x - centerPoint.x;
+  let directionY = facePoint.y - centerPoint.y;
+  let projectedRadius = Math.hypot(directionX, directionY);
+
+  if (projectedRadius < 8) {
+    if (axis === 'x') {
+      directionX = sign;
+      directionY = 0;
+    } else {
+      directionX = 0;
+      directionY = -sign;
+    }
+    projectedRadius = Math.max(72, Math.min(rect.width, rect.height) * 0.18);
+  } else {
+    directionX /= projectedRadius;
+    directionY /= projectedRadius;
+  }
+
+  const startRadius = startRadii[axis];
+  state.splatCropDrag = {
+    pointerId: event.pointerId,
+    axis,
+    sign,
+    startX: event.clientX,
+    startY: event.clientY,
+    directionX,
+    directionY,
+    localUnitsPerPixel: startRadius / projectedRadius,
+    startFace: startCenter[axis] + sign * startRadius,
+    oppositeFace: startCenter[axis] - sign * startRadius,
+    controlsWereEnabled: state.controls?.enabled !== false,
+    autoRotateWasEnabled: Boolean(state.particleSystem?.autoRotate),
+  };
+
+  if (state.controls) state.controls.enabled = false;
+  if (state.particleSystem) state.particleSystem.autoRotate = false;
+  state.renderer.domElement.setPointerCapture?.(event.pointerId);
+  state.renderer.domElement.style.cursor = 'grabbing';
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function moveSplatCropDrag(event) {
+  const drag = state.splatCropDrag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const pixelDelta = (
+    (event.clientX - drag.startX) * drag.directionX
+    + (event.clientY - drag.startY) * drag.directionY
+  );
+  const outwardDelta = pixelDelta * drag.localUnitsPerPixel;
+  const requestedFace = drag.startFace + drag.sign * outwardDelta;
+  const bounds = state.subjectCropBounds;
+  const baseRadius = Math.max(bounds.radii[drag.axis], 1e-6);
+  const requestedRadius = drag.sign * (requestedFace - drag.oppositeFace) * 0.5;
+  const nextRadius = THREE.MathUtils.clamp(requestedRadius, baseRadius * 0.1, baseRadius * 10);
+  const nextFace = drag.oppositeFace + drag.sign * nextRadius * 2;
+  const nextCenter = (nextFace + drag.oppositeFace) * 0.5;
+
+  state.settings.splatCropRadiiScale[drag.axis] = nextRadius / baseRadius;
+  state.settings.splatCropOffset[drag.axis] = (nextCenter - bounds.center[drag.axis]) / baseRadius;
+  updateSplatCropFromSettings();
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function endSplatCropDrag(event) {
+  const drag = state.splatCropDrag;
+  if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+  const canvas = state.renderer?.domElement;
+  if (canvas && drag.pointerId !== undefined && canvas.hasPointerCapture?.(drag.pointerId)) {
+    canvas.releasePointerCapture(drag.pointerId);
+  }
+  if (state.controls) state.controls.enabled = drag.controlsWereEnabled;
+  if (state.particleSystem) state.particleSystem.autoRotate = drag.autoRotateWasEnabled;
+  state.splatCropDrag = null;
+  if (canvas) canvas.style.cursor = '';
+  event?.preventDefault?.();
+  event?.stopImmediatePropagation?.();
+}
+
+function updateSplatCropHandleHover(event) {
+  if (state.splatCropDrag || !state.renderer?.domElement) return;
+  state.renderer.domElement.style.cursor = getSplatCropHandleAtPointer(event) ? 'grab' : '';
+}
+
+function resetSplatCropTransform() {
+  state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
+  state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
   updateSplatCropFromSettings();
 }
 // ============================================================
@@ -441,22 +857,21 @@ function cacheDom() {
     settingsPanel: document.getElementById('settings-panel'),
     mobileCameraOptions: document.getElementById('mobile-camera-options'),
     desktopFlightAnchor: document.getElementById('desktop-flight-anchor'),
-    desktopScatterAnchor: document.getElementById('desktop-scatter-anchor'),
     flightPresetItem: document.getElementById('flight-preset-item'),
-    scatterEffectItem: document.getElementById('scatter-effect-item'),
     settingMaxParticles: document.getElementById('setting-max-particles'),
     settingCropFactor: document.getElementById('setting-crop-factor'),
     settingCropFactorVal: document.getElementById('setting-crop-factor-val'),
+    btnMobileSplatCropPanel: document.getElementById('btn-mobile-splat-crop-panel'),
+    btnMobileParticleCropPanel: document.getElementById('btn-mobile-particle-crop-panel'),
+    btnMobileSplatCropDone: document.getElementById('btn-mobile-splat-crop-done'),
+    btnMobileParticleCropDone: document.getElementById('btn-mobile-particle-crop-done'),
+    splatCropControls: document.getElementById('splat-crop-controls'),
+    particleCropControls: document.getElementById('particle-crop-controls'),
     btnParticleCropToggle: document.getElementById('btn-particle-crop-toggle'),
-    settingSplatCropFactor: document.getElementById('setting-splat-crop-factor'),
-    settingSplatCropFactorVal: document.getElementById('setting-splat-crop-factor-val'),
     btnSplatCropToggle: document.getElementById('btn-splat-crop-toggle'),
-    settingSplatCropOffsetX: document.getElementById('setting-splat-crop-offset-x'),
-    settingSplatCropOffsetY: document.getElementById('setting-splat-crop-offset-y'),
-    settingSplatCropOffsetZ: document.getElementById('setting-splat-crop-offset-z'),
-    settingSplatCropOffsetXVal: document.getElementById('setting-splat-crop-offset-x-val'),
-    settingSplatCropOffsetYVal: document.getElementById('setting-splat-crop-offset-y-val'),
-    settingSplatCropOffsetZVal: document.getElementById('setting-splat-crop-offset-z-val'),
+    btnSplatCropReset: document.getElementById('btn-splat-crop-reset'),
+    btnSplatCropShapeEllipsoid: document.getElementById('btn-splat-crop-shape-ellipsoid'),
+    btnSplatCropShapeBox: document.getElementById('btn-splat-crop-shape-box'),
     settingMinOpacity: document.getElementById('setting-min-opacity'),
     settingMinOpacityVal: document.getElementById('setting-min-opacity-val'),
     settingPointSize: document.getElementById('setting-point-size'),
@@ -471,7 +886,6 @@ function cacheDom() {
     settingParticleOpacityVal: document.getElementById('setting-particle-opacity-val'),
     settingSplatScale: document.getElementById('setting-splat-scale'),
     settingSplatScaleVal: document.getElementById('setting-splat-scale-val'),
-    settingScatterEffect: document.getElementById('setting-scatter-effect'),
     cameraScatterEffect: document.getElementById('camera-scatter-effect'),
     desktopCameraScatterItem: document.getElementById('desktop-camera-scatter-item'),
 
@@ -588,26 +1002,36 @@ function onResize() {
     state.particleSystem.setViewportSize(w, h);
   }
   syncResponsiveControlLayout();
+  syncSplatCropHelperVisibility();
+}
+
+function toggleMobileCropPanel(panelName) {
+  const panels = [
+    ['splat', dom.btnMobileSplatCropPanel, dom.splatCropControls],
+    ['particle', dom.btnMobileParticleCropPanel, dom.particleCropControls],
+  ];
+  const selected = panels.find(([name]) => name === panelName);
+  const shouldExpand = Boolean(selected && !selected[1]?.classList.contains('active'));
+
+  for (const [name, button, panel] of panels) {
+    const expanded = shouldExpand && name === panelName;
+    button?.classList.toggle('active', expanded);
+    button?.setAttribute('aria-expanded', String(expanded));
+    panel?.classList.toggle('mobile-expanded', expanded);
+  }
+  dom.settingsPanel?.classList.toggle('mobile-crop-editing', shouldExpand);
+  syncSplatCropHelperVisibility();
 }
 
 function syncResponsiveControlLayout() {
-  if (!dom.mobileCameraOptions || !dom.flightPresetItem || !dom.scatterEffectItem) return;
+  if (!dom.mobileCameraOptions || !dom.flightPresetItem || !dom.desktopCameraScatterItem) return;
 
   if (isMobileViewport()) {
-    dom.mobileCameraOptions.append(dom.flightPresetItem, dom.scatterEffectItem);
+    dom.mobileCameraOptions.append(dom.flightPresetItem, dom.desktopCameraScatterItem);
   } else {
     dom.desktopFlightAnchor.after(dom.flightPresetItem);
-    dom.desktopScatterAnchor.after(dom.scatterEffectItem);
+    dom.flightPresetItem.after(dom.desktopCameraScatterItem);
   }
-}
-
-function initializeScatterEffectControls() {
-  if (!dom.settingScatterEffect || !dom.cameraScatterEffect) return;
-  if (dom.cameraScatterEffect.options.length === 0) {
-    const clonedOptions = Array.from(dom.settingScatterEffect.options, option => option.cloneNode(true));
-    dom.cameraScatterEffect.append(...clonedOptions);
-  }
-  dom.cameraScatterEffect.value = dom.settingScatterEffect.value;
 }
 
 function syncModelRendererVisibility() {
@@ -707,10 +1131,14 @@ const translations = {
     'opt-particles-500k': '500,000 (极精)',
     'label-crop-factor': '粒子裁剪背景',
     'label-splat-crop-factor': '3DGS 裁剪背景',
-    'label-splat-crop-center': '调整 3DGS 裁剪中心',
-    'label-splat-crop-offset-x': '水平 X',
-    'label-splat-crop-offset-y': '垂直 Y',
-    'label-splat-crop-offset-z': '深度 Z',
+    'label-splat-crop-shape': '裁剪形状',
+    'splat-crop-shape-ellipsoid': '椭球',
+    'splat-crop-shape-box': '方形',
+    'splat-crop-direct-hint': '拖动裁剪框上的 X / Y / Z 箭头调整各面',
+    'btn-splat-crop-reset': '重置',
+    'btn-mobile-splat-crop': '3DGS 裁剪',
+    'btn-mobile-particle-crop': '粒子裁剪',
+    'btn-mobile-crop-done': '完成',
     'label-min-opacity': '最小不透明度 (3DGS模式)',
     'label-point-size': '点云粒子大小',
     'label-point-density': '点云粒子密度',
@@ -874,10 +1302,14 @@ const translations = {
     'opt-particles-500k': '500,000 (Maximum)',
     'label-crop-factor': 'Particle Background Crop',
     'label-splat-crop-factor': '3DGS Background Crop',
-    'label-splat-crop-center': 'Adjust 3DGS Crop Center',
-    'label-splat-crop-offset-x': 'Horizontal X',
-    'label-splat-crop-offset-y': 'Vertical Y',
-    'label-splat-crop-offset-z': 'Depth Z',
+    'label-splat-crop-shape': 'Crop Shape',
+    'splat-crop-shape-ellipsoid': 'Ellipsoid',
+    'splat-crop-shape-box': 'Box',
+    'splat-crop-direct-hint': 'Drag the X / Y / Z arrows on the crop volume to adjust each face',
+    'btn-splat-crop-reset': 'Reset',
+    'btn-mobile-splat-crop': '3DGS Crop',
+    'btn-mobile-particle-crop': 'Particle Crop',
+    'btn-mobile-crop-done': 'Done',
     'label-min-opacity': 'Min Opacity (3DGS)',
     'label-point-size': 'Base Particle Size',
     'label-point-density': 'Point Cloud Density',
@@ -1128,19 +1560,31 @@ function applyTranslations(lang) {
     if (labelParticles) labelParticles.textContent = dict['label-max-particles'];
     const labelCrop = dom.settingsPanel.querySelector('label[for="setting-crop-factor"]');
     if (labelCrop) labelCrop.textContent = dict['label-crop-factor'];
-    const labelSplatCrop = dom.settingsPanel.querySelector('label[for="setting-splat-crop-factor"]');
+    const labelSplatCrop = dom.settingsPanel.querySelector('.splat-crop-title');
     if (labelSplatCrop) labelSplatCrop.textContent = dict['label-splat-crop-factor'];
-    const splatCropCenterSummary = dom.settingsPanel.querySelector('.splat-crop-center-summary');
-    if (splatCropCenterSummary) splatCropCenterSummary.textContent = dict['label-splat-crop-center'];
-    const splatCropOffsetLabels = [
-      ['setting-splat-crop-offset-x', 'label-splat-crop-offset-x'],
-      ['setting-splat-crop-offset-y', 'label-splat-crop-offset-y'],
-      ['setting-splat-crop-offset-z', 'label-splat-crop-offset-z'],
-    ];
-    for (const [inputId, translationKey] of splatCropOffsetLabels) {
-      const label = dom.settingsPanel.querySelector(`label[for="${inputId}"]`);
-      if (label) label.textContent = dict[translationKey];
+    const splatCropShapeLabel = dom.settingsPanel.querySelector('.splat-crop-shape-label');
+    if (splatCropShapeLabel) splatCropShapeLabel.textContent = dict['label-splat-crop-shape'];
+    if (dom.btnSplatCropShapeEllipsoid) {
+      dom.btnSplatCropShapeEllipsoid.textContent = dict['splat-crop-shape-ellipsoid'];
     }
+    if (dom.btnSplatCropShapeBox) {
+      dom.btnSplatCropShapeBox.textContent = dict['splat-crop-shape-box'];
+    }
+    if (dom.btnSplatCropReset) dom.btnSplatCropReset.textContent = dict['btn-splat-crop-reset'];
+    if (dom.btnMobileSplatCropPanel) {
+      dom.btnMobileSplatCropPanel.textContent = dict['btn-mobile-splat-crop'];
+    }
+    if (dom.btnMobileParticleCropPanel) {
+      dom.btnMobileParticleCropPanel.textContent = dict['btn-mobile-particle-crop'];
+    }
+    if (dom.btnMobileSplatCropDone) {
+      dom.btnMobileSplatCropDone.textContent = dict['btn-mobile-crop-done'];
+    }
+    if (dom.btnMobileParticleCropDone) {
+      dom.btnMobileParticleCropDone.textContent = dict['btn-mobile-crop-done'];
+    }
+    const splatCropDirectHint = dom.settingsPanel.querySelector('.splat-crop-direct-hint-text');
+    if (splatCropDirectHint) splatCropDirectHint.textContent = dict['splat-crop-direct-hint'];
     const labelMinOpacity = dom.settingsPanel.querySelector('label[for="setting-min-opacity"]');
     if (labelMinOpacity) labelMinOpacity.textContent = dict['label-min-opacity'];
     const labelPointSize = dom.settingsPanel.querySelector('label[for="setting-point-size"]');
@@ -1155,8 +1599,6 @@ function applyTranslations(lang) {
     if (labelParticleOpacity) labelParticleOpacity.textContent = dict['label-particle-opacity'];
     const labelSplatScale = dom.settingsPanel.querySelector('label[for="setting-splat-scale"]');
     if (labelSplatScale) labelSplatScale.textContent = dict['label-splat-scale'];
-    const labelScatter = dom.scatterEffectItem?.querySelector('label[for="setting-scatter-effect"]');
-    if (labelScatter) labelScatter.textContent = dict['label-scatter-effect'];
     const cameraScatterLabel = dom.desktopCameraScatterItem?.querySelector('label[for="camera-scatter-effect"]');
     if (cameraScatterLabel) cameraScatterLabel.textContent = dict['label-scatter-effect'];
 
@@ -1169,6 +1611,7 @@ function applyTranslations(lang) {
     });
     updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
     updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropShapeUI();
     
     if (dom.settingMaxParticles) {
       dom.settingMaxParticles.options[0].textContent = dict['opt-particles-50k'];
@@ -1177,7 +1620,7 @@ function applyTranslations(lang) {
       dom.settingMaxParticles.options[3].textContent = dict['opt-particles-500k'];
     }
 
-    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
+    for (const effectSelect of [dom.cameraScatterEffect]) {
       if (effectSelect) {
         for (const opt of effectSelect.options) {
           const val = opt.value;
@@ -1504,19 +1947,11 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   if (isFreshLoad) {
     state.subjectCropBounds = null;
     state.settings.splatCropEnabled = true;
-    state.settings.splatCropFactor = 1.0;
+    state.settings.splatCropShape = 'ellipsoid';
+    state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
     state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
-    if (dom.settingSplatCropFactor) dom.settingSplatCropFactor.value = '1.00';
-    if (dom.settingSplatCropFactorVal) dom.settingSplatCropFactorVal.textContent = '1.00x';
     updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
-    for (const [input, display] of [
-      [dom.settingSplatCropOffsetX, dom.settingSplatCropOffsetXVal],
-      [dom.settingSplatCropOffsetY, dom.settingSplatCropOffsetYVal],
-      [dom.settingSplatCropOffsetZ, dom.settingSplatCropOffsetZVal],
-    ]) {
-      if (input) input.value = '0';
-      if (display) display.textContent = '0%';
-    }
+    updateSplatCropShapeUI();
   }
   invalidateCustomCameraPath();
   if (state.cameraModeActive) {
@@ -1569,16 +2004,40 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
       updateLoadingProgress(0.78 + p * 0.1, `Parsing: ${Math.round(p * 100)}%`);
     }, {
       maxParticles: state.settings.maxParticles,
-      cropOutliers: state.settings.cropOutliers,
+      // Retain sampled particles once; particle background crop is applied
+      // live in the GPU shader instead of rebuilding the model.
+      cropOutliers: true,
+      deferCropToGpu: true,
       cropFactor: state.settings.cropFactor,
       autoCropFactor: isFreshLoad,
       minOpacity: state.settings.minOpacity
     });
-    
+
+    const fallbackParticleCrop = analyzeParticleCropBounds(data.positions, data.count);
+    const parserCropCenter = data.particleCropCenter;
+    const parserCropRadius = data.particleCropRadius;
+    const particleCrop = {
+      center: (
+        parserCropCenter
+        && Number.isFinite(parserCropCenter.x)
+        && Number.isFinite(parserCropCenter.y)
+        && Number.isFinite(parserCropCenter.z)
+      ) ? parserCropCenter : fallbackParticleCrop.center,
+      radius: parserCropRadius > 0 ? parserCropRadius : fallbackParticleCrop.radius,
+      recommendedFactor: Number.isFinite(data.recommendedCropFactor)
+        ? data.recommendedCropFactor
+        : fallbackParticleCrop.recommendedFactor,
+    };
+    data.particleCropCenter = particleCrop.center;
+    data.particleCropRadius = particleCrop.radius;
+    data.particleCropEnabled = state.settings.cropOutliers;
+    data.particleCropFactor = state.settings.cropFactor;
+
     // Dynamically apply recommended crop factor for fresh model loads
-    if (isFreshLoad && data && data.recommendedCropFactor !== undefined) {
-      const factor = THREE.MathUtils.clamp(data.recommendedCropFactor, 0.5, 3.0);
+    if (isFreshLoad) {
+      const factor = THREE.MathUtils.clamp(particleCrop.recommendedFactor, 0.5, 3.0);
       state.settings.cropFactor = factor;
+      data.particleCropFactor = factor;
       if (dom.settingCropFactor) {
         dom.settingCropFactor.value = factor.toFixed(2);
       }
@@ -1598,6 +2057,8 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.particleSystem.setViewportSize(window.innerWidth, window.innerHeight);
   state.particleSystem.setPointSize(state.settings.pointSize);
   state.particleSystem.setDensity(state.settings.pointDensity);
+  state.particleSystem.setCropEnabled(state.settings.cropOutliers);
+  state.particleSystem.setCropFactor(state.settings.cropFactor);
   state.particleSystem.setParticleBrightness(state.settings.particleBrightness);
   state.particleSystem.setParticleSoftness(state.settings.particleSoftness);
   state.particleSystem.setParticleOpacity(state.settings.particleOpacity);
@@ -2364,8 +2825,9 @@ function invalidateCustomCameraPath() {
   state.cameraSphericalPoints = null;
   state.cameraSphericalTangents = null;
   state.cameraLockedTarget = null;
-  state.cameraTimingCurve = null;
-  state.cameraTimingLength = 0;
+  state.cameraArcLengthProgress = null;
+  state.cameraArcLengthDistances = null;
+  state.cameraArcLengthTotal = 0;
 }
 
 function addKeyframe() {
@@ -2555,11 +3017,86 @@ function interpolateSphericalPoint(progress) {
   );
 }
 
+function sphericalPointToCameraPosition(sphereCoords, target, output = new THREE.Vector3()) {
+  const spherical = new THREE.Spherical(
+    sphereCoords.x,
+    sphereCoords.z,
+    sphereCoords.y
+  );
+  return output.setFromSpherical(spherical).add(target);
+}
+
+function buildCameraArcLengthTable() {
+  const segmentCount = Math.max(1, state.cameraSphericalPoints.length - 1);
+  // At least one sample per exported 60 FPS frame for the default two-second
+  // keyframe segment, with extra baseline resolution for short paths.
+  const sampleCount = Math.min(32768, Math.max(256, segmentCount * 128));
+  const progressSamples = new Float32Array(sampleCount + 1);
+  const cumulativeDistances = new Float64Array(sampleCount + 1);
+  const previousPosition = new THREE.Vector3();
+  const currentPosition = new THREE.Vector3();
+
+  sphericalPointToCameraPosition(
+    interpolateSphericalPoint(0),
+    state.cameraLockedTarget,
+    previousPosition
+  );
+  let totalDistance = 0;
+  for (let index = 1; index <= sampleCount; index++) {
+    const rawProgress = index / sampleCount;
+    sphericalPointToCameraPosition(
+      interpolateSphericalPoint(rawProgress),
+      state.cameraLockedTarget,
+      currentPosition
+    );
+    totalDistance += currentPosition.distanceTo(previousPosition);
+    progressSamples[index] = rawProgress;
+    cumulativeDistances[index] = totalDistance;
+    previousPosition.copy(currentPosition);
+  }
+
+  state.cameraArcLengthProgress = progressSamples;
+  state.cameraArcLengthDistances = cumulativeDistances;
+  state.cameraArcLengthTotal = totalDistance;
+}
+
+function getCameraProgressAtDistance(progress) {
+  const progressSamples = state.cameraArcLengthProgress;
+  const cumulativeDistances = state.cameraArcLengthDistances;
+  const totalDistance = state.cameraArcLengthTotal;
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (!progressSamples?.length || !cumulativeDistances?.length || totalDistance <= 0.000001) {
+    return clampedProgress;
+  }
+  if (clampedProgress <= 0) return 0;
+  if (clampedProgress >= 1) return 1;
+
+  const targetDistance = clampedProgress * totalDistance;
+  let low = 1;
+  let high = cumulativeDistances.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) * 0.5);
+    if (cumulativeDistances[middle] < targetDistance) low = middle + 1;
+    else high = middle;
+  }
+
+  const endIndex = low;
+  const startIndex = endIndex - 1;
+  const startDistance = cumulativeDistances[startIndex];
+  const distanceSpan = cumulativeDistances[endIndex] - startDistance;
+  if (distanceSpan <= 0.0000001) return progressSamples[endIndex];
+  const amount = (targetDistance - startDistance) / distanceSpan;
+  return THREE.MathUtils.lerp(
+    progressSamples[startIndex],
+    progressSamples[endIndex],
+    amount
+  );
+}
+
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
   const sphericalPoints = [];
   const lockedTarget = state.keyframes[0].target.clone();
-  const cameraOffsets = [];
   let lastTheta = 0;
   state.keyframes.forEach((kf, idx) => {
     // The editable 3DGS crop center is deliberately not involved in camera
@@ -2567,7 +3104,6 @@ function initCameraCurves() {
     // target translation remains filtered, while every keyframe position is
     // still an exact endpoint instead of being displaced by its own target.
     const offset = new THREE.Vector3().copy(kf.position).sub(lockedTarget);
-    cameraOffsets.push(offset.clone());
     const spherical = new THREE.Spherical().setFromVector3(offset);
     
     if (idx === 0) {
@@ -2587,38 +3123,24 @@ function initCameraCurves() {
   state.cameraSphericalPoints = sphericalPoints;
   state.cameraSphericalTangents = createSphericalTangents(sphericalPoints);
   state.cameraLockedTarget = lockedTarget;
-
-  // This curve is only a shared clock. Arc-length mapping over the stabilized
-  // camera positions removes the apparent slowdown around Catmull-Rom control
-  // points while keeping orbit and target interpolation on the same timeline.
-  const stabilizedCameraPositions = cameraOffsets.map(offset => (
-    lockedTarget.clone().add(offset)
-  ));
-  state.cameraTimingCurve = new THREE.CatmullRomCurve3(stabilizedCameraPositions);
-  state.cameraTimingCurve.curveType = 'centripetal';
-  state.cameraTimingLength = state.cameraTimingCurve.getLength();
+  // Build the clock from the exact spherical Hermite path that will be
+  // rendered. Using a separate Cartesian Catmull-Rom curve here made some
+  // angular segments receive too little time and visibly accelerate.
+  buildCameraArcLengthTable();
   
   return true;
 }
 function interpolateCamera(pct) {
-  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraLockedTarget || !state.cameraTimingCurve) return;
+  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraLockedTarget) return;
 
-  // Map output time to one arc-length-normalized camera clock. The focus target
-  // stays locked, while the no-overshoot spherical curve advances smoothly.
+  // Advance by equal distances measured on the exact output curve. Angle
+  // unwrapping and monotone tangents remain unchanged, so shortest-path turns
+  // still cannot overshoot into an unintended full orbit.
   const clampedPct = THREE.MathUtils.clamp(pct, 0, 1);
-  const curveTime = state.cameraTimingLength > 0.000001
-    ? state.cameraTimingCurve.getUtoTmapping(clampedPct)
-    : clampedPct;
-  const sphereCoords = interpolateSphericalPoint(curveTime);
+  const pathProgress = getCameraProgressAtDistance(clampedPct);
+  const sphereCoords = interpolateSphericalPoint(pathProgress);
   const newTarget = state.cameraLockedTarget;
-  
-  const spherical = new THREE.Spherical();
-  spherical.radius = sphereCoords.x;
-  spherical.theta = sphereCoords.y;
-  spherical.phi = sphereCoords.z;
-  
-  const offset = new THREE.Vector3().setFromSpherical(spherical);
-  const newPos = new THREE.Vector3().copy(newTarget).add(offset);
+  const newPos = sphericalPointToCameraPosition(sphereCoords, newTarget);
   
   state.camera.position.copy(newPos);
   state.camera.lookAt(newTarget);
@@ -3898,6 +4420,16 @@ function setupEventListeners() {
     updateSelectedKeyframeUI();
   });
 
+  const renderCanvas = state.renderer?.domElement;
+  renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
+  renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
+  renderCanvas?.addEventListener('pointerleave', () => {
+    if (!state.splatCropDrag && renderCanvas) renderCanvas.style.cursor = '';
+  });
+  window.addEventListener('pointermove', moveSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointerup', endSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endSplatCropDrag, { capture: true, passive: false });
+
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
   dom.urlInput.addEventListener('keydown', (e) => {
@@ -4171,12 +4703,26 @@ function setupEventListeners() {
   dom.btnCancelComposition.addEventListener('click', requestStopComposition);
   dom.btnExportVideo.addEventListener('click', exportPathVideo);
 
+  dom.btnMobileSplatCropPanel?.addEventListener('click', () => {
+    toggleMobileCropPanel('splat');
+  });
+  dom.btnMobileParticleCropPanel?.addEventListener('click', () => {
+    toggleMobileCropPanel('particle');
+  });
+  dom.btnMobileSplatCropDone?.addEventListener('click', () => {
+    toggleMobileCropPanel('splat');
+  });
+  dom.btnMobileParticleCropDone?.addEventListener('click', () => {
+    toggleMobileCropPanel('particle');
+  });
+
   document.querySelectorAll('.mobile-setting-tag').forEach((tag) => {
     tag.addEventListener('click', () => {
       document.querySelectorAll('.mobile-setting-tag').forEach(item => item.classList.remove('active'));
       document.querySelectorAll('.mobile-parameter').forEach(item => item.classList.remove('mobile-active'));
       tag.classList.add('active');
       document.getElementById(tag.dataset.settingTarget)?.classList.add('mobile-active');
+      syncSplatCropHelperVisibility();
     });
   });
 
@@ -4345,11 +4891,7 @@ function setupEventListeners() {
     }
   });
   
-  // Both desktop scatter-effect menus share one state and preview action.
   const applyScatterEffectSelection = (value) => {
-    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
-      if (effectSelect && effectSelect.value !== value) effectSelect.value = value;
-    }
     state.cancelScatterAnimation?.();
     if (value === 'none') {
       state.settings.particleEffectEnabled = false;
@@ -4371,57 +4913,29 @@ function setupEventListeners() {
       playFullDemoScatterAnimation();
     }
   };
-  dom.settingScatterEffect.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
   dom.cameraScatterEffect?.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
-  // Crop factor range slider - continuous input for display, change event for reload
-  let particleCropReloadTimer = null;
-  const reloadParticleCrop = () => {
-    if (!state.lastLoadedBuffer) return;
-    if (particleCropReloadTimer) clearTimeout(particleCropReloadTimer);
-    showLoading('Reloading...');
-    particleCropReloadTimer = setTimeout(async () => {
-      particleCropReloadTimer = null;
-      try {
-        await processBuffer(state.lastLoadedBuffer, state.lastLoadedName);
-      } catch (err) {
-        hideLoading();
-        showToast(`Error: ${err.message}`, 'error');
-      }
-    }, 50);
-  };
-
+  // Particle crop is a GPU uniform update, so slider movement previews live.
   if (dom.settingCropFactor) {
-    dom.settingCropFactor.addEventListener('input', (e) => {
-      const factor = THREE.MathUtils.clamp(parseFloat(e.target.value), 0.5, 3.0);
+    const applyParticleCropFactor = (value) => {
+      const factor = THREE.MathUtils.clamp(parseFloat(value), 0.5, 3.0);
       state.settings.cropFactor = factor;
       dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
+      state.particleSystem?.setCropFactor(factor);
+    };
+    dom.settingCropFactor.addEventListener('input', (e) => {
+      applyParticleCropFactor(e.target.value);
     });
-    
     dom.settingCropFactor.addEventListener('change', (e) => {
       const factor = THREE.MathUtils.clamp(parseFloat(e.target.value), 0.5, 3.0);
-      state.settings.cropFactor = factor;
-      dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
-      if (state.settings.cropOutliers) reloadParticleCrop();
+      applyParticleCropFactor(factor);
     });
   }
 
   dom.btnParticleCropToggle?.addEventListener('click', () => {
     state.settings.cropOutliers = !state.settings.cropOutliers;
     updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
-    reloadParticleCrop();
+    state.particleSystem?.setCropEnabled(state.settings.cropOutliers);
   });
-
-  // Spark SplatEdit crop is independent from particle parsing and updates live.
-  if (dom.settingSplatCropFactor) {
-    const applySplatCropFactor = (value) => {
-      const factor = THREE.MathUtils.clamp(parseFloat(value), 0.1, 10);
-      state.settings.splatCropFactor = factor;
-      dom.settingSplatCropFactorVal.textContent = `${factor.toFixed(2)}x`;
-      updateSplatCropFromSettings();
-    };
-    dom.settingSplatCropFactor.addEventListener('input', (e) => applySplatCropFactor(e.target.value));
-    dom.settingSplatCropFactor.addEventListener('change', (e) => applySplatCropFactor(e.target.value));
-  }
 
   dom.btnSplatCropToggle?.addEventListener('click', () => {
     state.settings.splatCropEnabled = !state.settings.splatCropEnabled;
@@ -4429,25 +4943,12 @@ function setupEventListeners() {
     updateSplatCropFromSettings();
   });
 
-  const splatCropOffsetControls = [
-    ['x', dom.settingSplatCropOffsetX, dom.settingSplatCropOffsetXVal],
-    ['y', dom.settingSplatCropOffsetY, dom.settingSplatCropOffsetYVal],
-    ['z', dom.settingSplatCropOffsetZ, dom.settingSplatCropOffsetZVal],
-  ];
-  for (const [axis, input, display] of splatCropOffsetControls) {
-    if (!input) continue;
-    const applyOffset = (value) => {
-      const offset = THREE.MathUtils.clamp(parseFloat(value), -1, 1);
-      state.settings.splatCropOffset[axis] = offset;
-      if (display) {
-        const percent = Math.round(offset * 100);
-        display.textContent = `${percent > 0 ? '+' : ''}${percent}%`;
-      }
-      updateSplatCropFromSettings();
-    };
-    input.addEventListener('input', (e) => applyOffset(e.target.value));
-    input.addEventListener('change', (e) => applyOffset(e.target.value));
+  for (const button of [dom.btnSplatCropShapeEllipsoid, dom.btnSplatCropShapeBox]) {
+    button?.addEventListener('click', () => {
+      applySplatCropShape(button.dataset.cropShape);
+    });
   }
+  dom.btnSplatCropReset?.addEventListener('click', resetSplatCropTransform);
   
   // Prevent webpage zoom/scroll during flight preview
   window.addEventListener('wheel', (e) => {
@@ -4468,7 +4969,6 @@ function setupEventListeners() {
 function init() {
   applyTabletDesktopLayout();
   cacheDom();
-  initializeScatterEffectControls();
   syncResponsiveControlLayout();
   applyTranslations(state.lang);
   updateKeyframeUI();

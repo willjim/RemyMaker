@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.29">
+  <link rel="stylesheet" href="css/style.css?v=3.34">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -213,7 +213,18 @@
 
       <div id="desktop-camera-scatter-item" class="setting-item camera-option-item desktop-camera-scatter-item">
         <label for="camera-scatter-effect">Scatter Effect</label>
-        <select id="camera-scatter-effect" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer; margin-top: 5px;"></select>
+        <select id="camera-scatter-effect" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer; margin-top: 5px;">
+          <option value="none" selected>No particle effects</option>
+          <option value="0">1. Original Explosion (原始无序粒子炸裂)</option>
+          <option value="1">2. Diagonal Sweep (角落对角线波前扫拂)</option>
+          <option value="3">3. Thanos Snap Dissolve (随机区块渐隐消散)</option>
+          <option value="8">4. Waterfall Downward Flow (由上而下瀑布流消散)</option>
+          <option value="11">5. Double Helix Upward (双螺旋结构向上攀升)</option>
+          <option value="16">6. Hologram 3D Printer (粒子逐层打印重组)</option>
+          <option value="13">7. Fractal Julia Orbit (分形几何轨道重组)</option>
+          <option value="14">8. Wind Snap Sweep (风吹飞砂由后向前扫拂)</option>
+          <option value="17">9. Rainfall Assembly (雨点下落重组)</option>
+        </select>
       </div>
       
       <div class="keyframe-list" id="keyframe-list">
@@ -270,11 +281,28 @@
         </select>
       </div>
       <div id="setting-crop-item" class="setting-item mobile-parameter mobile-active">
-        <div class="crop-control-block splat-crop-control">
+        <div class="mobile-crop-selectors" role="group" aria-label="Crop controls">
+          <button
+            id="btn-mobile-splat-crop-panel"
+            class="mobile-crop-selector"
+            type="button"
+            aria-expanded="false"
+            aria-controls="splat-crop-controls"
+          >3DGS Crop</button>
+          <button
+            id="btn-mobile-particle-crop-panel"
+            class="mobile-crop-selector"
+            type="button"
+            aria-expanded="false"
+            aria-controls="particle-crop-controls"
+          >Particle Crop</button>
+        </div>
+
+        <div id="splat-crop-controls" class="crop-control-block splat-crop-control">
           <div class="setting-row-val">
-            <label for="setting-splat-crop-factor">3DGS Background Crop</label>
+            <span class="splat-crop-title">3DGS Background Crop</span>
             <div class="crop-setting-actions">
-              <span class="setting-val-display" id="setting-splat-crop-factor-val">1.00x</span>
+              <button id="btn-splat-crop-reset" class="splat-crop-reset" type="button">Reset</button>
               <button
                 id="btn-splat-crop-toggle"
                 class="crop-toggle active"
@@ -283,45 +311,31 @@
                 aria-label="Disable 3DGS crop"
               ><span class="crop-toggle-knob"></span></button>
             </div>
+            <button id="btn-mobile-splat-crop-done" class="mobile-crop-done" type="button">Done</button>
           </div>
-          <input type="range" id="setting-splat-crop-factor" min="0.10" max="10.00" step="0.10" value="1.00" list="splat-crop-ticks">
-          <datalist id="splat-crop-ticks">
-            <option value="0.1"></option>
-            <option value="1.0"></option>
-            <option value="2.5"></option>
-            <option value="5.0"></option>
-            <option value="10.0"></option>
-          </datalist>
-          <div class="slider-ticks splat-crop-slider-ticks">
-            <span>0.1x</span>
-            <span>1.0x</span>
-            <span>2.5x</span>
-            <span>5.0x</span>
-            <span>10.0x</span>
-          </div>
-          <details class="splat-crop-center-details">
-            <summary class="splat-crop-center-summary">Adjust 3DGS Crop Center</summary>
-            <div class="splat-crop-center-grid">
-              <div class="splat-crop-center-row">
-                <label for="setting-splat-crop-offset-x">Horizontal X</label>
-                <span id="setting-splat-crop-offset-x-val">0%</span>
-                <input type="range" id="setting-splat-crop-offset-x" min="-1" max="1" step="0.02" value="0">
-              </div>
-              <div class="splat-crop-center-row">
-                <label for="setting-splat-crop-offset-y">Vertical Y</label>
-                <span id="setting-splat-crop-offset-y-val">0%</span>
-                <input type="range" id="setting-splat-crop-offset-y" min="-1" max="1" step="0.02" value="0">
-              </div>
-              <div class="splat-crop-center-row">
-                <label for="setting-splat-crop-offset-z">Depth Z</label>
-                <span id="setting-splat-crop-offset-z-val">0%</span>
-                <input type="range" id="setting-splat-crop-offset-z" min="-1" max="1" step="0.02" value="0">
-              </div>
+          <div class="splat-crop-shape-row">
+            <span class="splat-crop-shape-label">Crop Shape</span>
+            <span class="splat-crop-inline-hint splat-crop-direct-hint-text">Drag the X / Y / Z arrows on the crop volume to adjust each face</span>
+            <div class="splat-crop-shape-options" role="group" aria-label="3DGS crop shape">
+              <button
+                id="btn-splat-crop-shape-ellipsoid"
+                class="splat-crop-shape-option active"
+                type="button"
+                data-crop-shape="ellipsoid"
+                aria-pressed="true"
+              >Ellipsoid</button>
+              <button
+                id="btn-splat-crop-shape-box"
+                class="splat-crop-shape-option"
+                type="button"
+                data-crop-shape="box"
+                aria-pressed="false"
+              >Box</button>
             </div>
-          </details>
+          </div>
         </div>
 
-        <div class="crop-control-block particle-crop-control">
+        <div id="particle-crop-controls" class="crop-control-block particle-crop-control">
           <div class="setting-row-val">
             <label for="setting-crop-factor">Particle Background Crop</label>
             <div class="crop-setting-actions">
@@ -334,6 +348,7 @@
                 aria-label="Disable particle crop"
               ><span class="crop-toggle-knob"></span></button>
             </div>
+            <button id="btn-mobile-particle-crop-done" class="mobile-crop-done" type="button">Done</button>
           </div>
           <input type="range" id="setting-crop-factor" min="0.50" max="3.00" step="0.05" value="2.50" list="crop-ticks">
           <datalist id="crop-ticks">
@@ -402,22 +417,6 @@
           <span class="setting-val-display" id="setting-splat-scale-val">1.0</span>
         </div>
         <input type="range" id="setting-splat-scale" min="0.2" max="4.0" step="0.1" value="1.0">
-      </div>
-      <div id="desktop-scatter-anchor"></div>
-      <div id="scatter-effect-item" class="setting-item camera-option-item">
-        <label for="setting-scatter-effect">Scatter Effect (粒子分散效果)</label>
-        <select id="setting-scatter-effect" style="width: 100%; padding: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border: 1px solid var(--border); font-size: 12px; outline: none; cursor: pointer; margin-top: 5px;">
-          <option value="none" selected>No particle effects</option>
-          <option value="0">1. Original Explosion (原始无序粒子炸裂)</option>
-          <option value="1">2. Diagonal Sweep (角落对角线波前扫拂)</option>
-          <option value="3">3. Thanos Snap Dissolve (随机区块渐隐消散)</option>
-          <option value="8">4. Waterfall Downward Flow (由上而下瀑布流消散)</option>
-          <option value="11">5. Double Helix Upward (双螺旋结构向上攀升)</option>
-          <option value="16">6. Hologram 3D Printer (粒子逐层打印重组)</option>
-          <option value="13">7. Fractal Julia Orbit (分形几何轨道重组)</option>
-          <option value="14">8. Wind Snap Sweep (风吹飞砂由后向前扫拂)</option>
-          <option value="17">9. Rainfall Assembly (雨点下落重组)</option>
-        </select>
       </div>
     </div>
     <!-- ========== Stats Panel ========== -->
@@ -580,6 +579,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.56"></script>
+  <script type="module" src="js/app.js?v=3.64"></script>
 </body>
 </html>
