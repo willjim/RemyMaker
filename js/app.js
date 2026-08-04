@@ -120,10 +120,8 @@ const state = {
   selectedKeyframeIndex: null,
   cameraSphericalPoints: null,
   cameraSphericalTangents: null,
-  cameraLockedTarget: null,
-  cameraArcLengthProgress: null,
-  cameraArcLengthDistances: null,
-  cameraArcLengthTotal: 0,
+  cameraFilteredTargets: null,
+  cameraSegmentArcLengths: null,
   cameraModeActive: false,  // true when camera path panel is visible
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
@@ -3605,7 +3603,7 @@ function animate() {
     state.recordTime += renderDelta;
     const totalDuration = state.settings.presetFlight !== 'none'
       ? getPresetFlightDuration(state.settings.presetFlight)
-      : (state.keyframes.length - 1) * 2.0;
+      : (state.keyframes.length - 1) * CUSTOM_KEYFRAME_SEGMENT_DURATION;
     const flightProgress = Math.min(state.recordTime / totalDuration, 1);
 
     if (state.settings.presetFlight !== 'none') {
@@ -3886,6 +3884,7 @@ function openCameraPathPanel() {
   restoreRememberedCameraPathFirstFrame();
 }
 const MOBILE_MAX_KEYFRAMES = 10;
+const CUSTOM_KEYFRAME_SEGMENT_DURATION = 2.0;
 
 function getKeyframeLimit() {
   return IS_PHONE_DEVICE ? MOBILE_MAX_KEYFRAMES : Infinity;
@@ -3894,10 +3893,8 @@ function getKeyframeLimit() {
 function invalidateCustomCameraPath() {
   state.cameraSphericalPoints = null;
   state.cameraSphericalTangents = null;
-  state.cameraLockedTarget = null;
-  state.cameraArcLengthProgress = null;
-  state.cameraArcLengthDistances = null;
-  state.cameraArcLengthTotal = 0;
+  state.cameraFilteredTargets = null;
+  state.cameraSegmentArcLengths = null;
 }
 
 function addKeyframe() {
@@ -4096,52 +4093,101 @@ function sphericalPointToCameraPosition(sphereCoords, target, output = new THREE
   return output.setFromSpherical(spherical).add(target);
 }
 
-function buildCameraArcLengthTable() {
-  const segmentCount = Math.max(1, state.cameraSphericalPoints.length - 1);
-  // At least one sample per exported 60 FPS frame for the default two-second
-  // keyframe segment, with extra baseline resolution for short paths.
-  const sampleCount = Math.min(32768, Math.max(256, segmentCount * 128));
-  const progressSamples = new Float32Array(sampleCount + 1);
-  const cumulativeDistances = new Float64Array(sampleCount + 1);
+const CAMERA_TARGET_FILTER_PIXELS = 14;
+const CAMERA_SEGMENT_ARC_SAMPLES = 128;
+
+function buildFilteredCameraTargets() {
+  const viewportHeight = Math.max(
+    1,
+    state.renderer?.domElement?.getBoundingClientRect?.().height || window.innerHeight || 1
+  );
+  const filteredTargets = [state.keyframes[0].target.clone()];
+
+  for (let index = 1; index < state.keyframes.length; index++) {
+    const frame = state.keyframes[index];
+    const previousFrame = state.keyframes[index - 1];
+    const savedDirection = frame.target.clone().sub(frame.position);
+    const previousDirection = previousFrame.target.clone().sub(frame.position);
+    if (savedDirection.lengthSq() < 1e-12 || previousDirection.lengthSq() < 1e-12) {
+      filteredTargets.push(frame.target.clone());
+      continue;
+    }
+
+    savedDirection.normalize();
+    previousDirection.normalize();
+    const angle = savedDirection.angleTo(previousDirection);
+    const fovRadians = THREE.MathUtils.degToRad(
+      Number.isFinite(frame.fov) ? frame.fov : (state.camera?.fov || 60)
+    );
+    const focalPixels = viewportHeight / (2 * Math.tan(Math.max(0.01, fovRadians) * 0.5));
+    const screenShift = 2 * Math.tan(angle * 0.5) * focalPixels;
+
+    filteredTargets.push(
+      screenShift <= CAMERA_TARGET_FILTER_PIXELS
+        ? filteredTargets[index - 1].clone()
+        : frame.target.clone()
+    );
+  }
+  return filteredTargets;
+}
+
+function getCameraSegmentAmount(progress) {
+  const segmentCount = Math.max(1, state.keyframes.length - 1);
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  const scaledProgress = clampedProgress * segmentCount;
+  const segmentIndex = Math.min(Math.floor(scaledProgress), segmentCount - 1);
+  return {
+    segmentIndex,
+    amount: clampedProgress >= 1 ? 1 : scaledProgress - segmentIndex,
+    segmentCount,
+  };
+}
+
+function interpolateFilteredCameraTarget(segmentIndex, amount, output = new THREE.Vector3()) {
+  const targets = state.cameraFilteredTargets;
+  if (!targets?.length) return output.set(0, 0, 0);
+  const easedAmount = amount * amount * (3 - 2 * amount);
+  return output.lerpVectors(targets[segmentIndex], targets[segmentIndex + 1], easedAmount);
+}
+
+function sampleCameraSegmentPosition(segmentIndex, amount, output = new THREE.Vector3()) {
+  const segmentCount = Math.max(1, state.keyframes.length - 1);
+  const rawProgress = (segmentIndex + amount) / segmentCount;
+  const sphereCoords = interpolateSphericalPoint(rawProgress);
+  const target = interpolateFilteredCameraTarget(segmentIndex, amount);
+  return sphericalPointToCameraPosition(sphereCoords, target, output);
+}
+
+function buildCameraSegmentArcLengthTables() {
+  const segmentCount = Math.max(1, state.keyframes.length - 1);
+  const tables = [];
   const previousPosition = new THREE.Vector3();
   const currentPosition = new THREE.Vector3();
 
-  sphericalPointToCameraPosition(
-    interpolateSphericalPoint(0),
-    state.cameraLockedTarget,
-    previousPosition
-  );
-  let totalDistance = 0;
-  for (let index = 1; index <= sampleCount; index++) {
-    const rawProgress = index / sampleCount;
-    sphericalPointToCameraPosition(
-      interpolateSphericalPoint(rawProgress),
-      state.cameraLockedTarget,
-      currentPosition
-    );
-    totalDistance += currentPosition.distanceTo(previousPosition);
-    progressSamples[index] = rawProgress;
-    cumulativeDistances[index] = totalDistance;
-    previousPosition.copy(currentPosition);
+  for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++) {
+    const cumulativeDistances = new Float64Array(CAMERA_SEGMENT_ARC_SAMPLES + 1);
+    sampleCameraSegmentPosition(segmentIndex, 0, previousPosition);
+    let totalDistance = 0;
+    for (let sampleIndex = 1; sampleIndex <= CAMERA_SEGMENT_ARC_SAMPLES; sampleIndex++) {
+      const amount = sampleIndex / CAMERA_SEGMENT_ARC_SAMPLES;
+      sampleCameraSegmentPosition(segmentIndex, amount, currentPosition);
+      totalDistance += currentPosition.distanceTo(previousPosition);
+      cumulativeDistances[sampleIndex] = totalDistance;
+      previousPosition.copy(currentPosition);
+    }
+    tables.push({ cumulativeDistances, totalDistance });
   }
-
-  state.cameraArcLengthProgress = progressSamples;
-  state.cameraArcLengthDistances = cumulativeDistances;
-  state.cameraArcLengthTotal = totalDistance;
+  state.cameraSegmentArcLengths = tables;
 }
 
-function getCameraProgressAtDistance(progress) {
-  const progressSamples = state.cameraArcLengthProgress;
-  const cumulativeDistances = state.cameraArcLengthDistances;
-  const totalDistance = state.cameraArcLengthTotal;
+function getCameraSegmentProgressAtDistance(segmentIndex, progress) {
+  const table = state.cameraSegmentArcLengths?.[segmentIndex];
   const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
-  if (!progressSamples?.length || !cumulativeDistances?.length || totalDistance <= 0.000001) {
-    return clampedProgress;
-  }
-  if (clampedProgress <= 0) return 0;
+  if (!table || table.totalDistance <= 0.000001 || clampedProgress <= 0) return clampedProgress;
   if (clampedProgress >= 1) return 1;
 
-  const targetDistance = clampedProgress * totalDistance;
+  const targetDistance = clampedProgress * table.totalDistance;
+  const cumulativeDistances = table.cumulativeDistances;
   let low = 1;
   let high = cumulativeDistances.length - 1;
   while (low < high) {
@@ -4154,26 +4200,22 @@ function getCameraProgressAtDistance(progress) {
   const startIndex = endIndex - 1;
   const startDistance = cumulativeDistances[startIndex];
   const distanceSpan = cumulativeDistances[endIndex] - startDistance;
-  if (distanceSpan <= 0.0000001) return progressSamples[endIndex];
-  const amount = (targetDistance - startDistance) / distanceSpan;
-  return THREE.MathUtils.lerp(
-    progressSamples[startIndex],
-    progressSamples[endIndex],
-    amount
-  );
+  if (distanceSpan <= 0.0000001) return endIndex / CAMERA_SEGMENT_ARC_SAMPLES;
+  const sampleAmount = (targetDistance - startDistance) / distanceSpan;
+  return (startIndex + sampleAmount) / CAMERA_SEGMENT_ARC_SAMPLES;
 }
 
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
   const sphericalPoints = [];
-  const lockedTarget = state.keyframes[0].target.clone();
+  const filteredTargets = buildFilteredCameraTargets();
   let lastTheta = 0;
   state.keyframes.forEach((kf, idx) => {
-    // The editable 3DGS crop center is deliberately not involved in camera
-    // math. Measure every saved position from the one locked path target:
-    // target translation remains filtered, while every keyframe position is
-    // still an exact endpoint instead of being displaced by its own target.
-    const offset = new THREE.Vector3().copy(kf.position).sub(lockedTarget);
+    // Filter only tiny screen-space target shifts, while keeping intentional
+    // reframing. Preserve the saved camera-to-target offset so filtering a
+    // small pan removes its matching camera translation instead of changing
+    // the composition or accumulating drift in later viewpoints.
+    const offset = new THREE.Vector3().copy(kf.position).sub(kf.target);
     const spherical = new THREE.Spherical().setFromVector3(offset);
     
     if (idx === 0) {
@@ -4192,29 +4234,63 @@ function initCameraCurves() {
   });
   state.cameraSphericalPoints = sphericalPoints;
   state.cameraSphericalTangents = createSphericalTangents(sphericalPoints);
-  state.cameraLockedTarget = lockedTarget;
-  // Build the clock from the exact spherical Hermite path that will be
-  // rendered. Using a separate Cartesian Catmull-Rom curve here made some
-  // angular segments receive too little time and visibly accelerate.
-  buildCameraArcLengthTable();
+  state.cameraFilteredTargets = filteredTargets;
+  // Normalize speed inside each fixed two-second segment. A single global
+  // distance clock moved later keyframes away from their expected timestamps.
+  buildCameraSegmentArcLengthTables();
   
   return true;
 }
 function interpolateCamera(pct) {
-  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraLockedTarget) return;
+  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraFilteredTargets) return;
 
-  // Advance by equal distances measured on the exact output curve. Angle
-  // unwrapping and monotone tangents remain unchanged, so shortest-path turns
-  // still cannot overshoot into an unintended full orbit.
-  const clampedPct = THREE.MathUtils.clamp(pct, 0, 1);
-  const pathProgress = getCameraProgressAtDistance(clampedPct);
-  const sphereCoords = interpolateSphericalPoint(pathProgress);
-  const newTarget = state.cameraLockedTarget;
+  const { segmentIndex, amount, segmentCount } = getCameraSegmentAmount(pct);
+  const pathAmount = getCameraSegmentProgressAtDistance(segmentIndex, amount);
+  const rawProgress = (segmentIndex + pathAmount) / segmentCount;
+  const sphereCoords = interpolateSphericalPoint(rawProgress);
+  const newTarget = interpolateFilteredCameraTarget(segmentIndex, pathAmount);
   const newPos = sphericalPointToCameraPosition(sphereCoords, newTarget);
-  
+  const startFrame = state.keyframes[segmentIndex];
+  const endFrame = state.keyframes[segmentIndex + 1];
+  const viewAmount = pathAmount * pathAmount * (3 - 2 * pathAmount);
+
   state.camera.position.copy(newPos);
-  state.camera.lookAt(newTarget);
   state.controls.target.copy(newTarget);
+  if (startFrame.quaternion && endFrame.quaternion) {
+    state.camera.quaternion.copy(startFrame.quaternion).slerp(endFrame.quaternion, viewAmount);
+  } else {
+    state.camera.lookAt(newTarget);
+  }
+
+  if (startFrame.up && endFrame.up) {
+    state.camera.up.lerpVectors(startFrame.up, endFrame.up, viewAmount).normalize();
+  }
+  let projectionChanged = false;
+  for (const property of ['fov', 'zoom', 'near', 'far']) {
+    if (!Number.isFinite(startFrame[property]) || !Number.isFinite(endFrame[property])) continue;
+    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], viewAmount);
+    if (Math.abs(state.camera[property] - nextValue) > 1e-7) {
+      state.camera[property] = nextValue;
+      projectionChanged = true;
+    }
+  }
+  if (projectionChanged) state.camera.updateProjectionMatrix();
+
+  const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
+  for (const pivot of modelPivots) {
+    if (!pivot) continue;
+    if (startFrame.modelQuaternion && endFrame.modelQuaternion) {
+      pivot.quaternion.copy(startFrame.modelQuaternion).slerp(endFrame.modelQuaternion, viewAmount);
+    } else {
+      const startRotation = Number.isFinite(startFrame.modelRotationY) ? startFrame.modelRotationY : 0;
+      const endRotation = Number.isFinite(endFrame.modelRotationY) ? endFrame.modelRotationY : startRotation;
+      const rotationDelta = Math.atan2(
+        Math.sin(endRotation - startRotation),
+        Math.cos(endRotation - startRotation)
+      );
+      pivot.rotation.y = startRotation + rotationDelta * viewAmount;
+    }
+  }
 }
 
 /**
@@ -4543,7 +4619,7 @@ function cancelGatherAnimation() {
 function getCurrentFlightDuration() {
   return state.settings.presetFlight !== 'none'
     ? getPresetFlightDuration(state.settings.presetFlight)
-    : Math.max(0, (state.keyframes.length - 1) * 2.0);
+    : Math.max(0, (state.keyframes.length - 1) * CUSTOM_KEYFRAME_SEGMENT_DURATION);
 }
 
 function applyCurrentFlightProgress(progress) {
@@ -5202,8 +5278,13 @@ async function compositeVideoWithWebCodecs(session) {
     updateLoadingProgress(0.02, `${t('compositing-video')} · 0%`);
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfCompositionCancelled();
-      const flightProgress = totalFrames === 1 ? 1 : frameIndex / (totalFrames - 1);
-      const timelineTime = flightProgress * session.duration;
+      // Keep two-second keyframe boundaries on exact exported frame numbers.
+      // Reserve the final encoded frame for the exact last viewpoint instead
+      // of stretching every intermediate timestamp across totalFrames - 1.
+      const timelineTime = totalFrames === 1 || frameIndex === totalFrames - 1
+        ? session.duration
+        : Math.min(frameIndex / session.fps, session.duration);
+      const flightProgress = session.duration > 0 ? timelineTime / session.duration : 1;
       const needsSparkSettlePass = renderExportFrame(session, timelineTime, flightProgress);
       if (needsSparkSettlePass) {
         // The first pass submits the new camera state to Spark's sorting worker.

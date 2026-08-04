@@ -1520,6 +1520,12 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   display: flex;
 }
 
+.settings-panel.desktop-settings-layout:not(.desktop-setting-spark) #particle-crop-controls {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .setting-item {
   display: flex;
   flex-direction: column;
