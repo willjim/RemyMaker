@@ -90,8 +90,10 @@ const state = {
   splatCropHelper: null,
   splatCropHandles: null,
   splatCropDrag: null,
+  splatEraser: null,
   subjectCropBounds: null,
   sparkCropApi: null,
+  sparkPainterApi: null,
   lang: getInitialLanguage(), // default to Chinese unless English was explicitly selected
   isModelLoaded: false,
   isGestureActive: false,
@@ -152,7 +154,7 @@ const state = {
     maxParticles: 500000,
     cropOutliers: true,
     cropFactor: 2.5,
-    splatCropEnabled: true,
+    splatCropEnabled: !isMobileViewport(),
     splatCropShape: 'ellipsoid',
     splatCropRadiiScale: { x: 1, y: 1, z: 1 },
     splatCropOffset: { x: 0, y: 0, z: 0 },
@@ -388,15 +390,20 @@ function normalizeSplatCropShape(shape) {
 
 function updateSplatCropShapeUI() {
   const shape = normalizeSplatCropShape(state.settings.splatCropShape);
+  const mobileCropDisabled = isMobileViewport() && !state.settings.splatCropEnabled;
   const buttons = [
     [dom.btnSplatCropShapeEllipsoid, 'ellipsoid'],
     [dom.btnSplatCropShapeBox, 'box'],
   ];
   for (const [button, buttonShape] of buttons) {
     if (!button) continue;
-    const selected = buttonShape === shape;
+    const selected = buttonShape === shape && !mobileCropDisabled;
     button.classList.toggle('active', selected);
     button.setAttribute('aria-pressed', String(selected));
+  }
+  if (dom.btnMobileSplatCropNone) {
+    dom.btnMobileSplatCropNone.classList.toggle('active', mobileCropDisabled);
+    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(mobileCropDisabled));
   }
 }
 
@@ -415,48 +422,143 @@ function disposeObject3DResources(root) {
   materials.forEach((material) => material.dispose());
 }
 
+function createEllipsoidCropGuideGeometry() {
+  const positions = [];
+  const longitudeCount = 12;
+  const latitudeRingCount = 6;
+  // These subdivisions smooth each curve; they do not add visible grid lines.
+  const meridianCurveSegments = 32;
+  const latitudeCurveSegments = 48;
+  const addPoint = (phi, theta) => {
+    const sinPhi = Math.sin(phi);
+    positions.push(
+      sinPhi * Math.cos(theta),
+      Math.cos(phi),
+      sinPhi * Math.sin(theta)
+    );
+  };
+
+  for (let longitude = 0; longitude < longitudeCount; longitude += 1) {
+    const theta = (longitude / longitudeCount) * Math.PI * 2;
+    for (let segment = 0; segment < meridianCurveSegments; segment += 1) {
+      addPoint((segment / meridianCurveSegments) * Math.PI, theta);
+      addPoint(((segment + 1) / meridianCurveSegments) * Math.PI, theta);
+    }
+  }
+
+  for (let latitude = 1; latitude <= latitudeRingCount; latitude += 1) {
+    const phi = (latitude / (latitudeRingCount + 1)) * Math.PI;
+    for (let segment = 0; segment < latitudeCurveSegments; segment += 1) {
+      addPoint(phi, (segment / latitudeCurveSegments) * Math.PI * 2);
+      addPoint(phi, ((segment + 1) / latitudeCurveSegments) * Math.PI * 2);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute([...positions], 3));
+  return geometry;
+}
+
+function createBoxCropGuideGeometry() {
+  const surfaceGeometry = new THREE.BoxGeometry(2, 2, 2);
+  const geometry = new THREE.EdgesGeometry(surfaceGeometry);
+  surfaceGeometry.dispose();
+  const positions = geometry.getAttribute('position');
+  const normals = new Float32Array(positions.count * 3);
+
+  for (let index = 0; index < positions.count; index += 1) {
+    const x = positions.getX(index);
+    const y = positions.getY(index);
+    const z = positions.getZ(index);
+    const inverseLength = 1 / Math.hypot(x, y, z);
+    normals[index * 3] = x * inverseLength;
+    normals[index * 3 + 1] = y * inverseLength;
+    normals[index * 3 + 2] = z * inverseLength;
+  }
+
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  return geometry;
+}
+
+function createBoxCropDiagonalGeometry() {
+  const positions = [
+    -1, -1, -1, -1, 1, 1,
+     1, -1, -1,  1, 1, 1,
+    -1, -1, -1,  1, -1, 1,
+    -1,  1, -1,  1, 1, 1,
+    -1, -1, -1,  1, 1, -1,
+    -1, -1,  1,  1, 1, 1,
+  ];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(
+    positions.map(value => value / Math.sqrt(3)),
+    3
+  ));
+  return geometry;
+}
+
+function createDepthCuedCropGuideMaterial(nearOpacity = 0.82, farOpacity = 0.32) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      guideColor: { value: new THREE.Color(0x00a8ff) },
+      nearOpacity: { value: nearOpacity },
+      farOpacity: { value: farOpacity },
+    },
+    vertexShader: /* glsl */ `
+      varying float vFacing;
+
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vec3 viewNormal = normalize(normalMatrix * normal);
+        vec3 viewDirection = normalize(-viewPosition.xyz);
+        vFacing = dot(viewNormal, viewDirection);
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 guideColor;
+      uniform float nearOpacity;
+      uniform float farOpacity;
+      varying float vFacing;
+
+      void main() {
+        float facingBlend = smoothstep(-0.06, 0.06, vFacing);
+        gl_FragColor = vec4(guideColor, mix(farOpacity, nearOpacity, facingBlend));
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+}
+
 function createSplatCropHelper(shape) {
   const normalizedShape = normalizeSplatCropShape(shape);
-  const surfaceGeometry = normalizedShape === 'box'
-    ? new THREE.BoxGeometry(2, 2, 2)
-    : new THREE.SphereGeometry(1, 32, 18);
   const helper = new THREE.Group();
-
-  // Front/back face culling provides a depth cue without writing into the
-  // depth buffer (which would otherwise hide Spark splats rendered later).
-  const farLines = new THREE.Mesh(
-    surfaceGeometry,
-    new THREE.MeshBasicMaterial({
-      color: 0x00a8ff,
-      wireframe: true,
-      side: THREE.BackSide,
-      transparent: true,
-      opacity: 0.055,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    })
+  const guideLines = new THREE.LineSegments(
+    normalizedShape === 'ellipsoid'
+      ? createEllipsoidCropGuideGeometry()
+      : createBoxCropGuideGeometry(),
+    createDepthCuedCropGuideMaterial()
   );
-  farLines.name = '3DGS Crop Far-Side Guide';
-  farLines.renderOrder = 9997;
-
-  const nearLines = new THREE.Mesh(
-    surfaceGeometry,
-    new THREE.MeshBasicMaterial({
-      color: 0x00a8ff,
-      wireframe: true,
-      side: THREE.FrontSide,
-      transparent: true,
-      opacity: 0.82,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    })
-  );
-  nearLines.name = '3DGS Crop Near-Side Guide';
-  nearLines.renderOrder = 9999;
-
-  helper.add(farLines, nearLines);
+  guideLines.name = normalizedShape === 'ellipsoid'
+    ? '3DGS Crop Ellipsoid Guide'
+    : '3DGS Crop Box Guide';
+  guideLines.renderOrder = 9999;
+  helper.add(guideLines);
+  if (normalizedShape === 'box') {
+    const diagonalLines = new THREE.LineSegments(
+      createBoxCropDiagonalGeometry(),
+      createDepthCuedCropGuideMaterial(0.28, 0.11)
+    );
+    diagonalLines.name = '3DGS Crop Box Face Diagonals';
+    diagonalLines.renderOrder = 9998;
+    helper.add(diagonalLines);
+  }
   helper.name = normalizedShape === 'box'
     ? '3DGS Subject Crop Box'
     : '3DGS Subject Crop Ellipsoid';
@@ -533,6 +635,30 @@ function updateSplatCropHandlePositions(cropCenter, cropRadii) {
   state.splatCropHandles.updateMatrixWorld(true);
 }
 
+function updateSplatCropHandleDepthOpacity() {
+  const handles = state.splatCropHandles;
+  if (!handles?.visible || !state.camera) return;
+  state.camera.updateMatrixWorld(true);
+  handles.updateWorldMatrix(true, true);
+  const samples = handles.children.map((handle) => {
+    const worldPosition = handle.getWorldPosition(new THREE.Vector3());
+    const viewPosition = worldPosition.applyMatrix4(state.camera.matrixWorldInverse);
+    return { handle, depth: Math.max(0, -viewPosition.z) };
+  });
+  if (!samples.length) return;
+  const minDepth = Math.min(...samples.map(sample => sample.depth));
+  const maxDepth = Math.max(...samples.map(sample => sample.depth));
+  const depthSpan = Math.max(maxDepth - minDepth, 1e-5);
+
+  for (const { handle, depth } of samples) {
+    const depthRatio = THREE.MathUtils.clamp((depth - minDepth) / depthSpan, 0, 1);
+    const opacity = THREE.MathUtils.lerp(0.96, 0.3, depthRatio);
+    handle.traverse((object) => {
+      if (object.material) object.material.opacity = opacity;
+    });
+  }
+}
+
 function createSplatCropSdf(shape) {
   const { SplatEditSdf, SplatEditSdfType } = state.sparkCropApi || {};
   if (!SplatEditSdf || !SplatEditSdfType) return null;
@@ -592,14 +718,16 @@ function disposeSplatCrop() {
 function syncSplatCropHelperVisibility() {
   const settingsVisible = dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden');
   const mobileCropEditorVisible = !isMobileViewport() || Boolean(
-    document.getElementById('setting-crop-item')?.classList.contains('mobile-active')
-    && document.getElementById('splat-crop-controls')?.classList.contains('mobile-expanded')
+    dom.settingsPanel?.classList.contains('mobile-settings-detail')
+    && dom.settingsPanel?.classList.contains('mobile-settings-spark')
+    && dom.settingsPanel?.classList.contains('mobile-splat-crop-view')
   );
   const visible = Boolean(
     isSplatCropEnabled()
     && settingsVisible
     && mobileCropEditorVisible
     && state.settings.renderer === 'spark'
+    && !state.splatEraser?.active
     && !state.previewActive
     && !state.recordingActive
     && !state.compositingActive
@@ -723,6 +851,7 @@ function vectorToCanvasPoint(vector, rect) {
 }
 
 function beginSplatCropDrag(event) {
+  if (state.splatEraser?.active) return;
   if (event.button !== undefined && event.button !== 0) return;
   if (!event.isPrimary) return;
   const handle = getSplatCropHandleAtPointer(event);
@@ -830,13 +959,731 @@ function endSplatCropDrag(event) {
 
 function updateSplatCropHandleHover(event) {
   if (state.splatCropDrag || !state.renderer?.domElement) return;
+  if (state.splatEraser?.active) {
+    updateSplatEraserBrushCursor(event);
+    state.renderer.domElement.style.cursor = state.splatEraser.touchLayout
+      ? (state.splatEraser.navigationMode ? 'grab' : 'crosshair')
+      : (event?.altKey ? 'grab' : ((event?.buttons || 0) & 6 ? 'grabbing' : 'none'));
+    return;
+  }
   state.renderer.domElement.style.cursor = getSplatCropHandleAtPointer(event) ? 'grab' : '';
 }
 
-function resetSplatCropTransform() {
-  state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
-  state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
-  updateSplatCropFromSettings();
+function createSplatEraserModifier(eraser) {
+  const { dyno } = state.sparkPainterApi;
+  return dyno.dynoBlock(
+    { gsplat: dyno.Gsplat },
+    { gsplat: dyno.Gsplat },
+    ({ gsplat }) => {
+      const { center, rgb, opacity } = dyno.splitGsplat(gsplat).outputs;
+      const projection = dyno.dot(
+        eraser.brushDirection,
+        dyno.sub(center, eraser.brushOrigin)
+      );
+      const projectedCenter = dyno.add(
+        eraser.brushOrigin,
+        dyno.mul(eraser.brushDirection, projection)
+      );
+      const distance = dyno.length(dyno.sub(projectedCenter, center));
+      const insideBrush = dyno.and(
+        dyno.lessThan(distance, eraser.brushRadius),
+        dyno.and(
+          dyno.greaterThan(projection, dyno.dynoFloat(0)),
+          dyno.lessThan(projection, eraser.brushDepth)
+        )
+      );
+      const isHighlighted = dyno.lessThan(
+        dyno.length(dyno.sub(rgb, eraser.selectionColor)),
+        dyno.dynoFloat(0.02)
+      );
+      const highlightedRgb = dyno.select(
+        dyno.and(eraser.paintEnabled, insideBrush),
+        eraser.selectionColor,
+        rgb
+      );
+      const strokeOpacity = dyno.select(
+        dyno.and(eraser.eraseEnabled, insideBrush),
+        dyno.dynoFloat(0),
+        opacity
+      );
+      const erasedOpacity = dyno.select(
+        dyno.and(eraser.commitEnabled, isHighlighted),
+        dyno.dynoFloat(0),
+        strokeOpacity
+      );
+      return {
+        gsplat: dyno.combineGsplat({
+          gsplat,
+          rgb: highlightedRgb,
+          opacity: erasedOpacity,
+        }),
+      };
+    }
+  );
+}
+
+function updateSplatEraserUI() {
+  const active = Boolean(state.splatEraser?.active);
+  const labelKey = active ? 'btn-splat-eraser-exit' : 'btn-splat-eraser';
+  const label = translations[state.lang]?.[labelKey]
+    || (state.lang === 'zh' ? '高斯点擦除' : 'Erase Gaussian splats');
+  if (dom.btnSplatEraser) {
+    dom.btnSplatEraser.classList.toggle('active', active);
+    dom.btnSplatEraser.setAttribute('aria-pressed', String(active));
+    dom.btnSplatEraser.setAttribute('aria-label', label);
+    dom.btnSplatEraser.title = label;
+  }
+
+  const eraser = state.splatEraser;
+  const hasSelection = Boolean(eraser?.hasSelection);
+  const canUndo = Boolean(eraser?.staged || eraser?.history?.length);
+  const touchLayout = Boolean(eraser?.touchLayout || isMobileViewport());
+  const navigationMode = Boolean(eraser?.navigationMode);
+  if (dom.btnSplatEraserPaint) {
+    const paintSelected = active && !navigationMode;
+    dom.btnSplatEraserPaint.classList.toggle('active', paintSelected);
+    dom.btnSplatEraserPaint.setAttribute('aria-pressed', String(paintSelected));
+    dom.btnSplatEraserPaint.textContent = state.lang === 'zh'
+      ? (touchLayout ? '涂抹' : (active ? '停止涂抹' : '涂抹选区'))
+      : (touchLayout ? 'Paint' : (active ? 'Stop Painting' : 'Paint Selection'));
+  }
+  if (dom.btnSplatEraserConfirm) {
+    dom.btnSplatEraserConfirm.disabled = !hasSelection || Boolean(eraser?.baking);
+    dom.btnSplatEraserConfirm.textContent = state.lang === 'zh'
+      ? (touchLayout ? '清除' : '确定擦除')
+      : (touchLayout ? 'Clear' : 'Confirm Erase');
+  }
+  if (dom.btnSplatEraserUndo) {
+    dom.btnSplatEraserUndo.disabled = !canUndo || Boolean(eraser?.baking);
+    dom.btnSplatEraserUndo.textContent = state.lang === 'zh' ? '撤销' : 'Undo';
+  }
+  if (dom.splatEraserStatus) {
+    dom.splatEraserStatus.classList.toggle('has-selection', hasSelection);
+    dom.splatEraserStatus.textContent = state.lang === 'zh'
+      ? (hasSelection
+        ? (touchLayout ? '粉色区域待确认' : '粉色区域待确认 · [ / ] 调大小')
+        : (active
+          ? (navigationMode ? '拖动模型调整视角' : (touchLayout ? '在模型上拖动涂抹' : '左键涂抹 · [ / ] 调大小 · Alt/Option 旋转'))
+          : '点击涂抹选区开始'))
+      : (hasSelection
+        ? (touchLayout ? 'Pink area ready' : 'Pink area ready · [ / ] resize')
+        : (active
+          ? (navigationMode ? 'Drag the model to adjust the view' : (touchLayout ? 'Drag across the model to paint' : 'Paint · [ / ] resize · Alt/Option orbit'))
+          : 'Choose Paint Selection to begin'));
+  }
+}
+
+function updateSplatEraserBrushDimensions(eraser) {
+  if (!eraser) return;
+  const subjectRadius = Math.max(
+    state.subjectCropBounds?.radii.x || 0,
+    state.subjectCropBounds?.radii.y || 0,
+    state.subjectCropBounds?.radii.z || 0,
+    0.1
+  ) * state.modelScale * state.settings.splatScale;
+  // The slider already constrains brushScale to 2%–20%. Keep the world-space
+  // radius proportional across that full range instead of flattening larger
+  // values against a fixed cap that varies perceptually between models.
+  eraser.brushRadius.value = Math.max(subjectRadius, 0.05) * eraser.brushScale;
+  eraser.brushDepth.value = Math.max(10, subjectRadius * 8);
+}
+
+function setSplatEraserBrushPercent(value) {
+  const slider = dom.settingSplatEraserSize;
+  const minimum = parseFloat(slider?.min) || 2;
+  const maximum = parseFloat(slider?.max) || 20;
+  const percent = THREE.MathUtils.clamp(parseFloat(value) || 8, minimum, maximum);
+  if (slider) slider.value = String(percent);
+  if (dom.settingSplatEraserSizeVal) {
+    dom.settingSplatEraserSizeVal.textContent = `${Math.round(percent)}%`;
+  }
+  if (state.splatEraser) {
+    state.splatEraser.brushScale = percent / 100;
+    updateSplatEraserBrushDimensions(state.splatEraser);
+    syncSplatEraserBrushCursor();
+    showMobileSplatEraserBrushPreview();
+  }
+}
+
+function getSplatEraserCursorDiameter(eraser) {
+  const canvas = state.renderer?.domElement;
+  const camera = state.camera;
+  if (!eraser || !canvas || !camera) return 24;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.height) return 24;
+
+  let focusDepth = camera.position.distanceTo(state.controls?.target || new THREE.Vector3());
+  if (state.subjectCropBounds && eraser.mesh) {
+    eraser.mesh.updateWorldMatrix(true, false);
+    camera.updateMatrixWorld(true);
+    const subjectWorld = eraser.mesh.localToWorld(state.subjectCropBounds.center.clone());
+    const subjectView = subjectWorld.applyMatrix4(camera.matrixWorldInverse);
+    if (-subjectView.z > camera.near) focusDepth = -subjectView.z;
+  }
+
+  const focalPixels = rect.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
+  const diameter = (eraser.brushRadius.value * focalPixels * 2) / Math.max(focusDepth, camera.near);
+  const maxDiameter = eraser.touchLayout
+    ? Math.max(rect.width, rect.height) * 2
+    : Math.min(rect.width, rect.height) * 0.9;
+  return THREE.MathUtils.clamp(diameter, 12, maxDiameter);
+}
+
+function syncSplatEraserBrushCursor() {
+  const eraser = state.splatEraser;
+  const cursor = dom.splatEraserBrushCursor;
+  if (!cursor) return;
+  const visible = Boolean(
+    eraser?.active
+    && eraser.cursorInside
+    && !eraser.cursorNavigation
+    && !eraser.touchGesture
+  );
+  cursor.classList.toggle('visible', visible);
+  if (visible) {
+    const diameter = getSplatEraserCursorDiameter(eraser);
+    cursor.style.left = `${eraser.cursorX}px`;
+    cursor.style.top = `${eraser.cursorY}px`;
+    cursor.style.width = `${diameter}px`;
+    cursor.style.height = `${diameter}px`;
+  }
+}
+
+function updateSplatEraserBrushCursor(event) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser?.active || !canvas || !event) {
+    syncSplatEraserBrushCursor();
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  eraser.cursorX = event.clientX;
+  eraser.cursorY = event.clientY;
+  eraser.cursorInside = (
+    event.clientX >= rect.left
+    && event.clientX <= rect.right
+    && event.clientY >= rect.top
+    && event.clientY <= rect.bottom
+  );
+  eraser.cursorNavigation = eraser.touchLayout
+    ? Boolean(eraser.touchGesture)
+    : Boolean(event.altKey || ((event.buttons || 0) & 6));
+  syncSplatEraserBrushCursor();
+}
+
+function showMobileSplatEraserBrushPreview(event = null) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser?.active || !eraser.touchLayout || !canvas || eraser.touchGesture) return;
+  const rect = canvas.getBoundingClientRect();
+  eraser.cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
+  eraser.cursorY = event?.clientY ?? (rect.top + rect.height * 0.42);
+  eraser.cursorInside = true;
+  eraser.cursorNavigation = false;
+  if (eraser.cursorHideTimer) clearTimeout(eraser.cursorHideTimer);
+  syncSplatEraserBrushCursor();
+  eraser.cursorHideTimer = setTimeout(() => {
+    eraser.cursorHideTimer = null;
+    if (!eraser.drawing && !eraser.touchGesture) hideSplatEraserBrushCursor();
+  }, 2000);
+}
+
+function hideSplatEraserBrushCursor() {
+  if (state.splatEraser) {
+    state.splatEraser.cursorInside = false;
+    if (state.splatEraser.cursorHideTimer) {
+      clearTimeout(state.splatEraser.cursorHideTimer);
+      state.splatEraser.cursorHideTimer = null;
+    }
+  }
+  syncSplatEraserBrushCursor();
+}
+
+function configureSplatEraser(mesh) {
+  const { RgbaArray, dyno } = state.sparkPainterApi || {};
+  const packedSplats = mesh?.packedSplats;
+  if (!RgbaArray || !dyno || !packedSplats?.numSplats) {
+    state.splatEraser = null;
+    updateSplatEraserUI();
+    return;
+  }
+
+  const eraser = {
+    mesh,
+    active: false,
+    drawing: false,
+    baking: false,
+    pointerId: null,
+    frameId: null,
+    controlsWereEnabled: true,
+    autoRotateWasEnabled: false,
+    touchLayout: false,
+    navigationMode: false,
+    staged: false,
+    hasSelection: false,
+    stageBaseRgba: null,
+    history: [],
+    cursorX: 0,
+    cursorY: 0,
+    cursorInside: false,
+    cursorNavigation: false,
+    cursorHideTimer: null,
+    touchPointers: new Map(),
+    touchGesture: null,
+    touchSequenceNavigating: false,
+    brushScale: THREE.MathUtils.clamp(
+      (parseFloat(dom.settingSplatEraserSize?.value) || 8) / 100,
+      0.02,
+      0.2
+    ),
+    paintEnabled: dyno.dynoBool(false),
+    eraseEnabled: dyno.dynoBool(false),
+    commitEnabled: dyno.dynoBool(false),
+    brushRadius: dyno.dynoFloat(0.05),
+    brushDepth: dyno.dynoFloat(10),
+    brushOrigin: dyno.dynoVec3(new THREE.Vector3()),
+    brushDirection: dyno.dynoVec3(new THREE.Vector3(0, 0, -1)),
+    selectionColor: dyno.dynoVec3(new THREE.Vector3(1, 32 / 255, 160 / 255)),
+  };
+  updateSplatEraserBrushDimensions(eraser);
+
+  mesh.splatRgba = new RgbaArray().fromPackedSplats({
+    packedSplats,
+    base: 0,
+    count: packedSplats.numSplats,
+    renderer: state.renderer,
+  });
+  eraser.modifier = createSplatEraserModifier(eraser);
+  mesh.worldModifier = null;
+  state.splatEraser = eraser;
+  mesh.updateGenerator();
+  updateSplatEraserUI();
+}
+
+function disposeSplatEraser() {
+  const eraser = state.splatEraser;
+  if (!eraser) return;
+  setSplatEraserActive(false, { silent: true });
+  if (eraser.frameId !== null) cancelAnimationFrame(eraser.frameId);
+  if (eraser.staged) cancelSplatEraserSelection({ silent: true });
+  for (const snapshot of eraser.history) snapshot?.dispose?.();
+  eraser.history.length = 0;
+  eraser.mesh.worldModifier = null;
+  state.splatEraser = null;
+  updateSplatEraserUI();
+}
+
+const splatEraserRaycaster = new THREE.Raycaster();
+const splatEraserPointer = new THREE.Vector2();
+
+function updateSplatEraserRay(event) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser?.active || !canvas || !state.camera) return false;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return false;
+  splatEraserPointer.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  state.camera.updateMatrixWorld(true);
+  splatEraserRaycaster.setFromCamera(splatEraserPointer, state.camera);
+  eraser.brushOrigin.value.copy(splatEraserRaycaster.ray.origin);
+  eraser.brushDirection.value.copy(splatEraserRaycaster.ray.direction).normalize();
+  return true;
+}
+
+function bakeSplatEraserResult({ preservePrevious = false } = {}) {
+  const eraser = state.splatEraser;
+  const mesh = eraser?.mesh;
+  const { RgbaArray, dyno } = state.sparkPainterApi || {};
+  if (!eraser?.active || eraser.baking || !mesh || !RgbaArray || !dyno) return false;
+
+  const cropVisible = state.splatCropEdit?.visible;
+  const meshOpacity = mesh.opacity;
+  let nextRgba = null;
+  eraser.baking = true;
+  try {
+    // Do not permanently bake the adjustable crop volume or transition opacity
+    // into the painter result; only the eraser worldModifier is committed.
+    if (state.splatCropEdit) state.splatCropEdit.visible = false;
+    mesh.opacity = 1;
+    mesh.updateGenerator();
+    nextRgba = new RgbaArray();
+    nextRgba.render({
+      renderer: state.renderer,
+      count: mesh.packedSplats.numSplats,
+      reader: dyno.dynoBlock(
+        { index: 'int' },
+        { rgba8: 'vec4' },
+        ({ index }) => {
+          const { gsplat } = mesh.generator.apply({ index });
+          const { rgba } = dyno.splitGsplat(gsplat).outputs;
+          return { rgba8: rgba };
+        }
+      ),
+    });
+    const previousRgba = mesh.splatRgba;
+    mesh.splatRgba = nextRgba;
+    nextRgba = null;
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.updateGenerator();
+    if (!preservePrevious) previousRgba?.dispose?.();
+    return true;
+  } catch (error) {
+    nextRgba?.dispose?.();
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.updateGenerator?.();
+    console.error('Spark Splat Painter operation failed:', error);
+    showToast(
+      state.lang === 'zh'
+        ? `高斯点擦除失败：${error.message}`
+        : `Gaussian erase failed: ${error.message}`,
+      'error',
+      5000
+    );
+    return false;
+  } finally {
+    eraser.baking = false;
+  }
+}
+
+function beginSplatEraserSelection(eraser) {
+  if (!eraser || eraser.staged) return true;
+  eraser.stageBaseRgba = eraser.mesh.splatRgba;
+  eraser.mesh.worldModifier = null;
+  eraser.mesh.updateGenerator();
+  if (!bakeSplatEraserResult({ preservePrevious: true })) {
+    eraser.stageBaseRgba = null;
+    return false;
+  }
+  eraser.staged = true;
+  eraser.hasSelection = false;
+  eraser.mesh.worldModifier = eraser.modifier;
+  eraser.mesh.updateGenerator();
+  updateSplatEraserUI();
+  return true;
+}
+
+function cancelSplatEraserSelection({ silent = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser?.staged || !eraser.stageBaseRgba) return false;
+  const stagedRgba = eraser.mesh.splatRgba;
+  eraser.paintEnabled.value = false;
+  eraser.commitEnabled.value = false;
+  eraser.mesh.worldModifier = null;
+  eraser.mesh.splatRgba = eraser.stageBaseRgba;
+  eraser.stageBaseRgba = null;
+  eraser.staged = false;
+  eraser.hasSelection = false;
+  eraser.mesh.updateGenerator();
+  if (stagedRgba !== eraser.mesh.splatRgba) stagedRgba?.dispose?.();
+  if (eraser.active) {
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+  }
+  updateSplatEraserUI();
+  if (!silent) {
+    showToast(state.lang === 'zh' ? '已撤销当前涂抹选区' : 'Current painted selection cleared', 'info');
+  }
+  return true;
+}
+
+function confirmSplatEraserSelection() {
+  const eraser = state.splatEraser;
+  if (!eraser?.staged || !eraser.hasSelection || eraser.baking) return;
+  eraser.paintEnabled.value = false;
+  eraser.commitEnabled.value = true;
+  eraser.mesh.worldModifier = eraser.modifier;
+  eraser.mesh.updateGenerator();
+  const confirmed = bakeSplatEraserResult();
+  eraser.commitEnabled.value = false;
+  if (!confirmed) return;
+
+  eraser.history.push(eraser.stageBaseRgba);
+  if (eraser.history.length > 8) eraser.history.shift()?.dispose?.();
+  eraser.stageBaseRgba = null;
+  eraser.staged = false;
+  eraser.hasSelection = false;
+  eraser.mesh.worldModifier = eraser.active ? eraser.modifier : null;
+  eraser.mesh.updateGenerator();
+  updateSplatEraserUI();
+  showToast(state.lang === 'zh' ? '已确认擦除高亮区域' : 'Highlighted splats erased', 'success');
+}
+
+function undoSplatEraser() {
+  const eraser = state.splatEraser;
+  if (!eraser || eraser.baking) return;
+  if (eraser.staged) {
+    cancelSplatEraserSelection();
+    return;
+  }
+  const previousRgba = eraser.history.pop();
+  if (!previousRgba) return;
+  const currentRgba = eraser.mesh.splatRgba;
+  eraser.mesh.worldModifier = null;
+  eraser.mesh.splatRgba = previousRgba;
+  eraser.mesh.updateGenerator();
+  currentRgba?.dispose?.();
+  if (eraser.active) {
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+  }
+  updateSplatEraserUI();
+  showToast(state.lang === 'zh' ? '已撤销上一次擦除' : 'Last erase undone', 'info');
+}
+
+function scheduleSplatEraserBake() {
+  const eraser = state.splatEraser;
+  if (!eraser?.drawing || eraser.frameId !== null) return;
+  eraser.frameId = requestAnimationFrame(() => {
+    eraser.frameId = null;
+    if (!eraser.drawing) return;
+    if (!bakeSplatEraserResult()) setSplatEraserActive(false, { silent: true });
+    else {
+      eraser.hasSelection = true;
+      updateSplatEraserUI();
+    }
+  });
+}
+
+function beginSplatEraserTouchNavigation(eraser) {
+  const points = Array.from(eraser.touchPointers.values()).slice(0, 2);
+  if (points.length < 2 || !state.camera || !state.controls) return false;
+  const [first, second] = points;
+  const midpoint = new THREE.Vector2(
+    (first.x + second.x) * 0.5,
+    (first.y + second.y) * 0.5
+  );
+  const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+  const offset = state.camera.position.clone().sub(state.controls.target);
+  eraser.touchGesture = {
+    midpoint,
+    distance,
+    target: state.controls.target.clone(),
+    spherical: new THREE.Spherical().setFromVector3(offset),
+  };
+  eraser.touchSequenceNavigating = true;
+  eraser.cursorNavigation = true;
+  hideSplatEraserBrushCursor();
+  return true;
+}
+
+function updateSplatEraserTouchNavigation(eraser) {
+  const gesture = eraser.touchGesture;
+  const points = Array.from(eraser.touchPointers.values()).slice(0, 2);
+  if (!gesture || points.length < 2 || !state.camera || !state.controls) return false;
+  const [first, second] = points;
+  const midpointX = (first.x + second.x) * 0.5;
+  const midpointY = (first.y + second.y) * 0.5;
+  const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+  const spherical = gesture.spherical.clone();
+  spherical.theta -= (midpointX - gesture.midpoint.x) * 0.006;
+  spherical.phi = THREE.MathUtils.clamp(
+    spherical.phi + (midpointY - gesture.midpoint.y) * 0.006,
+    0.05,
+    Math.PI - 0.05
+  );
+  spherical.radius = THREE.MathUtils.clamp(
+    gesture.spherical.radius * gesture.distance / distance,
+    state.controls.minDistance,
+    state.controls.maxDistance
+  );
+  state.controls.target.copy(gesture.target);
+  state.camera.position.copy(gesture.target).add(new THREE.Vector3().setFromSpherical(spherical));
+  state.camera.lookAt(gesture.target);
+  state.controls.update();
+  return true;
+}
+
+function beginSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (!eraser?.active) return;
+  if (eraser.touchLayout && event.pointerType === 'touch') {
+    eraser.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (eraser.touchPointers.size >= 2) {
+      if (eraser.drawing) endSplatEraserStroke();
+      beginSplatEraserTouchNavigation(eraser);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (eraser.touchSequenceNavigating) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!event.isPrimary || (event.button !== undefined && event.button !== 0)) return;
+  if (eraser.navigationMode) return;
+  updateSplatEraserBrushCursor(event);
+  // Desktop painting keeps OrbitControls enabled. Holding Alt/Option lets the
+  // normal left-drag event pass through to OrbitControls for camera rotation.
+  if (!eraser.touchLayout && event.altKey) return;
+  if (!updateSplatEraserRay(event)) return;
+  if (!beginSplatEraserSelection(eraser)) {
+    setSplatEraserActive(false, { silent: true });
+    return;
+  }
+  eraser.drawing = true;
+  eraser.pointerId = event.pointerId;
+  eraser.paintEnabled.value = true;
+  eraser.eraseEnabled.value = false;
+  state.renderer.domElement.setPointerCapture?.(event.pointerId);
+  state.renderer.domElement.style.cursor = eraser.touchLayout ? 'crosshair' : 'none';
+  if (!bakeSplatEraserResult()) setSplatEraserActive(false, { silent: true });
+  else {
+    eraser.hasSelection = true;
+    updateSplatEraserUI();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function moveSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (eraser?.active && eraser.touchLayout && event.pointerType === 'touch') {
+    if (eraser.touchPointers.has(event.pointerId)) {
+      eraser.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (eraser.touchSequenceNavigating) {
+      updateSplatEraserTouchNavigation(eraser);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!eraser?.active || !eraser.drawing || event.pointerId !== eraser.pointerId) return;
+  updateSplatEraserBrushCursor(event);
+  if (eraser.touchLayout) showMobileSplatEraserBrushPreview(event);
+  if (updateSplatEraserRay(event)) scheduleSplatEraserBake();
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function endSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (eraser?.touchLayout && event?.pointerType === 'touch') {
+    eraser.touchPointers.delete(event.pointerId);
+    if (eraser.touchSequenceNavigating) {
+      if (eraser.touchPointers.size < 2) eraser.touchGesture = null;
+      if (eraser.touchPointers.size === 0) {
+        eraser.touchSequenceNavigating = false;
+        eraser.cursorNavigation = false;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!eraser?.drawing || (event?.pointerId !== undefined && event.pointerId !== eraser.pointerId)) return;
+  if (eraser.frameId !== null) {
+    cancelAnimationFrame(eraser.frameId);
+    eraser.frameId = null;
+  }
+  if (event?.clientX !== undefined) updateSplatEraserRay(event);
+  const baked = bakeSplatEraserResult();
+  eraser.paintEnabled.value = false;
+  eraser.eraseEnabled.value = false;
+  eraser.drawing = false;
+  const canvas = state.renderer?.domElement;
+  if (canvas?.hasPointerCapture?.(eraser.pointerId)) canvas.releasePointerCapture(eraser.pointerId);
+  eraser.pointerId = null;
+  if (canvas) canvas.style.cursor = eraser.active
+    ? (eraser.touchLayout ? (eraser.navigationMode ? 'grab' : 'crosshair') : 'none')
+    : '';
+  if (event?.clientX !== undefined) updateSplatEraserBrushCursor(event);
+  if (eraser.touchLayout && event?.clientX !== undefined) showMobileSplatEraserBrushPreview(event);
+  event?.preventDefault?.();
+  event?.stopImmediatePropagation?.();
+  if (!baked) setSplatEraserActive(false, { silent: true });
+  else {
+    eraser.hasSelection = true;
+    updateSplatEraserUI();
+  }
+}
+
+function setSplatEraserActive(active, { silent = false } = {}) {
+  const nextActive = Boolean(active);
+  if (nextActive && !state.splatEraser && state.isModelLoaded && state.splatMesh) {
+    configureSplatEraser(state.splatMesh);
+  }
+  const eraser = state.splatEraser;
+  if (nextActive && (!eraser || !state.isModelLoaded)) {
+    showToast(
+      state.lang === 'zh' ? '请先加载支持擦除的 3DGS 模型' : 'Load a 3DGS model before erasing',
+      'warning'
+    );
+    return;
+  }
+  if (nextActive && (state.previewActive || state.recordingActive || state.compositingActive)) {
+    showToast(
+      state.lang === 'zh' ? '请先停止预览或视频导出' : 'Stop preview or export before erasing',
+      'warning'
+    );
+    return;
+  }
+  if (!eraser || eraser.active === nextActive) return;
+
+  if (nextActive) {
+    if (state.settings.renderer !== 'spark') setRendererMode('spark', 'button');
+    updateSplatEraserBrushDimensions(eraser);
+    eraser.touchLayout = isMobileViewport();
+    eraser.navigationMode = false;
+    eraser.touchPointers.clear();
+    eraser.touchGesture = null;
+    eraser.touchSequenceNavigating = false;
+    eraser.controlsWereEnabled = state.controls?.enabled !== false;
+    eraser.autoRotateWasEnabled = Boolean(state.particleSystem?.autoRotate);
+    eraser.active = true;
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+    if (state.controls) {
+      state.controls.enabled = eraser.touchLayout ? false : eraser.controlsWereEnabled;
+    }
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    document.body.classList.add('splat-eraser-active');
+    if (state.renderer?.domElement) {
+      state.renderer.domElement.style.cursor = eraser.touchLayout ? 'crosshair' : 'none';
+    }
+    syncSplatEraserBrushCursor();
+    if (!silent) {
+      showToast(
+        state.lang === 'zh'
+          ? (eraser.touchLayout
+            ? '橡皮擦已开启：单指涂抹，双指调整视角或缩放'
+            : '左键涂抹，[ / ] 调整大小；Alt/Option 拖动旋转，滚轮缩放、右键平移')
+          : (eraser.touchLayout
+            ? 'Eraser enabled: paint with one finger; use two fingers to orbit or zoom'
+            : 'Paint with left-drag; [ / ] resizes; Alt/Option-drag orbits, wheel zooms, right-drag pans'),
+        'info',
+        5000
+      );
+    }
+  } else {
+    if (eraser.drawing) endSplatEraserStroke();
+    if (eraser.staged) cancelSplatEraserSelection({ silent: true });
+    eraser.paintEnabled.value = false;
+    eraser.eraseEnabled.value = false;
+    eraser.commitEnabled.value = false;
+    eraser.touchPointers.clear();
+    eraser.touchGesture = null;
+    eraser.touchSequenceNavigating = false;
+    eraser.active = false;
+    eraser.mesh.worldModifier = null;
+    eraser.mesh.updateGenerator();
+    if (state.controls && !state.previewActive && !state.recordingActive) {
+      state.controls.enabled = eraser.controlsWereEnabled;
+    }
+    if (state.particleSystem) state.particleSystem.autoRotate = eraser.autoRotateWasEnabled;
+    document.body.classList.remove('splat-eraser-active');
+    if (state.renderer?.domElement) state.renderer.domElement.style.cursor = '';
+    hideSplatEraserBrushCursor();
+  }
+  updateSplatEraserUI();
+  syncSplatCropHelperVisibility();
 }
 // ============================================================
 // DOM References
@@ -855,6 +1702,13 @@ function cacheDom() {
     btnToggleRotation: document.getElementById('btn-toggle-rotation'),
     btnMobileToggleRotation: document.getElementById('btn-mobile-toggle-rotation'),
     settingsPanel: document.getElementById('settings-panel'),
+    btnDesktopParticleSettings: document.getElementById('btn-desktop-particle-settings'),
+    btnDesktopSplatSettings: document.getElementById('btn-desktop-splat-settings'),
+    btnMobileParticleSettings: document.getElementById('btn-mobile-particle-settings'),
+    btnMobileSplatSettings: document.getElementById('btn-mobile-splat-settings'),
+    btnMobileSettingsReset: document.getElementById('btn-mobile-settings-reset'),
+    btnMobileSettingsConfirm: document.getElementById('btn-mobile-settings-confirm'),
+    mobileSettingsGroupLabel: document.getElementById('mobile-settings-group-label'),
     mobileCameraOptions: document.getElementById('mobile-camera-options'),
     desktopFlightAnchor: document.getElementById('desktop-flight-anchor'),
     flightPresetItem: document.getElementById('flight-preset-item'),
@@ -862,16 +1716,23 @@ function cacheDom() {
     settingCropFactor: document.getElementById('setting-crop-factor'),
     settingCropFactorVal: document.getElementById('setting-crop-factor-val'),
     btnMobileSplatCropPanel: document.getElementById('btn-mobile-splat-crop-panel'),
-    btnMobileParticleCropPanel: document.getElementById('btn-mobile-particle-crop-panel'),
-    btnMobileSplatCropDone: document.getElementById('btn-mobile-splat-crop-done'),
-    btnMobileParticleCropDone: document.getElementById('btn-mobile-particle-crop-done'),
+    btnMobileSplatEraserPanel: document.getElementById('btn-mobile-splat-eraser-panel'),
     splatCropControls: document.getElementById('splat-crop-controls'),
     particleCropControls: document.getElementById('particle-crop-controls'),
     btnParticleCropToggle: document.getElementById('btn-particle-crop-toggle'),
     btnSplatCropToggle: document.getElementById('btn-splat-crop-toggle'),
-    btnSplatCropReset: document.getElementById('btn-splat-crop-reset'),
+    btnSplatEraser: document.getElementById('btn-splat-eraser'),
+    btnSplatEraserPaint: document.getElementById('btn-splat-eraser-paint'),
+    btnSplatEraserConfirm: document.getElementById('btn-splat-eraser-confirm'),
+    btnSplatEraserUndo: document.getElementById('btn-splat-eraser-undo'),
+    settingSplatEraserSize: document.getElementById('setting-splat-eraser-size'),
+    settingSplatEraserSizeVal: document.getElementById('setting-splat-eraser-size-val'),
+    splatEraserStatus: document.getElementById('splat-eraser-status'),
+    splatEraserToolTitle: document.querySelector('.splat-eraser-tool-title-text'),
+    splatEraserBrushCursor: document.getElementById('splat-eraser-brush-cursor'),
     btnSplatCropShapeEllipsoid: document.getElementById('btn-splat-crop-shape-ellipsoid'),
     btnSplatCropShapeBox: document.getElementById('btn-splat-crop-shape-box'),
+    btnMobileSplatCropNone: document.getElementById('btn-mobile-splat-crop-none'),
     settingMinOpacity: document.getElementById('setting-min-opacity'),
     settingMinOpacityVal: document.getElementById('setting-min-opacity-val'),
     settingPointSize: document.getElementById('setting-point-size'),
@@ -1005,33 +1866,153 @@ function onResize() {
   syncSplatCropHelperVisibility();
 }
 
-function toggleMobileCropPanel(panelName) {
-  const panels = [
-    ['splat', dom.btnMobileSplatCropPanel, dom.splatCropControls],
-    ['particle', dom.btnMobileParticleCropPanel, dom.particleCropControls],
-  ];
-  const selected = panels.find(([name]) => name === panelName);
-  const shouldExpand = Boolean(selected && !selected[1]?.classList.contains('active'));
-
-  for (const [name, button, panel] of panels) {
-    const expanded = shouldExpand && name === panelName;
-    button?.classList.toggle('active', expanded);
-    button?.setAttribute('aria-expanded', String(expanded));
-    panel?.classList.toggle('mobile-expanded', expanded);
+function updateMobileSettingsUI() {
+  if (!dom.settingsPanel) return;
+  if (!isMobileViewport()) {
+    dom.settingsPanel.classList.remove(
+      'mobile-settings-root',
+      'mobile-settings-detail',
+      'mobile-settings-particles',
+      'mobile-settings-spark',
+      'mobile-splat-crop-view',
+      'mobile-splat-eraser-view'
+    );
+    return;
   }
-  dom.settingsPanel?.classList.toggle('mobile-crop-editing', shouldExpand);
+
+  if (
+    !dom.settingsPanel.classList.contains('mobile-settings-root')
+    && !dom.settingsPanel.classList.contains('mobile-settings-detail')
+  ) {
+    dom.settingsPanel.classList.add('mobile-settings-root');
+  }
+
+  const isSpark = state.settings.renderer === 'spark';
+  dom.settingsPanel.classList.toggle('mobile-settings-particles', !isSpark);
+  dom.settingsPanel.classList.toggle('mobile-settings-spark', isSpark);
+  if (dom.mobileSettingsGroupLabel) {
+    dom.mobileSettingsGroupLabel.textContent = isSpark
+      ? (state.lang === 'zh' ? '3DGS 设置' : '3DGS Settings')
+      : (state.lang === 'zh' ? '粒子设置' : 'Particle Settings');
+  }
+  if (
+    !dom.settingsPanel.classList.contains('mobile-splat-crop-view')
+    && !dom.settingsPanel.classList.contains('mobile-splat-eraser-view')
+  ) {
+    dom.settingsPanel.classList.add('mobile-splat-crop-view');
+  }
+
+  for (const [button, selected] of [
+    [dom.btnMobileParticleSettings, !isSpark],
+    [dom.btnMobileSplatSettings, isSpark],
+  ]) {
+    if (!button) continue;
+    button.classList.remove('active');
+    button.setAttribute('aria-selected', String(selected));
+  }
+
+  const cropSelected = dom.settingsPanel.classList.contains('mobile-splat-crop-view');
+  for (const [button, selected] of [
+    [dom.btnMobileSplatCropPanel, cropSelected],
+    [dom.btnMobileSplatEraserPanel, !cropSelected],
+  ]) {
+    if (!button) continue;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+  }
+  updateSplatCropShapeUI();
+}
+
+function setMobileSettingsLevel(level) {
+  if (!dom.settingsPanel || !isMobileViewport()) return;
+  const showDetail = level === 'detail';
+  dom.settingsPanel.classList.toggle('mobile-settings-root', !showDetail);
+  dom.settingsPanel.classList.toggle('mobile-settings-detail', showDetail);
+  if (!showDetail && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
+  updateMobileSettingsUI();
   syncSplatCropHelperVisibility();
+}
+
+function setMobileSettingsMode(mode) {
+  setRendererMode(mode, 'settings');
+  setMobileSettingsLevel('detail');
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
+}
+
+function setMobileSplatTool(tool) {
+  if (!dom.settingsPanel || !isMobileViewport()) return;
+  const showEraser = tool === 'eraser';
+  dom.settingsPanel.classList.toggle('mobile-splat-crop-view', !showEraser);
+  dom.settingsPanel.classList.toggle('mobile-splat-eraser-view', showEraser);
+  if (!showEraser && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
+}
+
+function resetMobileSettingsParameter() {
+  if (!isMobileViewport()) return;
+  if (state.settings.renderer === 'spark') {
+    if (dom.settingsPanel?.classList.contains('mobile-splat-eraser-view')) {
+      if (state.splatEraser?.staged) cancelSplatEraserSelection({ silent: true });
+      setSplatEraserBrushPercent(8);
+    } else {
+      state.settings.splatCropEnabled = false;
+      state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
+      state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
+      updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
+      applySplatCropShape('ellipsoid');
+      updateSplatCropFromSettings();
+    }
+  } else {
+    const activeTarget = document.querySelector('.mobile-particle-setting-tag.active')?.dataset.settingTarget;
+    const sliderDefaults = {
+      'setting-size-item': [dom.settingPointSize, 0.20],
+      'setting-brightness-item': [dom.settingParticleBrightness, 0.70],
+      'setting-density-item': [dom.settingPointDensity, 1.00],
+    };
+    if (activeTarget === 'setting-crop-item') {
+      state.settings.cropOutliers = true;
+      updateCropToggleUI(dom.btnParticleCropToggle, true, 'particle');
+      state.particleSystem?.setCropEnabled(true);
+      if (dom.settingCropFactor) {
+        dom.settingCropFactor.value = '2.5';
+        dom.settingCropFactor.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } else {
+      const [slider, defaultValue] = sliderDefaults[activeTarget] || [];
+      if (slider) {
+        slider.value = String(defaultValue);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+  }
+  showToast(state.lang === 'zh' ? '当前参数已重置' : 'Current parameter reset', 'info', 1800);
+}
+
+function confirmMobileSettings() {
+  if (!isMobileViewport()) return;
+  setMobileSettingsLevel('root');
+  showToast(state.lang === 'zh' ? '参数已保存' : 'Settings saved', 'success', 1600);
 }
 
 function syncResponsiveControlLayout() {
   if (!dom.mobileCameraOptions || !dom.flightPresetItem || !dom.desktopCameraScatterItem) return;
 
-  if (isMobileViewport()) {
+  const mobile = isMobileViewport();
+  dom.settingsPanel?.classList.toggle('desktop-settings-layout', !mobile);
+  if (mobile) {
     dom.mobileCameraOptions.append(dom.flightPresetItem, dom.desktopCameraScatterItem);
   } else {
     dom.desktopFlightAnchor.after(dom.flightPresetItem);
     dom.flightPresetItem.after(dom.desktopCameraScatterItem);
   }
+  updateDesktopSettingsUI();
+  updateMobileSettingsUI();
 }
 
 function syncModelRendererVisibility() {
@@ -1124,6 +2105,8 @@ const translations = {
     'composition-failed-no-fallback': '逐帧视频合成失败，未切换到实时录制',
     // Rendering Settings
     'settings-title': '渲染设置',
+    'desktop-particle-settings': '粒子设置',
+    'desktop-splat-settings': '3DGS 设置',
     'label-max-particles': '最大粒子数 (点云模式)',
     'opt-particles-50k': '50,000 (极速)',
     'opt-particles-150k': '150,000 (推荐)',
@@ -1134,11 +2117,16 @@ const translations = {
     'label-splat-crop-shape': '裁剪形状',
     'splat-crop-shape-ellipsoid': '椭球',
     'splat-crop-shape-box': '方形',
+    'splat-crop-shape-none': '无',
     'splat-crop-direct-hint': '拖动裁剪框上的 X / Y / Z 箭头调整各面',
-    'btn-splat-crop-reset': '重置',
-    'btn-mobile-splat-crop': '3DGS 裁剪',
-    'btn-mobile-particle-crop': '粒子裁剪',
-    'btn-mobile-crop-done': '完成',
+    'btn-splat-eraser': '高斯点擦除',
+    'btn-splat-eraser-exit': '退出高斯点擦除',
+    'splat-eraser-tool-title': '高斯点橡皮擦',
+    'splat-eraser-size': '橡皮擦大小',
+    'btn-mobile-splat-crop': '裁剪背景',
+    'btn-mobile-splat-eraser': '橡皮擦',
+    'btn-mobile-settings-reset': '重置当前参数',
+    'btn-mobile-settings-confirm': '保存参数',
     'label-min-opacity': '最小不透明度 (3DGS模式)',
     'label-point-size': '点云粒子大小',
     'label-point-density': '点云粒子密度',
@@ -1295,6 +2283,8 @@ const translations = {
     'composition-failed-no-fallback': 'Frame composition failed; live recording was not started',
     // Rendering Settings
     'settings-title': 'Rendering Settings',
+    'desktop-particle-settings': 'Particle Settings',
+    'desktop-splat-settings': '3DGS Settings',
     'label-max-particles': 'Max Particles (Particle Cloud)',
     'opt-particles-50k': '50,000 (Fastest)',
     'opt-particles-150k': '150,000 (Recommended)',
@@ -1305,11 +2295,16 @@ const translations = {
     'label-splat-crop-shape': 'Crop Shape',
     'splat-crop-shape-ellipsoid': 'Ellipsoid',
     'splat-crop-shape-box': 'Box',
+    'splat-crop-shape-none': 'None',
     'splat-crop-direct-hint': 'Drag the X / Y / Z arrows on the crop volume to adjust each face',
-    'btn-splat-crop-reset': 'Reset',
-    'btn-mobile-splat-crop': '3DGS Crop',
-    'btn-mobile-particle-crop': 'Particle Crop',
-    'btn-mobile-crop-done': 'Done',
+    'btn-splat-eraser': 'Erase Gaussian splats',
+    'btn-splat-eraser-exit': 'Exit Gaussian eraser',
+    'splat-eraser-tool-title': 'Gaussian Splat Eraser',
+    'splat-eraser-size': 'Eraser Size',
+    'btn-mobile-splat-crop': 'Crop Background',
+    'btn-mobile-splat-eraser': 'Eraser',
+    'btn-mobile-settings-reset': 'Reset current parameter',
+    'btn-mobile-settings-confirm': 'Save settings',
     'label-min-opacity': 'Min Opacity (3DGS)',
     'label-point-size': 'Base Particle Size',
     'label-point-density': 'Point Cloud Density',
@@ -1555,6 +2550,23 @@ function applyTranslations(lang) {
   if (dom.settingsPanel) {
     const h3 = dom.settingsPanel.querySelector('h3');
     if (h3) h3.textContent = dict['settings-title'];
+    if (dom.btnDesktopParticleSettings) {
+      dom.btnDesktopParticleSettings.textContent = dict['desktop-particle-settings'];
+    }
+    if (dom.btnDesktopSplatSettings) {
+      dom.btnDesktopSplatSettings.textContent = dict['desktop-splat-settings'];
+    }
+    if (dom.btnMobileParticleSettings) {
+      dom.btnMobileParticleSettings.textContent = dict['desktop-particle-settings'];
+    }
+    if (dom.btnMobileSplatSettings) {
+      dom.btnMobileSplatSettings.textContent = dict['desktop-splat-settings'];
+    }
+    if (dom.splatEraserToolTitle) {
+      dom.splatEraserToolTitle.textContent = dict['splat-eraser-tool-title'];
+    }
+    const eraserSizeLabel = dom.settingsPanel.querySelector('label[for="setting-splat-eraser-size"]');
+    if (eraserSizeLabel) eraserSizeLabel.textContent = dict['splat-eraser-size'];
     
     const labelParticles = dom.settingsPanel.querySelector('label[for="setting-max-particles"]');
     if (labelParticles) labelParticles.textContent = dict['label-max-particles'];
@@ -1570,18 +2582,32 @@ function applyTranslations(lang) {
     if (dom.btnSplatCropShapeBox) {
       dom.btnSplatCropShapeBox.textContent = dict['splat-crop-shape-box'];
     }
-    if (dom.btnSplatCropReset) dom.btnSplatCropReset.textContent = dict['btn-splat-crop-reset'];
+    if (dom.btnMobileSplatCropNone) {
+      dom.btnMobileSplatCropNone.textContent = dict['splat-crop-shape-none'];
+    }
+    const mobileSplatCropShapeTitle = dom.settingsPanel.querySelector('.mobile-splat-crop-shape-title');
+    if (mobileSplatCropShapeTitle) {
+      mobileSplatCropShapeTitle.textContent = dict['label-splat-crop-shape'];
+    }
+    updateSplatEraserUI();
     if (dom.btnMobileSplatCropPanel) {
       dom.btnMobileSplatCropPanel.textContent = dict['btn-mobile-splat-crop'];
     }
-    if (dom.btnMobileParticleCropPanel) {
-      dom.btnMobileParticleCropPanel.textContent = dict['btn-mobile-particle-crop'];
+    if (dom.btnMobileSplatEraserPanel) {
+      dom.btnMobileSplatEraserPanel.textContent = dict['btn-mobile-splat-eraser'];
     }
-    if (dom.btnMobileSplatCropDone) {
-      dom.btnMobileSplatCropDone.textContent = dict['btn-mobile-crop-done'];
+    if (dom.btnMobileSettingsReset) {
+      dom.btnMobileSettingsReset.title = dict['btn-mobile-settings-reset'];
+      dom.btnMobileSettingsReset.setAttribute('aria-label', dict['btn-mobile-settings-reset']);
     }
-    if (dom.btnMobileParticleCropDone) {
-      dom.btnMobileParticleCropDone.textContent = dict['btn-mobile-crop-done'];
+    if (dom.btnMobileSettingsConfirm) {
+      dom.btnMobileSettingsConfirm.title = dict['btn-mobile-settings-confirm'];
+      dom.btnMobileSettingsConfirm.setAttribute('aria-label', dict['btn-mobile-settings-confirm']);
+    }
+    if (dom.mobileSettingsGroupLabel) {
+      dom.mobileSettingsGroupLabel.textContent = state.settings.renderer === 'spark'
+        ? dict['desktop-splat-settings']
+        : dict['desktop-particle-settings'];
     }
     const splatCropDirectHint = dom.settingsPanel.querySelector('.splat-crop-direct-hint-text');
     if (splatCropDirectHint) splatCropDirectHint.textContent = dict['splat-crop-direct-hint'];
@@ -1602,7 +2628,7 @@ function applyTranslations(lang) {
     const cameraScatterLabel = dom.desktopCameraScatterItem?.querySelector('label[for="camera-scatter-effect"]');
     if (cameraScatterLabel) cameraScatterLabel.textContent = dict['label-scatter-effect'];
 
-    const mobileTags = document.querySelectorAll('.mobile-setting-tag');
+    const mobileTags = document.querySelectorAll('.mobile-particle-setting-tag');
     const tagLabels = lang === 'zh'
       ? ['裁剪背景', '粒子大小', '粒子亮度', '粒子密度']
       : ['Crop Background', 'Particle Size', 'Particle Light', 'Particle Density'];
@@ -1913,6 +2939,7 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  disposeSplatEraser();
   disposeSplatCrop();
   if (state.splatPivot) {
     state.scene.remove(state.splatPivot);
@@ -1946,11 +2973,11 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.restoreCameraPathFirstFrameOnOpen = false;
   if (isFreshLoad) {
     state.subjectCropBounds = null;
-    state.settings.splatCropEnabled = true;
+    state.settings.splatCropEnabled = !isMobileViewport();
     state.settings.splatCropShape = 'ellipsoid';
     state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
     state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
-    updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
     updateSplatCropShapeUI();
   }
   invalidateCustomCameraPath();
@@ -1973,6 +3000,8 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
         SplatEditSdf,
         SplatEditSdfType,
         SplatEditRgbaBlendMode,
+        RgbaArray,
+        dyno,
       } = sparkModule;
       state.sparkRenderer = new SparkRenderer({ renderer: state.renderer });
       state.scene.add(state.sparkRenderer);
@@ -1983,6 +3012,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
         SplatEditSdfType,
         SplatEditRgbaBlendMode,
       };
+      state.sparkPainterApi = { RgbaArray, dyno };
     } catch (err) {
       console.error('Failed to load rendering engine dynamically:', err);
       showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
@@ -2169,6 +3199,7 @@ const updateRemyPosition = () => {
   const recordingControlsActive = document.body.classList.contains('recording-mode-active');
   const webcamActive = dom.webcamContainer && !dom.webcamContainer.classList.contains('hidden');
   const progressActive = dom.progressControl && dom.progressControl.classList.contains('visible');
+  const mobileModelPage = isMobileViewport() && state.isModelLoaded;
 
   // Preview/export controls are fixed to the bottom edge on phones. Anchor the
   // Remy card above the top-most active control (including the progress bar)
@@ -2200,7 +3231,23 @@ const updateRemyPosition = () => {
   } else if (progressActive) {
     const pcRect = dom.progressControl.getBoundingClientRect();
     const viewH = window.innerHeight;
-    panel.style.setProperty('bottom', (viewH - pcRect.top + gap) + 'px');
+    panel.style.setProperty(
+      'bottom',
+      (viewH - pcRect.top + gap) + 'px',
+      mobileModelPage ? 'important' : ''
+    );
+  } else if (mobileModelPage) {
+    const toolbar = document.getElementById('toolbar');
+    const toolbarRect = toolbar?.getBoundingClientRect();
+    if (toolbarRect && toolbarRect.width > 0 && toolbarRect.height > 0) {
+      panel.style.setProperty(
+        'bottom',
+        (window.innerHeight - toolbarRect.top + gap) + 'px',
+        'important'
+      );
+    } else {
+      panel.style.removeProperty('bottom');
+    }
   } else {
     panel.style.removeProperty('bottom');
   }
@@ -2620,12 +3667,29 @@ function animate() {
   if (!state.previewActive && !state.recordingActive && state.isModelLoaded) {
     state.controls.update();
   }
+  updateSplatCropHandleDepthOpacity();
+  syncSplatEraserBrushCursor();
   // Render
   state.renderer.render(state.scene, state.camera);
 }
 // ============================================================
 // Renderer Mode Toggle (Spark 2.0 vs Particles)
 // ============================================================
+function updateDesktopSettingsUI() {
+  if (!dom.settingsPanel) return;
+  const isSpark = state.settings.renderer === 'spark';
+  dom.settingsPanel.classList.toggle('desktop-setting-spark', isSpark);
+  for (const [button, selected] of [
+    [dom.btnDesktopParticleSettings, !isSpark],
+    [dom.btnDesktopSplatSettings, isSpark],
+  ]) {
+    if (!button) continue;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+}
+
 function updateRendererUI() {
   if (!dom.btnToggleSpark) return;
   const iconSpan = dom.btnToggleSpark.querySelector('.btn-icon');
@@ -2662,11 +3726,16 @@ function updateRendererUI() {
       updateRemyPositionDeferred();
     }
   }
+  updateDesktopSettingsUI();
+  updateMobileSettingsUI();
   syncSplatCropHelperVisibility();
 }
 function setRendererMode(mode, source = 'timeline') {
   if (mode !== 'particles' && mode !== 'spark') return;
   if (state.settings.renderer === mode) return;
+  if (mode === 'particles' && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
   state.settings.renderer = mode;
   updateRendererUI();
   if (source === 'timeline' || source === 'composite') return;
@@ -2773,6 +3842,7 @@ function toggleCameraMode() {
     showToast('Please load a model first', 'warning');
     return;
   }
+  if (state.splatEraser?.active) setSplatEraserActive(false, { silent: true });
   
   state.cameraModeActive = !state.cameraModeActive;
   dom.btnCameraMode.classList.toggle('active', state.cameraModeActive);
@@ -3627,7 +4697,7 @@ function updateRotationControls() {
 
   [dom.btnToggleRotation, dom.btnMobileToggleRotation].forEach((button) => {
     if (!button) return;
-    button.classList.toggle('active', state.rotationPaused);
+    button.classList.toggle('active', button === dom.btnToggleRotation && state.rotationPaused);
     button.setAttribute('aria-pressed', String(state.rotationPaused));
     button.title = title;
     const text = button.querySelector('.btn-text');
@@ -4421,11 +5491,16 @@ function setupEventListeners() {
   });
 
   const renderCanvas = state.renderer?.domElement;
+  renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
   renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
   renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
   renderCanvas?.addEventListener('pointerleave', () => {
-    if (!state.splatCropDrag && renderCanvas) renderCanvas.style.cursor = '';
+    hideSplatEraserBrushCursor();
+    if (!state.splatCropDrag && !state.splatEraser?.active && renderCanvas) renderCanvas.style.cursor = '';
   });
+  window.addEventListener('pointermove', moveSplatEraserStroke, { capture: true, passive: false });
+  window.addEventListener('pointerup', endSplatEraserStroke, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endSplatEraserStroke, { capture: true, passive: false });
   window.addEventListener('pointermove', moveSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointerup', endSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointercancel', endSplatCropDrag, { capture: true, passive: false });
@@ -4671,8 +5746,18 @@ function setupEventListeners() {
   dom.btnSettings.addEventListener('click', () => {
     dom.settingsPanel.classList.toggle('hidden');
     dom.btnSettings.classList.toggle('active');
-    document.body.classList.toggle('settings-panel-active', !dom.settingsPanel.classList.contains('hidden'));
+    const settingsOpen = !dom.settingsPanel.classList.contains('hidden');
+    document.body.classList.toggle('settings-panel-active', settingsOpen);
+    if (settingsOpen && isMobileViewport()) setMobileSettingsLevel('root');
+    if (settingsOpen && state.isModelLoaded) {
+      state.rotationPaused = true;
+      if (state.particleSystem) state.particleSystem.autoRotate = false;
+      updateRotationControls();
+    }
     syncSplatCropHelperVisibility();
+    if (dom.settingsPanel.classList.contains('hidden') && state.splatEraser?.active) {
+      setSplatEraserActive(false, { silent: true });
+    }
     
     // Auto-hide camera path panel if settings are opened
     if (state.cameraModeActive) {
@@ -4681,6 +5766,14 @@ function setupEventListeners() {
   });
   dom.btnToggleRotation?.addEventListener('click', toggleModelRotation);
   dom.btnMobileToggleRotation?.addEventListener('click', toggleModelRotation);
+  dom.btnDesktopParticleSettings?.addEventListener('click', () => {
+    setRendererMode('particles', 'settings');
+    updateDesktopSettingsUI();
+  });
+  dom.btnDesktopSplatSettings?.addEventListener('click', () => {
+    setRendererMode('spark', 'settings');
+    updateDesktopSettingsUI();
+  });
   // Camera Path mode event listeners
   dom.btnCameraMode.addEventListener('click', toggleCameraMode);
   dom.btnAddKeyframe.addEventListener('click', addKeyframe);
@@ -4703,22 +5796,24 @@ function setupEventListeners() {
   dom.btnCancelComposition.addEventListener('click', requestStopComposition);
   dom.btnExportVideo.addEventListener('click', exportPathVideo);
 
+  dom.btnMobileParticleSettings?.addEventListener('click', () => {
+    setMobileSettingsMode('particles');
+  });
+  dom.btnMobileSplatSettings?.addEventListener('click', () => {
+    setMobileSettingsMode('spark');
+  });
   dom.btnMobileSplatCropPanel?.addEventListener('click', () => {
-    toggleMobileCropPanel('splat');
+    setMobileSplatTool('crop');
   });
-  dom.btnMobileParticleCropPanel?.addEventListener('click', () => {
-    toggleMobileCropPanel('particle');
+  dom.btnMobileSplatEraserPanel?.addEventListener('click', () => {
+    setMobileSplatTool('eraser');
   });
-  dom.btnMobileSplatCropDone?.addEventListener('click', () => {
-    toggleMobileCropPanel('splat');
-  });
-  dom.btnMobileParticleCropDone?.addEventListener('click', () => {
-    toggleMobileCropPanel('particle');
-  });
+  dom.btnMobileSettingsReset?.addEventListener('click', resetMobileSettingsParameter);
+  dom.btnMobileSettingsConfirm?.addEventListener('click', confirmMobileSettings);
 
-  document.querySelectorAll('.mobile-setting-tag').forEach((tag) => {
+  document.querySelectorAll('.mobile-particle-setting-tag').forEach((tag) => {
     tag.addEventListener('click', () => {
-      document.querySelectorAll('.mobile-setting-tag').forEach(item => item.classList.remove('active'));
+      document.querySelectorAll('.mobile-particle-setting-tag').forEach(item => item.classList.remove('active'));
       document.querySelectorAll('.mobile-parameter').forEach(item => item.classList.remove('mobile-active'));
       tag.classList.add('active');
       document.getElementById(tag.dataset.settingTarget)?.classList.add('mobile-active');
@@ -4726,15 +5821,6 @@ function setupEventListeners() {
     });
   });
 
-  document.querySelectorAll('.mobile-parameter input[type="range"]').forEach((slider) => {
-    const showSettings = () => dom.settingsPanel.classList.remove('adjusting-settings');
-    slider.addEventListener('pointerdown', () => dom.settingsPanel.classList.add('adjusting-settings'));
-    slider.addEventListener('input', () => dom.settingsPanel.classList.add('adjusting-settings'));
-    slider.addEventListener('pointerup', showSettings);
-    slider.addEventListener('pointercancel', showSettings);
-    slider.addEventListener('change', showSettings);
-  });
-  
   // Preset flight selection listener
   if (dom.selectPresetFlight) {
     dom.selectPresetFlight.addEventListener('change', (e) => {
@@ -4945,10 +6031,72 @@ function setupEventListeners() {
 
   for (const button of [dom.btnSplatCropShapeEllipsoid, dom.btnSplatCropShapeBox]) {
     button?.addEventListener('click', () => {
+      if (isMobileViewport() && !state.settings.splatCropEnabled) {
+        state.settings.splatCropEnabled = true;
+        updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
+      }
       applySplatCropShape(button.dataset.cropShape);
     });
   }
-  dom.btnSplatCropReset?.addEventListener('click', resetSplatCropTransform);
+  dom.btnMobileSplatCropNone?.addEventListener('click', () => {
+    if (!isMobileViewport()) return;
+    state.settings.splatCropEnabled = false;
+    updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
+    updateSplatCropShapeUI();
+    updateSplatCropFromSettings();
+  });
+  dom.btnSplatEraser?.addEventListener('click', () => {
+    setSplatEraserActive(!state.splatEraser?.active);
+  });
+  dom.btnSplatEraserPaint?.addEventListener('click', () => {
+    if (isMobileViewport()) {
+      if (!state.splatEraser?.active) setSplatEraserActive(true);
+    } else {
+      setSplatEraserActive(!state.splatEraser?.active);
+    }
+  });
+  dom.btnSplatEraserConfirm?.addEventListener('click', confirmSplatEraserSelection);
+  dom.btnSplatEraserUndo?.addEventListener('click', undoSplatEraser);
+  dom.settingSplatEraserSize?.addEventListener('input', (event) => {
+    setSplatEraserBrushPercent(event.target.value);
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.splatEraser?.active) {
+      setSplatEraserActive(false);
+    } else if (
+      state.splatEraser?.active
+      && !state.splatEraser.touchLayout
+      && (event.code === 'BracketLeft' || event.code === 'BracketRight')
+    ) {
+      const target = event.target;
+      const isTyping = target instanceof HTMLElement && (
+        target.isContentEditable
+        || target.matches('textarea, select, input:not([type="range"])')
+      );
+      if (!isTyping) {
+        const step = parseFloat(dom.settingSplatEraserSize?.step) || 1;
+        const current = parseFloat(dom.settingSplatEraserSize?.value)
+          || state.splatEraser.brushScale * 100;
+        setSplatEraserBrushPercent(
+          current + (event.code === 'BracketLeft' ? -step : step)
+        );
+        event.preventDefault();
+      }
+    } else if (event.key === 'Alt' && state.splatEraser?.active && !state.splatEraser.touchLayout) {
+      state.splatEraser.cursorNavigation = true;
+      syncSplatEraserBrushCursor();
+      if (!state.splatEraser.drawing && state.renderer?.domElement) {
+        state.renderer.domElement.style.cursor = 'grab';
+      }
+    }
+  });
+  window.addEventListener('keyup', (event) => {
+    if (event.key === 'Alt' && state.splatEraser?.active && !state.splatEraser.touchLayout && !state.splatEraser.drawing) {
+      state.splatEraser.cursorNavigation = false;
+      syncSplatEraserBrushCursor();
+      if (state.renderer?.domElement) state.renderer.domElement.style.cursor = 'none';
+    }
+  });
   
   // Prevent webpage zoom/scroll during flight preview
   window.addEventListener('wheel', (e) => {

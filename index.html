@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.34">
+  <link rel="stylesheet" href="css/style.css?v=3.46">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -84,10 +84,22 @@
       <path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"/>
       <path d="M9 12l2 2l4 -4"/>
     </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24">
+      <path d="M5 12l5 5l9 -9"/>
+    </symbol>
+    <symbol id="icon-restore" viewBox="0 0 24 24">
+      <path d="M4.05 11a8 8 0 1 1 2.05 5.35"/>
+      <path d="M4 4v7h7"/>
+    </symbol>
+    <symbol id="icon-eraser" viewBox="0 0 24 24">
+      <path d="M19 19h-11l-4 -4a2 2 0 0 1 0 -3l7 -7a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3l-6 6"/>
+      <path d="M18 12.3l-6.3 -6.3"/>
+    </symbol>
   </svg>
   <div class="app-container no-select">
     <!-- Three.js Canvas -->
     <div id="canvas-container"></div>
+    <div id="splat-eraser-brush-cursor" class="splat-eraser-brush-cursor" aria-hidden="true"></div>
     <!-- ========== Toolbar ========== -->
     <div class="toolbar" id="toolbar">
       <!-- URL Input -->
@@ -264,11 +276,26 @@
     <div class="settings-panel hidden" id="settings-panel">
       <h3>Rendering Settings</h3>
 
-      <div class="mobile-setting-tabs" role="tablist" aria-label="Rendering parameters">
-        <button type="button" class="mobile-setting-tag active" data-setting-target="setting-crop-item">Crop</button>
-        <button type="button" class="mobile-setting-tag" data-setting-target="setting-size-item">Size</button>
-        <button type="button" class="mobile-setting-tag" data-setting-target="setting-brightness-item">Light</button>
-        <button type="button" class="mobile-setting-tag" data-setting-target="setting-density-item">Density</button>
+      <div class="desktop-setting-tabs" role="tablist" aria-label="Rendering setting groups">
+        <button id="btn-desktop-particle-settings" class="desktop-setting-tab active" type="button" role="tab" aria-selected="true" data-desktop-setting="particles">Particle Settings</button>
+        <button id="btn-desktop-splat-settings" class="desktop-setting-tab" type="button" role="tab" aria-selected="false" data-desktop-setting="spark">3DGS Settings</button>
+      </div>
+
+      <div class="mobile-setting-tabs" role="tablist" aria-label="Rendering setting groups">
+        <button id="btn-mobile-particle-settings" type="button" class="mobile-setting-mode" role="tab" aria-selected="true" data-mobile-setting="particles">Particle Settings</button>
+        <button id="btn-mobile-splat-settings" type="button" class="mobile-setting-mode" role="tab" aria-selected="false" data-mobile-setting="spark">3DGS Settings</button>
+      </div>
+
+      <div class="mobile-particle-setting-tabs" role="tablist" aria-label="Particle parameters">
+        <button type="button" class="mobile-setting-tag mobile-particle-setting-tag active" data-setting-target="setting-crop-item">Crop</button>
+        <button type="button" class="mobile-setting-tag mobile-particle-setting-tag" data-setting-target="setting-size-item">Size</button>
+        <button type="button" class="mobile-setting-tag mobile-particle-setting-tag" data-setting-target="setting-brightness-item">Light</button>
+        <button type="button" class="mobile-setting-tag mobile-particle-setting-tag" data-setting-target="setting-density-item">Density</button>
+      </div>
+
+      <div class="mobile-splat-setting-tabs" role="tablist" aria-label="3DGS tools">
+        <button id="btn-mobile-splat-crop-panel" type="button" class="mobile-splat-setting-tag active" role="tab" aria-selected="true" data-mobile-splat-tool="crop">Crop Background</button>
+        <button id="btn-mobile-splat-eraser-panel" type="button" class="mobile-splat-setting-tag" role="tab" aria-selected="false" data-mobile-splat-tool="eraser">Eraser</button>
       </div>
       
       <div class="setting-item" style="display: none;">
@@ -281,28 +308,11 @@
         </select>
       </div>
       <div id="setting-crop-item" class="setting-item mobile-parameter mobile-active">
-        <div class="mobile-crop-selectors" role="group" aria-label="Crop controls">
-          <button
-            id="btn-mobile-splat-crop-panel"
-            class="mobile-crop-selector"
-            type="button"
-            aria-expanded="false"
-            aria-controls="splat-crop-controls"
-          >3DGS Crop</button>
-          <button
-            id="btn-mobile-particle-crop-panel"
-            class="mobile-crop-selector"
-            type="button"
-            aria-expanded="false"
-            aria-controls="particle-crop-controls"
-          >Particle Crop</button>
-        </div>
-
         <div id="splat-crop-controls" class="crop-control-block splat-crop-control">
           <div class="setting-row-val">
             <span class="splat-crop-title">3DGS Background Crop</span>
             <div class="crop-setting-actions">
-              <button id="btn-splat-crop-reset" class="splat-crop-reset" type="button">Reset</button>
+              <span class="mobile-splat-crop-shape-title">Crop Shape</span>
               <button
                 id="btn-splat-crop-toggle"
                 class="crop-toggle active"
@@ -311,12 +321,17 @@
                 aria-label="Disable 3DGS crop"
               ><span class="crop-toggle-knob"></span></button>
             </div>
-            <button id="btn-mobile-splat-crop-done" class="mobile-crop-done" type="button">Done</button>
           </div>
           <div class="splat-crop-shape-row">
             <span class="splat-crop-shape-label">Crop Shape</span>
             <span class="splat-crop-inline-hint splat-crop-direct-hint-text">Drag the X / Y / Z arrows on the crop volume to adjust each face</span>
             <div class="splat-crop-shape-options" role="group" aria-label="3DGS crop shape">
+              <button
+                id="btn-mobile-splat-crop-none"
+                class="splat-crop-shape-option mobile-splat-crop-none"
+                type="button"
+                aria-pressed="false"
+              >None</button>
               <button
                 id="btn-splat-crop-shape-ellipsoid"
                 class="splat-crop-shape-option active"
@@ -331,6 +346,22 @@
                 data-crop-shape="box"
                 aria-pressed="false"
               >Box</button>
+            </div>
+          </div>
+          <div id="splat-eraser-tool" class="splat-eraser-tool" aria-label="Gaussian splat eraser">
+            <div class="splat-eraser-tool-header">
+              <span class="splat-eraser-tool-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-eraser"></use></svg><span class="splat-eraser-tool-title-text">Gaussian Splat Eraser</span></span>
+              <span id="splat-eraser-status" class="splat-eraser-status">Drag to highlight an area</span>
+            </div>
+            <div class="splat-eraser-size-row">
+              <label for="setting-splat-eraser-size">Eraser Size</label>
+              <input id="setting-splat-eraser-size" type="range" min="2" max="20" step="1" value="8">
+              <span id="setting-splat-eraser-size-val" class="setting-val-display">8%</span>
+            </div>
+            <div class="splat-eraser-actions">
+              <button id="btn-splat-eraser-paint" class="splat-eraser-action active" type="button" aria-pressed="true">Paint Selection</button>
+              <button id="btn-splat-eraser-confirm" class="splat-eraser-action primary" type="button" disabled>Confirm Erase</button>
+              <button id="btn-splat-eraser-undo" class="splat-eraser-action" type="button" disabled>Undo</button>
             </div>
           </div>
         </div>
@@ -348,7 +379,6 @@
                 aria-label="Disable particle crop"
               ><span class="crop-toggle-knob"></span></button>
             </div>
-            <button id="btn-mobile-particle-crop-done" class="mobile-crop-done" type="button">Done</button>
           </div>
           <input type="range" id="setting-crop-factor" min="0.50" max="3.00" step="0.05" value="2.50" list="crop-ticks">
           <datalist id="crop-ticks">
@@ -417,6 +447,15 @@
           <span class="setting-val-display" id="setting-splat-scale-val">1.0</span>
         </div>
         <input type="range" id="setting-splat-scale" min="0.2" max="4.0" step="0.1" value="1.0">
+      </div>
+      <div class="mobile-settings-actions" aria-label="Mobile setting actions">
+        <button id="btn-mobile-settings-reset" class="mobile-settings-action" type="button" aria-label="重置当前参数" title="重置当前参数">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-restore"></use></svg>
+        </button>
+        <span id="mobile-settings-group-label" class="mobile-settings-group-label">Particle Settings</span>
+        <button id="btn-mobile-settings-confirm" class="mobile-settings-action primary" type="button" aria-label="保存参数" title="保存参数">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-check"></use></svg>
+        </button>
       </div>
     </div>
     <!-- ========== Stats Panel ========== -->
@@ -579,6 +618,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.64"></script>
+  <script type="module" src="js/app.js?v=3.80"></script>
 </body>
 </html>
