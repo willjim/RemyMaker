@@ -315,10 +315,10 @@
               <span class="mobile-splat-crop-shape-title">Crop Shape</span>
               <button
                 id="btn-splat-crop-toggle"
-                class="crop-toggle active"
+                class="crop-toggle"
                 type="button"
-                aria-pressed="true"
-                aria-label="Disable 3DGS crop"
+                aria-pressed="false"
+                aria-label="Enable 3DGS crop"
               ><span class="crop-toggle-knob"></span></button>
             </div>
           </div>
@@ -328,16 +328,16 @@
             <div class="splat-crop-shape-options" role="group" aria-label="3DGS crop shape">
               <button
                 id="btn-mobile-splat-crop-none"
-                class="splat-crop-shape-option mobile-splat-crop-none"
+                class="splat-crop-shape-option mobile-splat-crop-none active"
                 type="button"
-                aria-pressed="false"
+                aria-pressed="true"
               >None</button>
               <button
                 id="btn-splat-crop-shape-ellipsoid"
-                class="splat-crop-shape-option active"
+                class="splat-crop-shape-option"
                 type="button"
                 data-crop-shape="ellipsoid"
-                aria-pressed="true"
+                aria-pressed="false"
               >Ellipsoid</button>
               <button
                 id="btn-splat-crop-shape-box"
@@ -618,6 +618,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.81"></script>
+  <script type="module" src="js/app.js?v=3.90"></script>
 </body>
 </html>

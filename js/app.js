@@ -118,10 +118,20 @@ const state = {
   initialZoomScale: 1.0,    // scale when zoom gesture started
   keyframes: [],            // full camera snapshots used by custom paths and viewpoint recall
   selectedKeyframeIndex: null,
+  cameraKeyframeTimes: null,
   cameraSphericalPoints: null,
-  cameraSphericalTangents: null,
+  cameraSphericalVelocities: null,
   cameraFilteredTargets: null,
-  cameraSegmentArcLengths: null,
+  cameraTargetVelocities: null,
+  cameraProjectionValues: null,
+  cameraProjectionVelocities: null,
+  cameraQuaternions: null,
+  cameraQuaternionControls: null,
+  cameraModelQuaternions: null,
+  cameraModelQuaternionControls: null,
+  cameraMotionProgress: null,
+  cameraMotionDistances: null,
+  cameraMotionTotal: 0,
   cameraModeActive: false,  // true when camera path panel is visible
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
@@ -152,7 +162,7 @@ const state = {
     maxParticles: 500000,
     cropOutliers: true,
     cropFactor: 2.5,
-    splatCropEnabled: !isMobileViewport(),
+    splatCropEnabled: false,
     splatCropShape: 'ellipsoid',
     splatCropRadiiScale: { x: 1, y: 1, z: 1 },
     splatCropOffset: { x: 0, y: 0, z: 0 },
@@ -388,20 +398,20 @@ function normalizeSplatCropShape(shape) {
 
 function updateSplatCropShapeUI() {
   const shape = normalizeSplatCropShape(state.settings.splatCropShape);
-  const mobileCropDisabled = isMobileViewport() && !state.settings.splatCropEnabled;
+  const cropDisabled = !state.settings.splatCropEnabled;
   const buttons = [
     [dom.btnSplatCropShapeEllipsoid, 'ellipsoid'],
     [dom.btnSplatCropShapeBox, 'box'],
   ];
   for (const [button, buttonShape] of buttons) {
     if (!button) continue;
-    const selected = buttonShape === shape && !mobileCropDisabled;
+    const selected = buttonShape === shape && !cropDisabled;
     button.classList.toggle('active', selected);
     button.setAttribute('aria-pressed', String(selected));
   }
   if (dom.btnMobileSplatCropNone) {
-    dom.btnMobileSplatCropNone.classList.toggle('active', mobileCropDisabled);
-    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(mobileCropDisabled));
+    dom.btnMobileSplatCropNone.classList.toggle('active', cropDisabled);
+    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(cropDisabled));
   }
 }
 
@@ -1072,18 +1082,17 @@ function updateSplatEraserUI() {
 }
 
 function updateSplatEraserBrushDimensions(eraser) {
-  if (!eraser) return;
-  const subjectRadius = Math.max(
-    state.subjectCropBounds?.radii.x || 0,
-    state.subjectCropBounds?.radii.y || 0,
-    state.subjectCropBounds?.radii.z || 0,
-    0.1
-  ) * state.modelScale * state.settings.splatScale;
-  // The slider already constrains brushScale to 2%–20%. Keep the world-space
-  // radius proportional across that full range instead of flattening larger
-  // values against a fixed cap that varies perceptually between models.
-  eraser.brushRadius.value = Math.max(subjectRadius, 0.05) * eraser.brushScale;
-  eraser.brushDepth.value = Math.max(10, subjectRadius * 8);
+  if (!eraser || !state.camera || !eraser.mesh) return;
+  const targetPoint = state.controls?.target || new THREE.Vector3();
+  const focusDepth = Math.max(0.1, state.camera.position.distanceTo(targetPoint));
+  const halfFovRad = THREE.MathUtils.degToRad(state.camera.fov * 0.5);
+  const viewHeightAtDepth = 2 * focusDepth * Math.tan(halfFovRad);
+  const radiusWorld = Math.max(0.001, (viewHeightAtDepth * 0.5) * eraser.brushScale);
+  
+  eraser.mesh.updateWorldMatrix(true, false);
+  const meshScale = eraser.mesh.getWorldScale(new THREE.Vector3()).x || 1;
+  eraser.brushRadius.value = radiusWorld / Math.max(1e-4, meshScale);
+  eraser.brushDepth.value = Math.max(10, focusDepth * 4);
 }
 
 function setSplatEraserBrushPercent(value) {
@@ -1099,28 +1108,17 @@ function setSplatEraserBrushPercent(value) {
     state.splatEraser.brushScale = percent / 100;
     updateSplatEraserBrushDimensions(state.splatEraser);
     syncSplatEraserBrushCursor();
-    showMobileSplatEraserBrushPreview();
   }
+  showSplatEraserBrushPreview();
 }
 
 function getSplatEraserCursorDiameter(eraser) {
   const canvas = state.renderer?.domElement;
-  const camera = state.camera;
-  if (!eraser || !canvas || !camera) return 24;
+  if (!eraser || !canvas) return 24;
   const rect = canvas.getBoundingClientRect();
   if (!rect.height) return 24;
 
-  let focusDepth = camera.position.distanceTo(state.controls?.target || new THREE.Vector3());
-  if (state.subjectCropBounds && eraser.mesh) {
-    eraser.mesh.updateWorldMatrix(true, false);
-    camera.updateMatrixWorld(true);
-    const subjectWorld = eraser.mesh.localToWorld(state.subjectCropBounds.center.clone());
-    const subjectView = subjectWorld.applyMatrix4(camera.matrixWorldInverse);
-    if (-subjectView.z > camera.near) focusDepth = -subjectView.z;
-  }
-
-  const focalPixels = rect.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
-  const diameter = (eraser.brushRadius.value * focalPixels * 2) / Math.max(focusDepth, camera.near);
+  const diameter = rect.height * eraser.brushScale;
   const maxDiameter = eraser.touchLayout
     ? Math.max(rect.width, rect.height) * 2
     : Math.min(rect.width, rect.height) * 0.9;
@@ -1169,21 +1167,44 @@ function updateSplatEraserBrushCursor(event) {
   syncSplatEraserBrushCursor();
 }
 
-function showMobileSplatEraserBrushPreview(event = null) {
-  const eraser = state.splatEraser;
+function showSplatEraserBrushPreview(event = null) {
   const canvas = state.renderer?.domElement;
-  if (!eraser?.active || !eraser.touchLayout || !canvas || eraser.touchGesture) return;
+  const cursor = dom.splatEraserBrushCursor;
+  if (!canvas || !cursor) return;
   const rect = canvas.getBoundingClientRect();
-  eraser.cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
-  eraser.cursorY = event?.clientY ?? (rect.top + rect.height * 0.42);
-  eraser.cursorInside = true;
-  eraser.cursorNavigation = false;
-  if (eraser.cursorHideTimer) clearTimeout(eraser.cursorHideTimer);
-  syncSplatEraserBrushCursor();
-  eraser.cursorHideTimer = setTimeout(() => {
-    eraser.cursorHideTimer = null;
-    if (!eraser.drawing && !eraser.touchGesture) hideSplatEraserBrushCursor();
-  }, 2000);
+  if (!rect.width || !rect.height) return;
+
+  const brushScale = (state.splatEraser?.brushScale)
+    ?? ((parseFloat(dom.settingSplatEraserSize?.value) || 8) / 100);
+
+  const diameter = rect.height * brushScale;
+  const cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
+  const cursorY = event?.clientY ?? (rect.top + rect.height * 0.5);
+
+  cursor.style.left = `${cursorX}px`;
+  cursor.style.top = `${cursorY}px`;
+  cursor.style.width = `${diameter}px`;
+  cursor.style.height = `${diameter}px`;
+  cursor.classList.add('visible');
+
+  if (state.splatEraser) {
+    state.splatEraser.cursorX = cursorX;
+    state.splatEraser.cursorY = cursorY;
+    state.splatEraser.cursorInside = true;
+    state.splatEraser.cursorNavigation = false;
+    if (state.splatEraser.cursorHideTimer) clearTimeout(state.splatEraser.cursorHideTimer);
+    state.splatEraser.cursorHideTimer = setTimeout(() => {
+      if (state.splatEraser) state.splatEraser.cursorHideTimer = null;
+      if (!state.splatEraser?.drawing && !state.splatEraser?.touchGesture) {
+        hideSplatEraserBrushCursor();
+      }
+    }, 2000);
+  } else {
+    if (window._splatEraserPreviewTimer) clearTimeout(window._splatEraserPreviewTimer);
+    window._splatEraserPreviewTimer = setTimeout(() => {
+      cursor.classList.remove('visible');
+    }, 2000);
+  }
 }
 
 function hideSplatEraserBrushCursor() {
@@ -1288,6 +1309,7 @@ function updateSplatEraserRay(event) {
   splatEraserRaycaster.setFromCamera(splatEraserPointer, state.camera);
   eraser.brushOrigin.value.copy(splatEraserRaycaster.ray.origin);
   eraser.brushDirection.value.copy(splatEraserRaycaster.ray.direction).normalize();
+  updateSplatEraserBrushDimensions(eraser);
   return true;
 }
 
@@ -2971,7 +2993,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.restoreCameraPathFirstFrameOnOpen = false;
   if (isFreshLoad) {
     state.subjectCropBounds = null;
-    state.settings.splatCropEnabled = !isMobileViewport();
+    state.settings.splatCropEnabled = false;
     state.settings.splatCropShape = 'ellipsoid';
     state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
     state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
@@ -3891,10 +3913,20 @@ function getKeyframeLimit() {
 }
 
 function invalidateCustomCameraPath() {
+  state.cameraKeyframeTimes = null;
   state.cameraSphericalPoints = null;
-  state.cameraSphericalTangents = null;
+  state.cameraSphericalVelocities = null;
   state.cameraFilteredTargets = null;
-  state.cameraSegmentArcLengths = null;
+  state.cameraTargetVelocities = null;
+  state.cameraProjectionValues = null;
+  state.cameraProjectionVelocities = null;
+  state.cameraQuaternions = null;
+  state.cameraQuaternionControls = null;
+  state.cameraModelQuaternions = null;
+  state.cameraModelQuaternionControls = null;
+  state.cameraMotionProgress = null;
+  state.cameraMotionDistances = null;
+  state.cameraMotionTotal = 0;
 }
 
 function addKeyframe() {
@@ -4007,94 +4039,123 @@ function removeKeyframe(index) {
   showToast('Keyframe removed', 'info');
 }
 
-function createMonotoneTangents(values) {
+function createMonotoneTimeDerivatives(values, times) {
   const pointCount = values.length;
-  const tangents = new Array(pointCount).fill(0);
-  if (pointCount < 2) return tangents;
+  const derivatives = new Array(pointCount).fill(0);
+  if (pointCount < 2) return derivatives;
+  if (pointCount === 2) {
+    const duration = Math.max(1e-6, times[1] - times[0]);
+    const slope = (values[1] - values[0]) / duration;
+    derivatives[0] = slope;
+    derivatives[1] = slope;
+    return derivatives;
+  }
 
+  const intervals = new Array(pointCount - 1);
   const slopes = new Array(pointCount - 1);
-  for (let i = 0; i < pointCount - 1; i++) slopes[i] = values[i + 1] - values[i];
-  tangents[0] = slopes[0];
-  tangents[pointCount - 1] = slopes[pointCount - 2];
-  for (let i = 1; i < pointCount - 1; i++) {
-    tangents[i] = (slopes[i - 1] + slopes[i]) * 0.5;
+  for (let index = 0; index < pointCount - 1; index++) {
+    intervals[index] = Math.max(1e-6, times[index + 1] - times[index]);
+    slopes[index] = (values[index + 1] - values[index]) / intervals[index];
   }
 
-  // Fritsch-Carlson limiting keeps every scalar segment inside its endpoint
-  // range. This prevents theta from overshooting into an unintended full turn.
-  for (let i = 0; i < slopes.length; i++) {
-    const slope = slopes[i];
-    if (Math.abs(slope) < 1e-8) {
-      tangents[i] = 0;
-      tangents[i + 1] = 0;
-      continue;
-    }
-    let startRatio = tangents[i] / slope;
-    let endRatio = tangents[i + 1] / slope;
-    if (startRatio < 0) {
-      tangents[i] = 0;
-      startRatio = 0;
-    }
-    if (endRatio < 0) {
-      tangents[i + 1] = 0;
-      endRatio = 0;
-    }
-    const ratioLength = Math.hypot(startRatio, endRatio);
-    if (ratioLength > 3) {
-      const scale = 3 / ratioLength;
-      tangents[i] = scale * startRatio * slope;
-      tangents[i + 1] = scale * endRatio * slope;
-    }
+  // Smooth Catmull-Rom weighted velocity calculation (prevents zero-velocity stalls at keyframes)
+  for (let index = 1; index < pointCount - 1; index++) {
+    const previousSlope = slopes[index - 1];
+    const nextSlope = slopes[index];
+    const previousInterval = intervals[index - 1];
+    const nextInterval = intervals[index];
+    const totalInterval = previousInterval + nextInterval;
+    
+    // Continuous velocity vector through keyframe node
+    derivatives[index] = (previousSlope * nextInterval + nextSlope * previousInterval) / totalInterval;
   }
-  return tangents;
+
+  // Endpoints: smooth natural extension
+  derivatives[0] = slopes[0] - (derivatives[1] - slopes[0]) * 0.5;
+  derivatives[pointCount - 1] = slopes[pointCount - 2] + (slopes[pointCount - 2] - derivatives[pointCount - 2]) * 0.5;
+
+  return derivatives;
 }
 
-function createSphericalTangents(points) {
-  const radiusTangents = createMonotoneTangents(points.map(point => point.x));
-  const thetaTangents = createMonotoneTangents(points.map(point => point.y));
-  const phiTangents = createMonotoneTangents(points.map(point => point.z));
+function createVectorTimeDerivatives(points, times) {
+  const xDerivatives = createMonotoneTimeDerivatives(points.map(point => point.x), times);
+  const yDerivatives = createMonotoneTimeDerivatives(points.map(point => point.y), times);
+  const zDerivatives = createMonotoneTimeDerivatives(points.map(point => point.z), times);
   return points.map((_, index) => new THREE.Vector3(
-    radiusTangents[index],
-    thetaTangents[index],
-    phiTangents[index]
+    xDerivatives[index],
+    yDerivatives[index],
+    zDerivatives[index]
   ));
 }
 
-function interpolateSphericalPoint(progress) {
-  const points = state.cameraSphericalPoints;
-  const tangents = state.cameraSphericalTangents;
-  if (!points?.length || !tangents?.length) return null;
-  const segmentCount = points.length - 1;
-  const scaledProgress = THREE.MathUtils.clamp(progress, 0, 1) * segmentCount;
-  const segmentIndex = Math.min(Math.floor(scaledProgress), segmentCount - 1);
-  const amount = progress >= 1 ? 1 : scaledProgress - segmentIndex;
+const cameraTimelineSample = { segmentIndex: 0, amount: 0, duration: 1 };
+
+function getCameraTimelineSegment(progress) {
+  const times = state.cameraKeyframeTimes;
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (!times?.length || times.length < 2) {
+    cameraTimelineSample.segmentIndex = 0;
+    cameraTimelineSample.amount = clampedProgress;
+    cameraTimelineSample.duration = 1;
+    return cameraTimelineSample;
+  }
+
+  let low = 0;
+  let high = times.length - 2;
+  while (low < high) {
+    const middle = Math.floor((low + high) * 0.5);
+    if (clampedProgress > times[middle + 1]) low = middle + 1;
+    else high = middle;
+  }
+  const segmentIndex = low;
+  const duration = Math.max(1e-6, times[segmentIndex + 1] - times[segmentIndex]);
+  cameraTimelineSample.segmentIndex = segmentIndex;
+  cameraTimelineSample.amount = clampedProgress >= 1
+    ? 1
+    : THREE.MathUtils.clamp((clampedProgress - times[segmentIndex]) / duration, 0, 1);
+  cameraTimelineSample.duration = duration;
+  return cameraTimelineSample;
+}
+
+function interpolateQuinticScalar(values, derivatives, segmentIndex, amount, duration) {
   const amount2 = amount * amount;
   const amount3 = amount2 * amount;
-  const h00 = 2 * amount3 - 3 * amount2 + 1;
-  const h10 = amount3 - 2 * amount2 + amount;
-  const h01 = -2 * amount3 + 3 * amount2;
-  const h11 = amount3 - amount2;
-  return new THREE.Vector3(
-    h00 * points[segmentIndex].x + h10 * tangents[segmentIndex].x
-      + h01 * points[segmentIndex + 1].x + h11 * tangents[segmentIndex + 1].x,
-    h00 * points[segmentIndex].y + h10 * tangents[segmentIndex].y
-      + h01 * points[segmentIndex + 1].y + h11 * tangents[segmentIndex + 1].y,
-    h00 * points[segmentIndex].z + h10 * tangents[segmentIndex].z
-      + h01 * points[segmentIndex + 1].z + h11 * tangents[segmentIndex + 1].z
-  );
+  const position0 = 1 - 3 * amount2 + 2 * amount3;
+  const velocity0 = amount - 2 * amount2 + amount3;
+  const position1 = 3 * amount2 - 2 * amount3;
+  const velocity1 = -amount2 + amount3;
+  return position0 * values[segmentIndex]
+    + velocity0 * duration * derivatives[segmentIndex]
+    + position1 * values[segmentIndex + 1]
+    + velocity1 * duration * derivatives[segmentIndex + 1];
+}
+
+function interpolateQuinticVector(points, derivatives, segmentIndex, amount, duration, output = new THREE.Vector3()) {
+  const amount2 = amount * amount;
+  const amount3 = amount2 * amount;
+  const position0 = 1 - 3 * amount2 + 2 * amount3;
+  const velocity0 = amount - 2 * amount2 + amount3;
+  const position1 = 3 * amount2 - 2 * amount3;
+  const velocity1 = -amount2 + amount3;
+  return output
+    .copy(points[segmentIndex]).multiplyScalar(position0)
+    .addScaledVector(derivatives[segmentIndex], velocity0 * duration)
+    .addScaledVector(points[segmentIndex + 1], position1)
+
+    .addScaledVector(derivatives[segmentIndex + 1], velocity1 * duration);
 }
 
 function sphericalPointToCameraPosition(sphereCoords, target, output = new THREE.Vector3()) {
   const spherical = new THREE.Spherical(
-    sphereCoords.x,
-    sphereCoords.z,
+    Math.max(1e-5, sphereCoords.x),
+    THREE.MathUtils.clamp(sphereCoords.z, 1e-4, Math.PI - 1e-4),
     sphereCoords.y
   );
   return output.setFromSpherical(spherical).add(target);
 }
 
 const CAMERA_TARGET_FILTER_PIXELS = 14;
-const CAMERA_SEGMENT_ARC_SAMPLES = 128;
+const CAMERA_TIMELINE_BASELINE_RATIO = 0.08;
 
 function buildFilteredCameraTargets() {
   const viewportHeight = Math.max(
@@ -4131,63 +4192,317 @@ function buildFilteredCameraTargets() {
   return filteredTargets;
 }
 
-function getCameraSegmentAmount(progress) {
-  const segmentCount = Math.max(1, state.keyframes.length - 1);
-  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
-  const scaledProgress = clampedProgress * segmentCount;
-  const segmentIndex = Math.min(Math.floor(scaledProgress), segmentCount - 1);
-  return {
-    segmentIndex,
-    amount: clampedProgress >= 1 ? 1 : scaledProgress - segmentIndex,
-    segmentCount,
-  };
+function getFrameProjectionScale(frame) {
+  const fov = Number.isFinite(frame?.fov) ? frame.fov : 60;
+  const zoom = Number.isFinite(frame?.zoom) ? frame.zoom : 1;
+  return Math.max(1e-6, zoom / Math.tan(THREE.MathUtils.degToRad(fov) * 0.5));
 }
 
-function interpolateFilteredCameraTarget(segmentIndex, amount, output = new THREE.Vector3()) {
-  const targets = state.cameraFilteredTargets;
-  if (!targets?.length) return output.set(0, 0, 0);
-  const easedAmount = amount * amount * (3 - 2 * amount);
-  return output.lerpVectors(targets[segmentIndex], targets[segmentIndex + 1], easedAmount);
+function getQuaternionAngularDistance(startQuaternion, endQuaternion) {
+  if (!startQuaternion || !endQuaternion) return 0;
+  const dot = THREE.MathUtils.clamp(Math.abs(startQuaternion.dot(endQuaternion)), 0, 1);
+  return 2 * Math.acos(dot);
 }
 
-function sampleCameraSegmentPosition(segmentIndex, amount, output = new THREE.Vector3()) {
-  const segmentCount = Math.max(1, state.keyframes.length - 1);
-  const rawProgress = (segmentIndex + amount) / segmentCount;
-  const sphereCoords = interpolateSphericalPoint(rawProgress);
-  const target = interpolateFilteredCameraTarget(segmentIndex, amount);
-  return sphericalPointToCameraPosition(sphereCoords, target, output);
-}
-
-function buildCameraSegmentArcLengthTables() {
-  const segmentCount = Math.max(1, state.keyframes.length - 1);
-  const tables = [];
-  const previousPosition = new THREE.Vector3();
-  const currentPosition = new THREE.Vector3();
-
-  for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++) {
-    const cumulativeDistances = new Float64Array(CAMERA_SEGMENT_ARC_SAMPLES + 1);
-    sampleCameraSegmentPosition(segmentIndex, 0, previousPosition);
-    let totalDistance = 0;
-    for (let sampleIndex = 1; sampleIndex <= CAMERA_SEGMENT_ARC_SAMPLES; sampleIndex++) {
-      const amount = sampleIndex / CAMERA_SEGMENT_ARC_SAMPLES;
-      sampleCameraSegmentPosition(segmentIndex, amount, currentPosition);
-      totalDistance += currentPosition.distanceTo(previousPosition);
-      cumulativeDistances[sampleIndex] = totalDistance;
-      previousPosition.copy(currentPosition);
-    }
-    tables.push({ cumulativeDistances, totalDistance });
+function buildDynamicCameraTimeline(filteredTargets, cameraQuaternions, modelQuaternions) {
+  const segmentMotions = [];
+  for (let index = 0; index < state.keyframes.length - 1; index++) {
+    const startFrame = state.keyframes[index];
+    const endFrame = state.keyframes[index + 1];
+    const startTarget = filteredTargets[index];
+    const endTarget = filteredTargets[index + 1];
+    const startRadius = startFrame.position.distanceTo(startTarget);
+    const endRadius = endFrame.position.distanceTo(endTarget);
+    const averageRadius = Math.max(1e-4, (startRadius + endRadius) * 0.5);
+    const positionMotion = startFrame.position.distanceTo(endFrame.position);
+    const targetMotion = startTarget.distanceTo(endTarget) * 0.6;
+    const cameraRotationMotion = averageRadius
+      * getQuaternionAngularDistance(cameraQuaternions[index], cameraQuaternions[index + 1])
+      * 0.75;
+    const modelRotationMotion = averageRadius
+      * getQuaternionAngularDistance(modelQuaternions[index], modelQuaternions[index + 1])
+      * 0.35;
+    const projectionMotion = averageRadius
+      * Math.abs(Math.log(getFrameProjectionScale(endFrame) / getFrameProjectionScale(startFrame)))
+      * 0.5;
+    segmentMotions.push(Math.max(1e-6, Math.hypot(
+      positionMotion,
+      targetMotion,
+      cameraRotationMotion,
+      modelRotationMotion,
+      projectionMotion
+    )));
   }
-  state.cameraSegmentArcLengths = tables;
+
+  const averageMotion = segmentMotions.reduce((sum, motion) => sum + motion, 0)
+    / Math.max(1, segmentMotions.length);
+  const baselineMotion = Math.max(1e-6, averageMotion * CAMERA_TIMELINE_BASELINE_RATIO);
+  const weightedMotions = segmentMotions.map(motion => motion + baselineMotion);
+  const totalMotion = weightedMotions.reduce((sum, motion) => sum + motion, 0);
+  const times = [0];
+  let elapsedMotion = 0;
+  for (const motion of weightedMotions) {
+    elapsedMotion += motion;
+    times.push(elapsedMotion / totalMotion);
+  }
+  times[times.length - 1] = 1;
+  return times;
 }
 
-function getCameraSegmentProgressAtDistance(segmentIndex, progress) {
-  const table = state.cameraSegmentArcLengths?.[segmentIndex];
+function cloneContinuousCameraQuaternions(property) {
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const quaternions = state.keyframes.map(frame => {
+    const savedQuaternion = frame[property];
+    if (savedQuaternion) return savedQuaternion.clone().normalize();
+    if (property === 'modelQuaternion') {
+      return new THREE.Quaternion().setFromAxisAngle(yAxis, frame.modelRotationY || 0);
+    }
+    return new THREE.Quaternion();
+  });
+  for (let index = 1; index < quaternions.length; index++) {
+    if (quaternions[index - 1].dot(quaternions[index]) < 0) {
+      const quaternion = quaternions[index];
+      quaternion.set(-quaternion.x, -quaternion.y, -quaternion.z, -quaternion.w);
+    }
+  }
+  return quaternions;
+}
+
+function quaternionLogVector(quaternion, output = new THREE.Vector3()) {
+  const halfAngle = Math.acos(THREE.MathUtils.clamp(quaternion.w, -1, 1));
+  const sinHalfAngle = Math.sin(halfAngle);
+  if (Math.abs(sinHalfAngle) <= 1e-8) {
+    return output.set(quaternion.x, quaternion.y, quaternion.z);
+  }
+  return output.set(quaternion.x, quaternion.y, quaternion.z)
+    .multiplyScalar(halfAngle / sinHalfAngle);
+}
+
+function quaternionExpVector(vector, output = new THREE.Quaternion()) {
+  const halfAngle = vector.length();
+  if (halfAngle <= 1e-8) {
+    return output.set(vector.x, vector.y, vector.z, 1).normalize();
+  }
+  const scale = Math.sin(halfAngle) / halfAngle;
+  return output.set(
+    vector.x * scale,
+    vector.y * scale,
+    vector.z * scale,
+    Math.cos(halfAngle)
+  ).normalize();
+}
+
+function createSquadControls(quaternions) {
+  const controls = quaternions.map(quaternion => quaternion.clone());
+  const previousRelative = new THREE.Quaternion();
+  const nextRelative = new THREE.Quaternion();
+  const previousLog = new THREE.Vector3();
+  const nextLog = new THREE.Vector3();
+  const exponent = new THREE.Quaternion();
+
+  for (let index = 1; index < quaternions.length - 1; index++) {
+    const inverseCurrent = quaternions[index].clone().invert();
+    previousRelative.copy(inverseCurrent).multiply(quaternions[index - 1]);
+    nextRelative.copy(inverseCurrent).multiply(quaternions[index + 1]);
+    quaternionLogVector(previousRelative, previousLog);
+    quaternionLogVector(nextRelative, nextLog);
+    previousLog.add(nextLog).multiplyScalar(-0.25);
+    quaternionExpVector(previousLog, exponent);
+    controls[index].copy(quaternions[index]).multiply(exponent).normalize();
+    if (controls[index].dot(quaternions[index]) < 0) {
+      const control = controls[index];
+      control.set(-control.x, -control.y, -control.z, -control.w);
+    }
+  }
+  return controls;
+}
+
+const cameraSquadStart = new THREE.Quaternion();
+const cameraSquadControl = new THREE.Quaternion();
+const cameraSplineSphere = new THREE.Vector3();
+const cameraSplineTarget = new THREE.Vector3();
+const cameraSplinePosition = new THREE.Vector3();
+const cameraSplineQuaternion = new THREE.Quaternion();
+const cameraSplineModelQuaternion = new THREE.Quaternion();
+const cameraMotionPreviousPosition = new THREE.Vector3();
+const cameraMotionCurrentPosition = new THREE.Vector3();
+const cameraMotionPreviousTarget = new THREE.Vector3();
+const cameraMotionCurrentTarget = new THREE.Vector3();
+const cameraMotionPreviousQuaternion = new THREE.Quaternion();
+const cameraMotionCurrentQuaternion = new THREE.Quaternion();
+const cameraMotionPreviousModelQuaternion = new THREE.Quaternion();
+const cameraMotionCurrentModelQuaternion = new THREE.Quaternion();
+
+function interpolateSquad(quaternions, controls, segmentIndex, amount, output = new THREE.Quaternion()) {
+  cameraSquadStart.copy(quaternions[segmentIndex]).slerp(quaternions[segmentIndex + 1], amount);
+  cameraSquadControl.copy(controls[segmentIndex]).slerp(controls[segmentIndex + 1], amount);
+  return output.copy(cameraSquadStart)
+    .slerp(cameraSquadControl, 2 * amount * (1 - amount))
+    .normalize();
+}
+
+function easeCameraPathStart(value) {
+  const value2 = value * value;
+  const value3 = value2 * value;
+  const value4 = value3 * value;
+  const value5 = value4 * value;
+  return 3 * value5 - 8 * value4 + 6 * value3;
+}
+
+const CAMERA_ENDPOINT_EASE_PORTION = 0.12;
+const CAMERA_MOTION_SAMPLES_PER_SEGMENT = 192;
+
+function getGlobalCameraTimeProgress(progress) {
   const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
-  if (!table || table.totalDistance <= 0.000001 || clampedProgress <= 0) return clampedProgress;
+  if (clampedProgress < CAMERA_ENDPOINT_EASE_PORTION) {
+    const localProgress = clampedProgress / CAMERA_ENDPOINT_EASE_PORTION;
+    return CAMERA_ENDPOINT_EASE_PORTION * easeCameraPathStart(localProgress);
+  }
+  if (clampedProgress > 1 - CAMERA_ENDPOINT_EASE_PORTION) {
+    const localProgress = (1 - clampedProgress) / CAMERA_ENDPOINT_EASE_PORTION;
+    return 1 - CAMERA_ENDPOINT_EASE_PORTION * easeCameraPathStart(localProgress);
+  }
+  return clampedProgress;
+}
+
+function sampleCameraSpline(
+  progress,
+  positionOutput,
+  targetOutput,
+  cameraQuaternionOutput,
+  modelQuaternionOutput
+) {
+  const { segmentIndex, amount, duration } = getCameraTimelineSegment(progress);
+  const sphereCoords = interpolateQuinticVector(
+    state.cameraSphericalPoints,
+    state.cameraSphericalVelocities,
+    segmentIndex,
+    amount,
+    duration,
+    cameraSplineSphere
+  );
+  interpolateQuinticVector(
+    state.cameraFilteredTargets,
+    state.cameraTargetVelocities,
+    segmentIndex,
+    amount,
+    duration,
+    targetOutput
+  );
+  sphericalPointToCameraPosition(sphereCoords, targetOutput, positionOutput);
+  interpolateSquad(
+    state.cameraQuaternions,
+    state.cameraQuaternionControls,
+    segmentIndex,
+    amount,
+    cameraQuaternionOutput
+  );
+  interpolateSquad(
+    state.cameraModelQuaternions,
+    state.cameraModelQuaternionControls,
+    segmentIndex,
+    amount,
+    modelQuaternionOutput
+  );
+  return cameraTimelineSample;
+}
+
+function sampleCameraProjectionScale(progress) {
+  const { segmentIndex, amount, duration } = getCameraTimelineSegment(progress);
+  const fov = interpolateQuinticScalar(
+    state.cameraProjectionValues.fov,
+    state.cameraProjectionVelocities.fov,
+    segmentIndex,
+    amount,
+    duration
+  );
+  const zoom = interpolateQuinticScalar(
+    state.cameraProjectionValues.zoom,
+    state.cameraProjectionVelocities.zoom,
+    segmentIndex,
+    amount,
+    duration
+  );
+  return Math.max(1e-6, zoom / Math.tan(THREE.MathUtils.degToRad(fov) * 0.5));
+}
+
+function buildCameraMotionTable() {
+  const segmentCount = Math.max(1, state.keyframes.length - 1);
+  const sampleCount = Math.min(
+    32768,
+    Math.max(384, segmentCount * CAMERA_MOTION_SAMPLES_PER_SEGMENT)
+  );
+  const progressSamples = new Float32Array(sampleCount + 1);
+  const cumulativeDistances = new Float64Array(sampleCount + 1);
+
+  sampleCameraSpline(
+    0,
+    cameraMotionPreviousPosition,
+    cameraMotionPreviousTarget,
+    cameraMotionPreviousQuaternion,
+    cameraMotionPreviousModelQuaternion
+  );
+  let previousProjectionScale = sampleCameraProjectionScale(0);
+  let totalMotion = 0;
+
+  for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
+    const progress = sampleIndex / sampleCount;
+    sampleCameraSpline(
+      progress,
+      cameraMotionCurrentPosition,
+      cameraMotionCurrentTarget,
+      cameraMotionCurrentQuaternion,
+      cameraMotionCurrentModelQuaternion
+    );
+    const projectionScale = sampleCameraProjectionScale(progress);
+    const radius = Math.max(
+      1e-4,
+      cameraMotionCurrentPosition.distanceTo(cameraMotionCurrentTarget)
+    );
+    const positionMotion = cameraMotionCurrentPosition.distanceTo(cameraMotionPreviousPosition);
+    const targetMotion = cameraMotionCurrentTarget.distanceTo(cameraMotionPreviousTarget) * 0.6;
+    const cameraRotationMotion = radius
+      * getQuaternionAngularDistance(cameraMotionPreviousQuaternion, cameraMotionCurrentQuaternion)
+      * 0.75;
+    const modelRotationMotion = radius
+      * getQuaternionAngularDistance(cameraMotionPreviousModelQuaternion, cameraMotionCurrentModelQuaternion)
+      * 0.35;
+    const projectionMotion = radius
+      * Math.abs(Math.log(projectionScale / previousProjectionScale))
+      * 0.5;
+    totalMotion += Math.hypot(
+      positionMotion,
+      targetMotion,
+      cameraRotationMotion,
+      modelRotationMotion,
+      projectionMotion
+    );
+    progressSamples[sampleIndex] = progress;
+    cumulativeDistances[sampleIndex] = totalMotion;
+    cameraMotionPreviousPosition.copy(cameraMotionCurrentPosition);
+    cameraMotionPreviousTarget.copy(cameraMotionCurrentTarget);
+    cameraMotionPreviousQuaternion.copy(cameraMotionCurrentQuaternion);
+    cameraMotionPreviousModelQuaternion.copy(cameraMotionCurrentModelQuaternion);
+    previousProjectionScale = projectionScale;
+  }
+
+  state.cameraMotionProgress = progressSamples;
+  state.cameraMotionDistances = cumulativeDistances;
+  state.cameraMotionTotal = totalMotion;
+}
+
+function getCameraProgressAtMotion(progress) {
+  const progressSamples = state.cameraMotionProgress;
+  const cumulativeDistances = state.cameraMotionDistances;
+  const totalMotion = state.cameraMotionTotal;
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (!progressSamples?.length || !cumulativeDistances?.length || totalMotion <= 1e-8) {
+    return clampedProgress;
+  }
+  if (clampedProgress <= 0) return 0;
   if (clampedProgress >= 1) return 1;
 
-  const targetDistance = clampedProgress * table.totalDistance;
-  const cumulativeDistances = table.cumulativeDistances;
+  const targetDistance = clampedProgress * totalMotion;
   let low = 1;
   let high = cumulativeDistances.length - 1;
   while (low < high) {
@@ -4195,80 +4510,99 @@ function getCameraSegmentProgressAtDistance(segmentIndex, progress) {
     if (cumulativeDistances[middle] < targetDistance) low = middle + 1;
     else high = middle;
   }
-
   const endIndex = low;
   const startIndex = endIndex - 1;
   const startDistance = cumulativeDistances[startIndex];
   const distanceSpan = cumulativeDistances[endIndex] - startDistance;
-  if (distanceSpan <= 0.0000001) return endIndex / CAMERA_SEGMENT_ARC_SAMPLES;
-  const sampleAmount = (targetDistance - startDistance) / distanceSpan;
-  return (startIndex + sampleAmount) / CAMERA_SEGMENT_ARC_SAMPLES;
+  if (distanceSpan <= 1e-10) return progressSamples[endIndex];
+  const amount = (targetDistance - startDistance) / distanceSpan;
+  return THREE.MathUtils.lerp(progressSamples[startIndex], progressSamples[endIndex], amount);
 }
 
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
-  const sphericalPoints = [];
-  const filteredTargets = buildFilteredCameraTargets();
-  let lastTheta = 0;
-  state.keyframes.forEach((kf, idx) => {
-    // Filter only tiny screen-space target shifts, while keeping intentional
-    // reframing. Preserve the saved camera-to-target offset so filtering a
-    // small pan removes its matching camera translation instead of changing
-    // the composition or accumulating drift in later viewpoints.
-    const offset = new THREE.Vector3().copy(kf.position).sub(kf.target);
-    const spherical = new THREE.Spherical().setFromVector3(offset);
-    
-    if (idx === 0) {
-      lastTheta = spherical.theta;
-    } else {
-      // Unwrap theta to avoid 360-degree reversing spins
-      const diff = spherical.theta - lastTheta;
-      const unwrappedDiff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      spherical.theta = lastTheta + unwrappedDiff;
-      lastTheta = spherical.theta;
-    }
-    
-    // Store spherical coordinates (radius, theta, phi) in a Vector3 for spline pathing
-    sphericalPoints.push(new THREE.Vector3(spherical.radius, spherical.theta, spherical.phi));
-
-  });
-  state.cameraSphericalPoints = sphericalPoints;
-  state.cameraSphericalTangents = createSphericalTangents(sphericalPoints);
-  state.cameraFilteredTargets = filteredTargets;
-  // Normalize speed inside each fixed two-second segment. A single global
-  // distance clock moved later keyframes away from their expected timestamps.
-  buildCameraSegmentArcLengthTables();
   
+  const positions = state.keyframes.map(frame => frame.position.clone());
+  const targets = buildFilteredCameraTargets();
+  const cameraQuaternions = cloneContinuousCameraQuaternions('quaternion');
+  const modelQuaternions = cloneContinuousCameraQuaternions('modelQuaternion');
+
+  // Centripetal Catmull-Rom 3D curves ensure 100% continuous spatial velocity without knot stalls or overshoots
+  state.cameraPositionCurve = new THREE.CatmullRomCurve3(positions, false, 'centripetal');
+  state.cameraTargetCurve = new THREE.CatmullRomCurve3(targets, false, 'centripetal');
+  state.cameraQuaternions = cameraQuaternions;
+  state.cameraQuaternionControls = createSquadControls(cameraQuaternions);
+  state.cameraModelQuaternions = modelQuaternions;
+  state.cameraModelQuaternionControls = createSquadControls(modelQuaternions);
+
+  // Compute keyframe arc-length parameters u_i along position curve for orientation and projection synchronization
+  const numKeyframes = state.keyframes.length;
+  const keyframeU = [0];
+  const curveLengths = state.cameraPositionCurve.getLengths(Math.max(200, numKeyframes * 100));
+  const totalLength = curveLengths[curveLengths.length - 1] || 1;
+
+  for (let i = 1; i < numKeyframes; i++) {
+    const fraction = i / (numKeyframes - 1);
+    keyframeU.push(fraction);
+  }
+  state.cameraKeyframeU = keyframeU;
   return true;
 }
-function interpolateCamera(pct) {
-  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraFilteredTargets) return;
 
-  const { segmentIndex, amount, segmentCount } = getCameraSegmentAmount(pct);
-  const pathAmount = getCameraSegmentProgressAtDistance(segmentIndex, amount);
-  const rawProgress = (segmentIndex + pathAmount) / segmentCount;
-  const sphereCoords = interpolateSphericalPoint(rawProgress);
-  const newTarget = interpolateFilteredCameraTarget(segmentIndex, pathAmount);
-  const newPos = sphericalPointToCameraPosition(sphereCoords, newTarget);
+function interpolateCamera(pct) {
+  if (!state.cameraPositionCurve || !state.cameraTargetCurve) return;
+
+  // Global ease-in at flight start (t=0) and ease-out at flight end (t=1)
+  const progress = getGlobalCameraTimeProgress(pct);
+
+  // 1. Sample 3D position and lookAt target at constant spatial speed
+  state.cameraPositionCurve.getPointAt(progress, state.camera.position);
+  state.cameraTargetCurve.getPointAt(progress, state.controls.target);
+
+  // 2. Determine keyframe segment for quaternions and FOV/Zoom projection
+  const numSegments = state.keyframes.length - 1;
+  let segmentIndex = 0;
+  let amount = 0;
+
+  if (progress <= 0) {
+    segmentIndex = 0;
+    amount = 0;
+  } else if (progress >= 1) {
+    segmentIndex = numSegments - 1;
+    amount = 1;
+  } else {
+    const rawSeg = progress * numSegments;
+    segmentIndex = Math.min(numSegments - 1, Math.floor(rawSeg));
+    amount = rawSeg - segmentIndex;
+  }
+
   const startFrame = state.keyframes[segmentIndex];
   const endFrame = state.keyframes[segmentIndex + 1];
-  const viewAmount = pathAmount * pathAmount * (3 - 2 * pathAmount);
 
-  state.camera.position.copy(newPos);
-  state.controls.target.copy(newTarget);
-  if (startFrame.quaternion && endFrame.quaternion) {
-    state.camera.quaternion.copy(startFrame.quaternion).slerp(endFrame.quaternion, viewAmount);
+  // 3. Set camera rotation / quaternion
+  if (startFrame.quaternion && endFrame.quaternion && state.cameraQuaternions) {
+    interpolateSquad(
+      state.cameraQuaternions,
+      state.cameraQuaternionControls,
+      segmentIndex,
+      amount,
+      state.camera.quaternion
+    );
   } else {
-    state.camera.lookAt(newTarget);
+    state.camera.lookAt(state.controls.target);
   }
 
+  // Up vector interpolation
   if (startFrame.up && endFrame.up) {
-    state.camera.up.lerpVectors(startFrame.up, endFrame.up, viewAmount).normalize();
+    state.camera.up.lerpVectors(startFrame.up, endFrame.up, amount).normalize();
   }
+
+  // 4. Smooth FOV / Zoom / Near / Far projection interpolation
   let projectionChanged = false;
   for (const property of ['fov', 'zoom', 'near', 'far']) {
     if (!Number.isFinite(startFrame[property]) || !Number.isFinite(endFrame[property])) continue;
-    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], viewAmount);
+    const smoothAmount = amount * amount * (3 - 2 * amount);
+    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], smoothAmount);
     if (Math.abs(state.camera[property] - nextValue) > 1e-7) {
       state.camera[property] = nextValue;
       projectionChanged = true;
@@ -4276,19 +4610,19 @@ function interpolateCamera(pct) {
   }
   if (projectionChanged) state.camera.updateProjectionMatrix();
 
-  const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
-  for (const pivot of modelPivots) {
-    if (!pivot) continue;
-    if (startFrame.modelQuaternion && endFrame.modelQuaternion) {
-      pivot.quaternion.copy(startFrame.modelQuaternion).slerp(endFrame.modelQuaternion, viewAmount);
-    } else {
-      const startRotation = Number.isFinite(startFrame.modelRotationY) ? startFrame.modelRotationY : 0;
-      const endRotation = Number.isFinite(endFrame.modelRotationY) ? endFrame.modelRotationY : startRotation;
-      const rotationDelta = Math.atan2(
-        Math.sin(endRotation - startRotation),
-        Math.cos(endRotation - startRotation)
-      );
-      pivot.rotation.y = startRotation + rotationDelta * viewAmount;
+  // 5. Model pivot rotation
+  if (state.cameraModelQuaternions) {
+    const modelQ = new THREE.Quaternion();
+    interpolateSquad(
+      state.cameraModelQuaternions,
+      state.cameraModelQuaternionControls,
+      segmentIndex,
+      amount,
+      modelQ
+    );
+    const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
+    for (const pivot of modelPivots) {
+      if (pivot) pivot.quaternion.copy(modelQ);
     }
   }
 }
@@ -5570,6 +5904,12 @@ function setupEventListeners() {
     state.selectedKeyframeIndex = null;
     updateSelectedKeyframeUI();
   });
+  state.controls?.addEventListener('change', () => {
+    if (state.splatEraser?.active) {
+      updateSplatEraserBrushDimensions(state.splatEraser);
+      syncSplatEraserBrushCursor();
+    }
+  });
 
   const renderCanvas = state.renderer?.domElement;
   renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
@@ -5852,6 +6192,10 @@ function setupEventListeners() {
     updateDesktopSettingsUI();
   });
   dom.btnDesktopSplatSettings?.addEventListener('click', () => {
+    state.settings.splatCropEnabled = false;
+    updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
+    updateSplatCropShapeUI();
+    updateSplatCropFromSettings();
     setRendererMode('spark', 'settings');
     updateDesktopSettingsUI();
   });
@@ -6107,12 +6451,17 @@ function setupEventListeners() {
   dom.btnSplatCropToggle?.addEventListener('click', () => {
     state.settings.splatCropEnabled = !state.settings.splatCropEnabled;
     updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
-    updateSplatCropFromSettings();
+    if (state.settings.splatCropEnabled) {
+      applySplatCropShape('ellipsoid');
+    } else {
+      updateSplatCropShapeUI();
+      updateSplatCropFromSettings();
+    }
   });
 
   for (const button of [dom.btnSplatCropShapeEllipsoid, dom.btnSplatCropShapeBox]) {
     button?.addEventListener('click', () => {
-      if (isMobileViewport() && !state.settings.splatCropEnabled) {
+      if (!state.settings.splatCropEnabled) {
         state.settings.splatCropEnabled = true;
         updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
       }
@@ -6120,7 +6469,6 @@ function setupEventListeners() {
     });
   }
   dom.btnMobileSplatCropNone?.addEventListener('click', () => {
-    if (!isMobileViewport()) return;
     state.settings.splatCropEnabled = false;
     updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
     updateSplatCropShapeUI();
