@@ -54,6 +54,37 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.svg-icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ui-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.125em;
+}
+
+.ui-icon.is-spinning {
+  animation: ui-icon-spin 0.85s linear infinite;
+}
+
+@keyframes ui-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* App Container */
 .app-container {
   position: relative;
@@ -248,8 +279,8 @@ body.compositing-mode-active #canvas-container {
 }
 
 .btn-icon {
-  padding: 10px;
-  border-radius: var(--radius-md);
+  width: 16px;
+  height: 16px;
 }
 
 /* Divider */
@@ -771,11 +802,14 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 .landing-logo {
   margin-bottom: 14px;
   color: var(--accent-cyan);
-  font-size: 28px;
+  font-size: 40px;
   font-weight: 700;
   letter-spacing: -0.02em;
   filter: drop-shadow(0 0 20px rgba(0, 245, 212, 0.5));
   animation: float-logo 3s ease-in-out infinite;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 @keyframes float-logo {
@@ -856,7 +890,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
    ======================================== */
 .toast-container {
   position: absolute;
-  top: 76px;
+  top: 96px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 300;
@@ -1063,8 +1097,9 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
     box-shadow: 0 4px 16px rgba(0, 245, 212, 0.2);
   }
 
-  .toolbar .btn-icon-emoji {
-    font-size: 18px;
+  .toolbar .btn-icon {
+    width: 18px;
+    height: 18px;
   }
 
   .toolbar-divider {
@@ -1237,7 +1272,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   }
 
   .landing-logo {
-    font-size: 24px;
+    font-size: 40px;
   }
 
   .landing-card p {
@@ -1394,6 +1429,10 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.setting-item input[type="range"] {
+  accent-color: #0075ff;
 }
 
 .setting-item label {
@@ -1849,6 +1888,9 @@ body.recording-mode-active .progress-control {
   font-weight: 600;
   color: var(--accent-cyan);
   text-shadow: 0 0 10px rgba(0, 245, 212, 0.3);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .remy-visit-link {
@@ -1931,7 +1973,7 @@ body.recording-mode-active .progress-control {
     display: none !important;
   }
 
-  .toolbar .btn-icon-emoji {
+  .toolbar .btn-icon {
     display: none !important;
   }
 
@@ -2320,7 +2362,26 @@ body.recording-mode-active .progress-control {
 .gesture-guide-item {
   padding: 4px 6px;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   transition: background-color 0.2s, color 0.2s, text-shadow 0.2s;
+}
+
+.gesture-guide-item > .ui-icon,
+.gesture-icon-pair {
+  width: 14px;
+  min-width: 14px;
+}
+
+.gesture-icon-pair {
+  display: inline-flex;
+  gap: 0;
+}
+
+.gesture-icon-pair .ui-icon {
+  width: 9px;
+  height: 14px;
 }
 
 .gesture-guide-item.active {

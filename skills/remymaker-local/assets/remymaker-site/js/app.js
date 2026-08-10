@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=3.5';
-import { GestureControl } from './gestureControl.js';
+import { GestureControl } from './gestureControl.js?v=1.1';
 import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.1';
 import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
@@ -461,13 +461,13 @@ const translations = {
     'gesture-victory': '剪刀手 (切换3DGS/点云, 需保持0.7秒)',
     'gesture-pointing': '双手拳头 (缩放模型)',
     'gesture-ok': '食指指向 (遥控相机旋转)',
-    'guide-palm': '🖐️ 张开手掌：粒子消散',
-    'guide-fist': '✊ 握拳：粒子聚集',
-    'guide-victory': '✌️ 剪刀手：切换模式',
-    'guide-zoom': '✊✊ 双拳缩放：缩放模型',
-    'guide-pointing': '☝️ 食指：控制模型视角',
+    'guide-palm': '张开手掌：粒子消散',
+    'guide-fist': '握拳：粒子聚集',
+    'guide-victory': '剪刀手：切换模式',
+    'guide-zoom': '双拳缩放：缩放模型',
+    'guide-pointing': '食指：控制模型视角',
     // Remy Intro
-    'remy-intro-title': '✨ 关于 Remy',
+    'remy-intro-title': '关于 Remy',
     'remy-visit-link': '→前往 Remy 官网',
     'remy-intro-content': '照片视频很美好，但 3D 影像更显珍贵。Remy 是一款 3D 空间记录 App，让美好记忆场景可以保存并沉浸式体验。本网页使用 Vibe Coding 制作，你可以导入 Remy 已生成的 3D 影像，体验自定义运镜、发光粒子特效、手势控制等玩法，让 3D 影像变成更好玩的数字载体，祝你玩的开心！',
     // Welcome Hint & Loading
@@ -487,7 +487,7 @@ const translations = {
     'loaded-success-prefix': '',
     'loaded-success-suffix': ' 元素已加载',
     'spark-load-failed': '渲染引擎载入失败: ',
-    'gesture-tracking-active': '✋ 手势控制已激活！张开/合拢手掌可控制消散，双手拳头微调模型缩放，比出“✌️”手势并保持0.7秒可切换模式',
+    'gesture-tracking-active': '手势控制已激活！张开/合拢手掌可控制消散，双手拳头微调模型缩放，比出剪刀手并保持0.7秒可切换模式',
     'flight-preview-finished': '镜头运镜预览已结束',
     'gesture-switched-spark': '手势触发：已切换至 3D实景',
     'gesture-switched-cloud': '手势触发：已切换至粒子模式',
@@ -623,13 +623,13 @@ const translations = {
     'gesture-victory': 'Victory (Toggle Mode, hold 0.7s)',
     'gesture-pointing': 'Two Fists (Scale)',
     'gesture-ok': 'Pointing Up (Camera Control)',
-    'guide-palm': '🖐️ Open Palm: Dissipate',
-    'guide-fist': '✊ Closed Fist: Assemble',
-    'guide-victory': '✌️ Victory: Toggle Mode',
-    'guide-zoom': '✊✊ Two Fists: Scale Model',
-    'guide-pointing': '☝️ Index Finger: Rotate View',
+    'guide-palm': 'Open Palm: Dissipate',
+    'guide-fist': 'Closed Fist: Assemble',
+    'guide-victory': 'Victory: Toggle Mode',
+    'guide-zoom': 'Two Fists: Scale Model',
+    'guide-pointing': 'Index Finger: Rotate View',
     // Remy Intro
-    'remy-intro-title': '✨ About Remy',
+    'remy-intro-title': 'About Remy',
     'remy-visit-link': '→ Visit Remy',
     'remy-intro-content': 'Photos and videos are beautiful, but 3D imagery is even more precious. Remy is a 3D spatial capture App that preserves cherished memories for immersive replay. Built using Vibe Coding, this web app lets you import your Remy 3D captures to experiment with custom camera paths, glowing particle effects, and hand gestures. Let\'s make 3D captures a more playful digital medium. Have fun!',
     // Welcome Hint & Loading
@@ -649,7 +649,7 @@ const translations = {
     'loaded-success-prefix': '',
     'loaded-success-suffix': ' elements loaded',
     'spark-load-failed': 'Rendering engine load failed: ',
-    'gesture-tracking-active': '✋ Hand tracking active! Open/close hand to morph, two fists to scale model, Victory gesture (hold 0.7s) to toggle mode',
+    'gesture-tracking-active': 'Hand tracking active! Open/close hand to morph, two fists to scale model, Victory gesture (hold 0.7s) to toggle mode',
     'flight-preview-finished': 'Flight preview finished',
     'gesture-switched-spark': 'Gesture: Switched to 3D Reality',
     'gesture-switched-cloud': 'Gesture: Switched to Particle Mode',
@@ -694,6 +694,13 @@ function t(key) {
   return translations[state.lang] && translations[state.lang][key] !== undefined
     ? translations[state.lang][key]
     : key;
+}
+
+function setInlineIcon(iconElement, symbolId, { spinning = false } = {}) {
+  if (!iconElement) return;
+  const useElement = iconElement.querySelector('use');
+  if (useElement) useElement.setAttribute('href', `#${symbolId}`);
+  iconElement.classList.toggle('is-spinning', spinning);
 }
 
 function applyTranslations(lang) {
@@ -923,19 +930,19 @@ function applyTranslations(lang) {
   
   // Translate gesture guide items
   const guidePalm = document.getElementById('guide-palm');
-  if (guidePalm) guidePalm.textContent = dict['guide-palm'];
+  if (guidePalm) guidePalm.querySelector('.gesture-guide-label').textContent = dict['guide-palm'];
   const guideFist = document.getElementById('guide-fist');
-  if (guideFist) guideFist.textContent = dict['guide-fist'];
+  if (guideFist) guideFist.querySelector('.gesture-guide-label').textContent = dict['guide-fist'];
   const guideVictory = document.getElementById('guide-victory');
-  if (guideVictory) guideVictory.textContent = dict['guide-victory'];
+  if (guideVictory) guideVictory.querySelector('.gesture-guide-label').textContent = dict['guide-victory'];
   const guideZoom = document.getElementById('guide-zoom');
-  if (guideZoom) guideZoom.textContent = dict['guide-zoom'];
+  if (guideZoom) guideZoom.querySelector('.gesture-guide-label').textContent = dict['guide-zoom'];
   const guidePointing = document.getElementById('guide-pointing');
-  if (guidePointing) guidePointing.textContent = dict['guide-pointing'];
+  if (guidePointing) guidePointing.querySelector('.gesture-guide-label').textContent = dict['guide-pointing'];
   
   // Translate Remy Intro panel
   const remyTitle = document.getElementById('remy-intro-title');
-  if (remyTitle) remyTitle.textContent = dict['remy-intro-title'];
+  if (remyTitle) remyTitle.querySelector('.remy-intro-title-text').textContent = dict['remy-intro-title'];
   const remyVisitLink = document.getElementById('remy-visit-link');
   if (remyVisitLink) remyVisitLink.textContent = dict['remy-visit-link'];
   const remyContent = document.getElementById('remy-intro-content');
@@ -1446,14 +1453,13 @@ async function toggleGestureControl() {
     }
     dom.webcamContainer.classList.add('hidden');
     updateRemyPositionDeferred();
-    const gIconSpan = dom.btnGesture.querySelector('.btn-icon-emoji');
+    const gIconSpan = dom.btnGesture.querySelector('.btn-icon');
     const gTextSpan = dom.btnGesture.querySelector('.btn-text');
-    if (gIconSpan) gIconSpan.textContent = '🤚';
-    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? ' 手势控制' : ' Gesture';
-    else dom.btnGesture.textContent = state.lang === 'zh' ? '🤚 手势控制' : '🤚 Gesture';
+    setInlineIcon(gIconSpan, 'icon-hand-stop');
+    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? '手势控制' : 'Gesture';
     dom.btnGesture.classList.remove('active');
     dom.webcamDot.classList.remove('active');
-    if (dom.gestureIcon) dom.gestureIcon.textContent = '👋';
+    if (dom.gestureIcon) dom.gestureIcon.textContent = '';
     if (dom.gestureText) dom.gestureText.textContent = state.lang === 'zh' ? '已禁用' : 'Disabled';
     if (dom.gestureStatus) dom.gestureStatus.classList.remove('active');
     updateGestureHighlight('none');
@@ -1477,10 +1483,10 @@ async function toggleGestureControl() {
         showToast('gesture-tracking-active', 'success', 6000);
         updateRemyPositionDeferred();
         
-        const actIcon = dom.btnGesture.querySelector('.btn-icon-emoji');
+        const actIcon = dom.btnGesture.querySelector('.btn-icon');
         const actText = dom.btnGesture.querySelector('.btn-text');
-        if (actIcon) actIcon.textContent = '🟢';
-        if (actText) actText.textContent = state.lang === 'zh' ? ' 运行中' : ' Active';
+        setInlineIcon(actIcon, 'icon-circle-check');
+        if (actText) actText.textContent = state.lang === 'zh' ? '运行中' : 'Active';
         break;
       case 'error':
         showToast(message, 'error', 5000);
@@ -1551,25 +1557,22 @@ async function toggleGestureControl() {
       }
     }
   };
-  const gIconSpan = dom.btnGesture.querySelector('.btn-icon-emoji');
+  const gIconSpan = dom.btnGesture.querySelector('.btn-icon');
   const gTextSpan = dom.btnGesture.querySelector('.btn-text');
-  if (gIconSpan) gIconSpan.textContent = '⏳';
-  if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? ' 加载中...' : ' Loading...';
-  else dom.btnGesture.textContent = state.lang === 'zh' ? '⏳ 加载中...' : '⏳ Loading...';
+  setInlineIcon(gIconSpan, 'icon-loader', { spinning: true });
+  if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? '加载中...' : 'Loading...';
   dom.webcamContainer.classList.remove('hidden');
   updateRemyPositionDeferred();
   const success = await state.gestureControl.init(dom.webcamVideo);
   if (success) {
     state.isGestureActive = true;
     state.manualControl = false; // Reset manual control block immediately so gestures take effect!
-    if (gIconSpan) gIconSpan.textContent = '🖐️';
-    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? ' 手势控制' : ' Gesture';
-    else dom.btnGesture.textContent = state.lang === 'zh' ? '🖐️ 手势控制' : '🖐️ Gesture';
+    setInlineIcon(gIconSpan, 'icon-hand-stop');
+    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? '手势控制' : 'Gesture';
     dom.btnGesture.classList.add('active');
   } else {
-    if (gIconSpan) gIconSpan.textContent = '🤚';
-    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? ' 手势控制' : ' Gesture';
-    else dom.btnGesture.textContent = state.lang === 'zh' ? '🤚 手势控制' : '🤚 Gesture';
+    setInlineIcon(gIconSpan, 'icon-hand-stop');
+    if (gTextSpan) gTextSpan.textContent = state.lang === 'zh' ? '手势控制' : 'Gesture';
     dom.webcamContainer.classList.add('hidden');
     updateRemyPositionDeferred();
   }
@@ -1662,7 +1665,7 @@ function animate() {
       const bufferedProgress = Math.max(0, Math.min(1, (gestureProgress - 0.05) / 0.90));
       state.particleSystem.setTargetProgress(bufferedProgress);
     }
-    // Toggle Spark 3DGS mode via ✌️ Victory gesture (state transition trigger with 0.7s hold threshold)
+    // Toggle 3DGS mode via the Victory gesture (state transition trigger with 0.7s hold threshold)
     const currentGesture = state.gestureControl.getGestureInfo().gesture;
     if (currentGesture === 'Victory') {
       if (!state.victoryGestureStartTime) {
@@ -1824,22 +1827,20 @@ function animate() {
 // ============================================================
 function updateRendererUI() {
   if (!dom.btnToggleSpark) return;
-  const iconSpan = dom.btnToggleSpark.querySelector('.btn-icon-emoji');
+  const iconSpan = dom.btnToggleSpark.querySelector('.btn-icon');
   const textSpan = dom.btnToggleSpark.querySelector('.btn-text');
   
   const dict = translations[state.lang];
   if (state.settings.renderer === 'spark') {
     dom.btnToggleSpark.classList.add('active');
-    if (iconSpan) iconSpan.textContent = '✨';
+    setInlineIcon(iconSpan, 'icon-sparkles');
     const text = dict ? dict['btn-spark-text'] : '3D Reality';
     if (textSpan) textSpan.textContent = text;
-    else dom.btnToggleSpark.textContent = '✨' + text;
   } else {
     dom.btnToggleSpark.classList.remove('active');
-    if (iconSpan) iconSpan.textContent = '☁️';
+    setInlineIcon(iconSpan, 'icon-atom');
     const text = dict ? dict['btn-pointcloud-text'] : 'Particle Mode';
     if (textSpan) textSpan.textContent = text;
-    else dom.btnToggleSpark.textContent = '☁️' + text;
   }
 
   [dom.btnPreviewToggleRenderer, dom.btnRecordingToggleRenderer].forEach((button) => {
@@ -3563,7 +3564,7 @@ function setupEventListeners() {
   };
 
   const updatePlayButtonUI = () => {
-    const icon = dom.btnPlayScatter ? dom.btnPlayScatter.querySelector('.btn-icon-emoji') : null;
+    const icon = dom.btnPlayScatter ? dom.btnPlayScatter.querySelector('.scatter-play-label') : null;
     if (!icon) return;
     
     if (scatterDirection === 'forward') {
@@ -4058,7 +4059,7 @@ function init() {
     dom.urlInput.value = decodeURIComponent(hash);
   }
   console.log(
-    '%c✨ Particle Model Viewer Ready',
+    '%cParticle Model Viewer Ready',
     'color: #00f5d4; font-size: 14px; font-weight: bold;'
   );
 }

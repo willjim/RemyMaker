@@ -23,6 +23,10 @@ const vertexShader = /* glsl */ `
   uniform float uVectorField; // selected vector field index (0.0 to 14.0)
   uniform float uMinY; // model minimum Y coordinate for printer scan normalization
   uniform float uMaxY; // model maximum Y coordinate for printer scan normalization
+  uniform float uParticleCropEnabled;
+  uniform float uParticleCropFactor;
+  uniform float uParticleCropRadius;
+  uniform vec3 uParticleCropCenter;
   varying vec3 vColor;
   varying float vAlpha;
 
@@ -120,6 +124,18 @@ const vertexShader = /* glsl */ `
   }
 
   void main() {
+    if (
+      uParticleCropEnabled > 0.5
+      && uParticleCropRadius > 0.0
+      && distance(aOriginalPosition, uParticleCropCenter) > uParticleCropRadius * uParticleCropFactor
+    ) {
+      vColor = vec3(0.0);
+      vAlpha = 0.0;
+      gl_PointSize = 0.0;
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+
     // --- 1. Compute Point Cloud Animated Position ---
     float phase = aPhaseOffset;
 
@@ -548,8 +564,20 @@ export class ParticleSystem {
     // Clean up existing
     this.dispose();
     // --- Center and scale the model ---
-    const { centeredPositions, scale, center } = this.centerAndScale(positions, count);
+    const cropConfig = {
+      enabled: Boolean(data.particleCropEnabled),
+      factor: Number.isFinite(data.particleCropFactor) ? data.particleCropFactor : 2.5,
+      radius: Number.isFinite(data.particleCropRadius) ? data.particleCropRadius : 0,
+      center: data.particleCropCenter || { x: 0, y: 0, z: 0 },
+    };
+    const { centeredPositions, scale, center } = this.centerAndScale(positions, count, cropConfig);
     this.modelScale = scale;
+    const scaledCropCenter = new THREE.Vector3(
+      cropConfig.center.x * scale,
+      cropConfig.center.y * scale,
+      cropConfig.center.z * scale
+    );
+    const scaledCropRadius = cropConfig.radius * scale;
     
     // Compute Y bounding range of the centered particles
     let minY = Infinity;
@@ -677,6 +705,10 @@ export class ParticleSystem {
         uVectorField: { value: 0.0 },
         uMinY: { value: this.modelMinY },
         uMaxY: { value: this.modelMaxY },
+        uParticleCropEnabled: { value: cropConfig.enabled ? 1.0 : 0.0 },
+        uParticleCropFactor: { value: cropConfig.factor },
+        uParticleCropRadius: { value: scaledCropRadius },
+        uParticleCropCenter: { value: scaledCropCenter },
       },
       transparent: true,
       depthWrite: false,
@@ -701,23 +733,35 @@ export class ParticleSystem {
   /**
    * Center the model at origin and scale to fit viewport.
    */
-  centerAndScale(positions, count) {
+  centerAndScale(positions, count, cropConfig = null) {
     // 1. Calculate distances from origin (0, 0, 0) for a subset of points to estimate scale robustly
     const sampleSize = Math.min(5000, count);
     const distances = [];
     const step = Math.max(1, Math.floor(count / sampleSize));
-    
-    for (let i = 0; i < sampleSize; i++) {
-      const idx = i * step;
-      if (idx * 3 < positions.length) {
+
+    const cropCenter = cropConfig?.center || { x: 0, y: 0, z: 0 };
+    const cropLimit = (cropConfig?.radius || 0) * (cropConfig?.factor || 1);
+    const useCropForScale = Boolean(cropConfig?.enabled && cropLimit > 0);
+    const collectDistances = (applyCrop) => {
+      for (let i = 0; i < sampleSize; i++) {
+        const idx = i * step;
+        if (idx * 3 >= positions.length) continue;
         const x = positions[idx * 3];
         const y = positions[idx * 3 + 1];
         const z = positions[idx * 3 + 2];
-        if (isFinite(x) && isFinite(y) && isFinite(z)) {
-          const dist = Math.sqrt(x*x + y*y + z*z);
-          distances.push(dist);
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        if (
+          applyCrop
+          && Math.hypot(x - cropCenter.x, y - cropCenter.y, z - cropCenter.z) > cropLimit
+        ) {
+          continue;
         }
+        distances.push(Math.sqrt(x * x + y * y + z * z));
       }
+    };
+    collectDistances(useCropForScale);
+    if (distances.length === 0 && useCropForScale) {
+      collectDistances(false);
     }
     
     // Sort distances to find 90th percentile (robust core radius)
@@ -821,6 +865,16 @@ export class ParticleSystem {
   setDensity(density) {
     this.density = Math.max(0.01, Math.min(1.0, density));
     this.updateDrawRange();
+  }
+  setCropEnabled(enabled) {
+    if (this.material?.uniforms.uParticleCropEnabled) {
+      this.material.uniforms.uParticleCropEnabled.value = enabled ? 1.0 : 0.0;
+    }
+  }
+  setCropFactor(factor) {
+    if (this.material?.uniforms.uParticleCropFactor) {
+      this.material.uniforms.uParticleCropFactor.value = Math.max(0.5, Math.min(3.0, factor));
+    }
   }
   updateDrawRange() {
     if (!this.geometry) return;
