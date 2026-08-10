@@ -129,6 +129,8 @@ const state = {
   cameraQuaternionControls: null,
   cameraModelQuaternions: null,
   cameraModelQuaternionControls: null,
+  cameraPositionCurve: null,
+  cameraTargetCurve: null,
   cameraMotionProgress: null,
   cameraMotionDistances: null,
   cameraMotionTotal: 0,
@@ -162,7 +164,7 @@ const state = {
     maxParticles: 500000,
     cropOutliers: true,
     cropFactor: 2.5,
-    splatCropEnabled: false,
+    splatCropEnabled: !isMobileViewport(),
     splatCropShape: 'ellipsoid',
     splatCropRadiiScale: { x: 1, y: 1, z: 1 },
     splatCropOffset: { x: 0, y: 0, z: 0 },
@@ -398,6 +400,7 @@ function normalizeSplatCropShape(shape) {
 
 function updateSplatCropShapeUI() {
   const shape = normalizeSplatCropShape(state.settings.splatCropShape);
+  const mobileCropDisabled = isMobileViewport() && !state.settings.splatCropEnabled;
   const cropDisabled = !state.settings.splatCropEnabled;
   const buttons = [
     [dom.btnSplatCropShapeEllipsoid, 'ellipsoid'],
@@ -410,8 +413,8 @@ function updateSplatCropShapeUI() {
     button.setAttribute('aria-pressed', String(selected));
   }
   if (dom.btnMobileSplatCropNone) {
-    dom.btnMobileSplatCropNone.classList.toggle('active', cropDisabled);
-    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(cropDisabled));
+    dom.btnMobileSplatCropNone.classList.toggle('active', mobileCropDisabled);
+    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(mobileCropDisabled));
   }
 }
 
@@ -984,22 +987,24 @@ function createSplatEraserModifier(eraser) {
     { gsplat: dyno.Gsplat },
     ({ gsplat }) => {
       const { center, rgb, opacity } = dyno.splitGsplat(gsplat).outputs;
-      const projection = dyno.dot(
-        eraser.brushDirection,
-        dyno.sub(center, eraser.brushOrigin)
+      const brushSegment = dyno.sub(eraser.brushEnd, eraser.brushStart);
+      const segmentLengthSq = dyno.dot(brushSegment, brushSegment);
+      const segmentAmount = dyno.clamp(
+        dyno.div(
+          dyno.dot(dyno.sub(center, eraser.brushStart), brushSegment),
+          dyno.max(segmentLengthSq, dyno.dynoFloat(1e-8))
+        ),
+        dyno.dynoFloat(0),
+        dyno.dynoFloat(1)
       );
-      const projectedCenter = dyno.add(
-        eraser.brushOrigin,
-        dyno.mul(eraser.brushDirection, projection)
+      const closestPoint = dyno.add(
+        eraser.brushStart,
+        dyno.mul(brushSegment, segmentAmount)
       );
-      const distance = dyno.length(dyno.sub(projectedCenter, center));
-      const insideBrush = dyno.and(
-        dyno.lessThan(distance, eraser.brushRadius),
-        dyno.and(
-          dyno.greaterThan(projection, dyno.dynoFloat(0)),
-          dyno.lessThan(projection, eraser.brushDepth)
-        )
-      );
+      // A finite 3D capsule follows the visible surface instead of selecting an
+      // effectively infinite camera ray that also reaches distant background.
+      const distance = dyno.length(dyno.sub(closestPoint, center));
+      const insideBrush = dyno.lessThan(distance, eraser.brushRadius);
       const isHighlighted = dyno.lessThan(
         dyno.length(dyno.sub(rgb, eraser.selectionColor)),
         dyno.dynoFloat(0.02)
@@ -1071,28 +1076,29 @@ function updateSplatEraserUI() {
       ? (hasSelection
         ? (touchLayout ? '粉色区域待确认' : '粉色区域待确认 · [ / ] 调大小')
         : (active
-          ? (navigationMode ? '拖动模型调整视角' : (touchLayout ? '在模型上拖动涂抹' : '左键涂抹 · [ / ] 调大小 · Alt/Option 旋转'))
+          ? (navigationMode ? '拖动模型调整视角' : (touchLayout ? '在模型表面拖动涂抹' : '左键在表面涂抹 · [ / ] 调大小 · Alt/Option 旋转'))
           : '点击涂抹选区开始'))
       : (hasSelection
         ? (touchLayout ? 'Pink area ready' : 'Pink area ready · [ / ] resize')
         : (active
-          ? (navigationMode ? 'Drag the model to adjust the view' : (touchLayout ? 'Drag across the model to paint' : 'Paint · [ / ] resize · Alt/Option orbit'))
+          ? (navigationMode ? 'Drag the model to adjust the view' : (touchLayout ? 'Paint across the model surface' : 'Paint the surface · [ / ] resize · Alt/Option orbit'))
           : 'Choose Paint Selection to begin'));
   }
 }
 
 function updateSplatEraserBrushDimensions(eraser) {
-  if (!eraser || !state.camera || !eraser.mesh) return;
-  const targetPoint = state.controls?.target || new THREE.Vector3();
-  const focusDepth = Math.max(0.1, state.camera.position.distanceTo(targetPoint));
-  const halfFovRad = THREE.MathUtils.degToRad(state.camera.fov * 0.5);
-  const viewHeightAtDepth = 2 * focusDepth * Math.tan(halfFovRad);
-  const radiusWorld = Math.max(0.001, (viewHeightAtDepth * 0.5) * eraser.brushScale);
-  
-  eraser.mesh.updateWorldMatrix(true, false);
-  const meshScale = eraser.mesh.getWorldScale(new THREE.Vector3()).x || 1;
-  eraser.brushRadius.value = radiusWorld / Math.max(1e-4, meshScale);
-  eraser.brushDepth.value = Math.max(10, focusDepth * 4);
+  if (!eraser) return;
+  const subjectRadius = Math.max(
+    state.subjectCropBounds?.radii.x || 0,
+    state.subjectCropBounds?.radii.y || 0,
+    state.subjectCropBounds?.radii.z || 0,
+    0.1
+  ) * state.modelScale * state.settings.splatScale;
+  // The slider constrains brushScale to 0.2%–20%. Keep the world-space
+  // radius proportional across that full range instead of flattening larger
+  // values against a fixed cap that varies perceptually between models.
+  eraser.brushRadius.value = Math.max(subjectRadius, 0.05) * eraser.brushScale;
+  syncSplatEraserBrushCursor();
 }
 
 function setSplatEraserBrushPercent(value) {
@@ -1102,24 +1108,41 @@ function setSplatEraserBrushPercent(value) {
   const percent = THREE.MathUtils.clamp(parseFloat(value) || 8, minimum, maximum);
   if (slider) slider.value = String(percent);
   if (dom.settingSplatEraserSizeVal) {
-    dom.settingSplatEraserSizeVal.textContent = `${Math.round(percent)}%`;
+    const displayPercent = Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1);
+    dom.settingSplatEraserSizeVal.textContent = `${displayPercent}%`;
+  }
+  if (!state.splatEraser && state.isModelLoaded && state.splatMesh) {
+    configureSplatEraser(state.splatMesh);
   }
   if (state.splatEraser) {
     state.splatEraser.brushScale = percent / 100;
     updateSplatEraserBrushDimensions(state.splatEraser);
-    syncSplatEraserBrushCursor();
+    showSplatEraserBrushPreview(null, { center: true, duration: 1000 });
   }
-  showSplatEraserBrushPreview();
 }
 
 function getSplatEraserCursorDiameter(eraser) {
   const canvas = state.renderer?.domElement;
-  if (!eraser || !canvas) return 24;
+  const camera = state.camera;
+  if (!eraser || !canvas || !camera) return 24;
   const rect = canvas.getBoundingClientRect();
   if (!rect.height) return 24;
 
-  const diameter = rect.height * eraser.brushScale;
-  const maxDiameter = eraser.touchLayout
+  let focusDepth = camera.position.distanceTo(state.controls?.target || new THREE.Vector3());
+  // Keep the screen-space brush icon stable while it moves. The actual eraser
+  // remains a fixed world-space sphere; only its visual size is projected from
+  // the subject center instead of jumping between different surface depths.
+  if (state.subjectCropBounds && eraser.mesh) {
+    eraser.mesh.updateWorldMatrix(true, false);
+    camera.updateMatrixWorld(true);
+    const subjectWorld = eraser.mesh.localToWorld(state.subjectCropBounds.center.clone());
+    const subjectView = subjectWorld.applyMatrix4(camera.matrixWorldInverse);
+    if (-subjectView.z > camera.near) focusDepth = -subjectView.z;
+  }
+
+  const focalPixels = rect.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
+  const diameter = (eraser.brushRadius.value * focalPixels * 2) / Math.max(focusDepth, camera.near);
+  const maxDiameter = eraser.touchLayout || isMobileViewport()
     ? Math.max(rect.width, rect.height) * 2
     : Math.min(rect.width, rect.height) * 0.9;
   return THREE.MathUtils.clamp(diameter, 12, maxDiameter);
@@ -1129,13 +1152,18 @@ function syncSplatEraserBrushCursor() {
   const eraser = state.splatEraser;
   const cursor = dom.splatEraserBrushCursor;
   if (!cursor) return;
+  const sizePreviewVisible = Boolean(eraser?.sizePreviewActive);
   const visible = Boolean(
-    eraser?.active
-    && eraser.cursorInside
-    && !eraser.cursorNavigation
-    && !eraser.touchGesture
+    sizePreviewVisible
+    || (
+      eraser?.active
+      && eraser.cursorInside
+      && !eraser.cursorNavigation
+      && !eraser.touchGesture
+    )
   );
   cursor.classList.toggle('visible', visible);
+  cursor.classList.toggle('size-preview', sizePreviewVisible);
   if (visible) {
     const diameter = getSplatEraserCursorDiameter(eraser);
     cursor.style.left = `${eraser.cursorX}px`;
@@ -1167,44 +1195,35 @@ function updateSplatEraserBrushCursor(event) {
   syncSplatEraserBrushCursor();
 }
 
-function showSplatEraserBrushPreview(event = null) {
+function showSplatEraserBrushPreview(event = null, { center = false, duration = 2000 } = {}) {
+  const eraser = state.splatEraser;
   const canvas = state.renderer?.domElement;
-  const cursor = dom.splatEraserBrushCursor;
-  if (!canvas || !cursor) return;
+  if (!eraser || !canvas || eraser.touchGesture) return;
+  if (!center && (!eraser.active || !eraser.touchLayout)) return;
   const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-
-  const brushScale = (state.splatEraser?.brushScale)
-    ?? ((parseFloat(dom.settingSplatEraserSize?.value) || 8) / 100);
-
-  const diameter = rect.height * brushScale;
-  const cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
-  const cursorY = event?.clientY ?? (rect.top + rect.height * 0.5);
-
-  cursor.style.left = `${cursorX}px`;
-  cursor.style.top = `${cursorY}px`;
-  cursor.style.width = `${diameter}px`;
-  cursor.style.height = `${diameter}px`;
-  cursor.classList.add('visible');
-
-  if (state.splatEraser) {
-    state.splatEraser.cursorX = cursorX;
-    state.splatEraser.cursorY = cursorY;
-    state.splatEraser.cursorInside = true;
-    state.splatEraser.cursorNavigation = false;
-    if (state.splatEraser.cursorHideTimer) clearTimeout(state.splatEraser.cursorHideTimer);
-    state.splatEraser.cursorHideTimer = setTimeout(() => {
-      if (state.splatEraser) state.splatEraser.cursorHideTimer = null;
-      if (!state.splatEraser?.drawing && !state.splatEraser?.touchGesture) {
-        hideSplatEraserBrushCursor();
-      }
-    }, 2000);
+  if (center) {
+    eraser.cursorX = window.innerWidth * 0.5;
+    eraser.cursorY = window.innerHeight * 0.5;
+    eraser.sizePreviewActive = true;
   } else {
-    if (window._splatEraserPreviewTimer) clearTimeout(window._splatEraserPreviewTimer);
-    window._splatEraserPreviewTimer = setTimeout(() => {
-      cursor.classList.remove('visible');
-    }, 2000);
+    eraser.cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
+    eraser.cursorY = event?.clientY ?? (rect.top + rect.height * 0.42);
+    eraser.cursorInside = true;
   }
+  eraser.cursorNavigation = false;
+  const timerProperty = center ? 'sizePreviewTimer' : 'cursorHideTimer';
+  if (eraser[timerProperty]) clearTimeout(eraser[timerProperty]);
+  syncSplatEraserBrushCursor();
+  eraser[timerProperty] = setTimeout(() => {
+    eraser[timerProperty] = null;
+    if (center) {
+      eraser.sizePreviewActive = false;
+      eraser.cursorInside = false;
+      syncSplatEraserBrushCursor();
+    } else if (!eraser.drawing && !eraser.touchGesture) {
+      hideSplatEraserBrushCursor();
+    }
+  }, duration);
 }
 
 function hideSplatEraserBrushCursor() {
@@ -1236,7 +1255,7 @@ function configureSplatEraser(mesh) {
     frameId: null,
     controlsWereEnabled: true,
     autoRotateWasEnabled: false,
-    touchLayout: false,
+    touchLayout: isMobileViewport(),
     navigationMode: false,
     staged: false,
     hasSelection: false,
@@ -1247,21 +1266,28 @@ function configureSplatEraser(mesh) {
     cursorInside: false,
     cursorNavigation: false,
     cursorHideTimer: null,
+    sizePreviewActive: false,
+    sizePreviewTimer: null,
     touchPointers: new Map(),
     touchGesture: null,
     touchSequenceNavigating: false,
+    hasSurfacePoint: false,
+    surfacePoint: new THREE.Vector3(),
+    strokePlane: new THREE.Plane(),
+    lastSurfacePickTime: 0,
+    lastSurfacePickX: 0,
+    lastSurfacePickY: 0,
     brushScale: THREE.MathUtils.clamp(
       (parseFloat(dom.settingSplatEraserSize?.value) || 8) / 100,
-      0.02,
+      0.002,
       0.2
     ),
     paintEnabled: dyno.dynoBool(false),
     eraseEnabled: dyno.dynoBool(false),
     commitEnabled: dyno.dynoBool(false),
     brushRadius: dyno.dynoFloat(0.05),
-    brushDepth: dyno.dynoFloat(10),
-    brushOrigin: dyno.dynoVec3(new THREE.Vector3()),
-    brushDirection: dyno.dynoVec3(new THREE.Vector3(0, 0, -1)),
+    brushStart: dyno.dynoVec3(new THREE.Vector3()),
+    brushEnd: dyno.dynoVec3(new THREE.Vector3()),
     selectionColor: dyno.dynoVec3(new THREE.Vector3(1, 32 / 255, 160 / 255)),
   };
   updateSplatEraserBrushDimensions(eraser);
@@ -1284,6 +1310,7 @@ function disposeSplatEraser() {
   if (!eraser) return;
   setSplatEraserActive(false, { silent: true });
   if (eraser.frameId !== null) cancelAnimationFrame(eraser.frameId);
+  if (eraser.sizePreviewTimer) clearTimeout(eraser.sizePreviewTimer);
   if (eraser.staged) cancelSplatEraserSelection({ silent: true });
   for (const snapshot of eraser.history) snapshot?.dispose?.();
   eraser.history.length = 0;
@@ -1294,11 +1321,15 @@ function disposeSplatEraser() {
 
 const splatEraserRaycaster = new THREE.Raycaster();
 const splatEraserPointer = new THREE.Vector2();
+const splatEraserSurfacePoint = new THREE.Vector3();
+const splatEraserPlanePoint = new THREE.Vector3();
+const splatEraserPlaneNormal = new THREE.Vector3();
+const SPLAT_ERASER_REPICK_INTERVAL_MS = 140;
 
-function updateSplatEraserRay(event) {
+function setSplatEraserPointerRay(event) {
   const eraser = state.splatEraser;
   const canvas = state.renderer?.domElement;
-  if (!eraser?.active || !canvas || !state.camera) return false;
+  if (!eraser?.active || !canvas || !state.camera || !event) return false;
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return false;
   splatEraserPointer.set(
@@ -1306,11 +1337,69 @@ function updateSplatEraserRay(event) {
     -((event.clientY - rect.top) / rect.height) * 2 + 1
   );
   state.camera.updateMatrixWorld(true);
+  eraser.mesh.updateWorldMatrix(true, false);
   splatEraserRaycaster.setFromCamera(splatEraserPointer, state.camera);
-  eraser.brushOrigin.value.copy(splatEraserRaycaster.ray.origin);
-  eraser.brushDirection.value.copy(splatEraserRaycaster.ray.direction).normalize();
-  updateSplatEraserBrushDimensions(eraser);
   return true;
+}
+
+function setSplatEraserSurfacePoint(eraser, point, { resetSegment = false } = {}) {
+  if (!eraser || !point) return false;
+  if (resetSegment || !eraser.hasSurfacePoint) eraser.brushStart.value.copy(point);
+  else eraser.brushStart.value.copy(eraser.brushEnd.value);
+  eraser.brushEnd.value.copy(point);
+  eraser.surfacePoint.copy(point);
+  eraser.hasSurfacePoint = true;
+  splatEraserPlaneNormal.copy(splatEraserRaycaster.ray.direction).normalize();
+  eraser.strokePlane.setFromNormalAndCoplanarPoint(splatEraserPlaneNormal, point);
+  syncSplatEraserBrushCursor();
+  return true;
+}
+
+function pickSplatEraserSurface(event, { resetSegment = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser || !setSplatEraserPointerRay(event)) return false;
+  const intersections = splatEraserRaycaster.intersectObject(eraser.mesh, false);
+  const hit = intersections.find(intersection => intersection?.point);
+  if (!hit) {
+    eraser.hasSurfacePoint = false;
+    syncSplatEraserBrushCursor();
+    return false;
+  }
+  eraser.lastSurfacePickTime = performance.now();
+  eraser.lastSurfacePickX = event.clientX;
+  eraser.lastSurfacePickY = event.clientY;
+  splatEraserSurfacePoint.copy(hit.point);
+  const crossedDepthGap = eraser.hasSurfacePoint
+    && eraser.surfacePoint.distanceTo(splatEraserSurfacePoint) > eraser.brushRadius.value * 2.5;
+  return setSplatEraserSurfacePoint(eraser, splatEraserSurfacePoint, {
+    resetSegment: resetSegment || crossedDepthGap,
+  });
+}
+
+function updateSplatEraserStrokePoint(event, { resetSegment = false, forceSurfacePick = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser?.active || !event) return false;
+  if (forceSurfacePick || !eraser.hasSurfacePoint) {
+    return pickSplatEraserSurface(event, { resetSegment });
+  }
+  if (!setSplatEraserPointerRay(event)) return false;
+
+  const elapsed = performance.now() - eraser.lastSurfacePickTime;
+  const repickDistance = Math.max(12, getSplatEraserCursorDiameter(eraser) * 0.35);
+  const pointerDistance = Math.hypot(
+    event.clientX - eraser.lastSurfacePickX,
+    event.clientY - eraser.lastSurfacePickY
+  );
+  if (elapsed >= SPLAT_ERASER_REPICK_INTERVAL_MS && pointerDistance >= repickDistance) {
+    return pickSplatEraserSurface(event, { resetSegment });
+  }
+
+  const projectedPoint = splatEraserRaycaster.ray.intersectPlane(
+    eraser.strokePlane,
+    splatEraserPlanePoint
+  );
+  if (!projectedPoint) return false;
+  return setSplatEraserSurfacePoint(eraser, projectedPoint, { resetSegment });
 }
 
 function bakeSplatEraserResult({ preservePrevious = false } = {}) {
@@ -1487,6 +1576,7 @@ function beginSplatEraserTouchNavigation(eraser) {
   };
   eraser.touchSequenceNavigating = true;
   eraser.cursorNavigation = true;
+  eraser.hasSurfacePoint = false;
   hideSplatEraserBrushCursor();
   return true;
 }
@@ -1542,7 +1632,7 @@ function beginSplatEraserStroke(event) {
   // Desktop painting keeps OrbitControls enabled. Holding Alt/Option lets the
   // normal left-drag event pass through to OrbitControls for camera rotation.
   if (!eraser.touchLayout && event.altKey) return;
-  if (!updateSplatEraserRay(event)) return;
+  if (!updateSplatEraserStrokePoint(event, { resetSegment: true, forceSurfacePick: true })) return;
   if (!beginSplatEraserSelection(eraser)) {
     setSplatEraserActive(false, { silent: true });
     return;
@@ -1577,8 +1667,8 @@ function moveSplatEraserStroke(event) {
   }
   if (!eraser?.active || !eraser.drawing || event.pointerId !== eraser.pointerId) return;
   updateSplatEraserBrushCursor(event);
-  if (eraser.touchLayout) showMobileSplatEraserBrushPreview(event);
-  if (updateSplatEraserRay(event)) scheduleSplatEraserBake();
+  if (eraser.touchLayout) showSplatEraserBrushPreview(event);
+  if (updateSplatEraserStrokePoint(event)) scheduleSplatEraserBake();
   event.preventDefault();
   event.stopImmediatePropagation();
 }
@@ -1603,7 +1693,7 @@ function endSplatEraserStroke(event) {
     cancelAnimationFrame(eraser.frameId);
     eraser.frameId = null;
   }
-  if (event?.clientX !== undefined) updateSplatEraserRay(event);
+  if (event?.clientX !== undefined) updateSplatEraserStrokePoint(event);
   const baked = bakeSplatEraserResult();
   eraser.paintEnabled.value = false;
   eraser.eraseEnabled.value = false;
@@ -1615,7 +1705,7 @@ function endSplatEraserStroke(event) {
     ? (eraser.touchLayout ? (eraser.navigationMode ? 'grab' : 'crosshair') : 'none')
     : '';
   if (event?.clientX !== undefined) updateSplatEraserBrushCursor(event);
-  if (eraser.touchLayout && event?.clientX !== undefined) showMobileSplatEraserBrushPreview(event);
+  if (eraser.touchLayout && event?.clientX !== undefined) showSplatEraserBrushPreview(event);
   event?.preventDefault?.();
   event?.stopImmediatePropagation?.();
   if (!baked) setSplatEraserActive(false, { silent: true });
@@ -1655,6 +1745,7 @@ function setSplatEraserActive(active, { silent = false } = {}) {
     eraser.touchPointers.clear();
     eraser.touchGesture = null;
     eraser.touchSequenceNavigating = false;
+    eraser.hasSurfacePoint = false;
     eraser.controlsWereEnabled = state.controls?.enabled !== false;
     eraser.autoRotateWasEnabled = Boolean(state.particleSystem?.autoRotate);
     eraser.active = true;
@@ -1669,6 +1760,7 @@ function setSplatEraserActive(active, { silent = false } = {}) {
       state.renderer.domElement.style.cursor = eraser.touchLayout ? 'crosshair' : 'none';
     }
     syncSplatEraserBrushCursor();
+    showSplatEraserBrushPreview(null, { center: true, duration: 1000 });
     if (!silent) {
       showToast(
         state.lang === 'zh'
@@ -1685,12 +1777,16 @@ function setSplatEraserActive(active, { silent = false } = {}) {
   } else {
     if (eraser.drawing) endSplatEraserStroke();
     if (eraser.staged) cancelSplatEraserSelection({ silent: true });
+    if (eraser.sizePreviewTimer) clearTimeout(eraser.sizePreviewTimer);
+    eraser.sizePreviewTimer = null;
+    eraser.sizePreviewActive = false;
     eraser.paintEnabled.value = false;
     eraser.eraseEnabled.value = false;
     eraser.commitEnabled.value = false;
     eraser.touchPointers.clear();
     eraser.touchGesture = null;
     eraser.touchSequenceNavigating = false;
+    eraser.hasSurfacePoint = false;
     eraser.active = false;
     eraser.mesh.worldModifier = null;
     eraser.mesh.updateGenerator();
@@ -2993,7 +3089,7 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.restoreCameraPathFirstFrameOnOpen = false;
   if (isFreshLoad) {
     state.subjectCropBounds = null;
-    state.settings.splatCropEnabled = false;
+    state.settings.splatCropEnabled = !isMobileViewport();
     state.settings.splatCropShape = 'ellipsoid';
     state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
     state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
@@ -3924,6 +4020,8 @@ function invalidateCustomCameraPath() {
   state.cameraQuaternionControls = null;
   state.cameraModelQuaternions = null;
   state.cameraModelQuaternionControls = null;
+  state.cameraPositionCurve = null;
+  state.cameraTargetCurve = null;
   state.cameraMotionProgress = null;
   state.cameraMotionDistances = null;
   state.cameraMotionTotal = 0;
@@ -4042,14 +4140,7 @@ function removeKeyframe(index) {
 function createMonotoneTimeDerivatives(values, times) {
   const pointCount = values.length;
   const derivatives = new Array(pointCount).fill(0);
-  if (pointCount < 2) return derivatives;
-  if (pointCount === 2) {
-    const duration = Math.max(1e-6, times[1] - times[0]);
-    const slope = (values[1] - values[0]) / duration;
-    derivatives[0] = slope;
-    derivatives[1] = slope;
-    return derivatives;
-  }
+  if (pointCount < 3) return derivatives;
 
   const intervals = new Array(pointCount - 1);
   const slopes = new Array(pointCount - 1);
@@ -4058,22 +4149,23 @@ function createMonotoneTimeDerivatives(values, times) {
     slopes[index] = (values[index + 1] - values[index]) / intervals[index];
   }
 
-  // Smooth Catmull-Rom weighted velocity calculation (prevents zero-velocity stalls at keyframes)
+  // PCHIP-style interior velocities prevent overshoot. The first and last
+  // derivatives intentionally stay at zero, producing one global ease-in and
+  // ease-out instead of stopping at every keyframe.
   for (let index = 1; index < pointCount - 1; index++) {
     const previousSlope = slopes[index - 1];
     const nextSlope = slopes[index];
+    if (Math.abs(previousSlope) <= 1e-9 || Math.abs(nextSlope) <= 1e-9 || previousSlope * nextSlope <= 0) {
+      derivatives[index] = 0;
+      continue;
+    }
     const previousInterval = intervals[index - 1];
     const nextInterval = intervals[index];
-    const totalInterval = previousInterval + nextInterval;
-    
-    // Continuous velocity vector through keyframe node
-    derivatives[index] = (previousSlope * nextInterval + nextSlope * previousInterval) / totalInterval;
+    const previousWeight = 2 * nextInterval + previousInterval;
+    const nextWeight = nextInterval + 2 * previousInterval;
+    derivatives[index] = (previousWeight + nextWeight)
+      / (previousWeight / previousSlope + nextWeight / nextSlope);
   }
-
-  // Endpoints: smooth natural extension
-  derivatives[0] = slopes[0] - (derivatives[1] - slopes[0]) * 0.5;
-  derivatives[pointCount - 1] = slopes[pointCount - 2] + (slopes[pointCount - 2] - derivatives[pointCount - 2]) * 0.5;
-
   return derivatives;
 }
 
@@ -4120,10 +4212,12 @@ function getCameraTimelineSegment(progress) {
 function interpolateQuinticScalar(values, derivatives, segmentIndex, amount, duration) {
   const amount2 = amount * amount;
   const amount3 = amount2 * amount;
-  const position0 = 1 - 3 * amount2 + 2 * amount3;
-  const velocity0 = amount - 2 * amount2 + amount3;
-  const position1 = 3 * amount2 - 2 * amount3;
-  const velocity1 = -amount2 + amount3;
+  const amount4 = amount3 * amount;
+  const amount5 = amount4 * amount;
+  const position0 = 1 - 10 * amount3 + 15 * amount4 - 6 * amount5;
+  const velocity0 = amount - 6 * amount3 + 8 * amount4 - 3 * amount5;
+  const position1 = 10 * amount3 - 15 * amount4 + 6 * amount5;
+  const velocity1 = -4 * amount3 + 7 * amount4 - 3 * amount5;
   return position0 * values[segmentIndex]
     + velocity0 * duration * derivatives[segmentIndex]
     + position1 * values[segmentIndex + 1]
@@ -4133,15 +4227,16 @@ function interpolateQuinticScalar(values, derivatives, segmentIndex, amount, dur
 function interpolateQuinticVector(points, derivatives, segmentIndex, amount, duration, output = new THREE.Vector3()) {
   const amount2 = amount * amount;
   const amount3 = amount2 * amount;
-  const position0 = 1 - 3 * amount2 + 2 * amount3;
-  const velocity0 = amount - 2 * amount2 + amount3;
-  const position1 = 3 * amount2 - 2 * amount3;
-  const velocity1 = -amount2 + amount3;
+  const amount4 = amount3 * amount;
+  const amount5 = amount4 * amount;
+  const position0 = 1 - 10 * amount3 + 15 * amount4 - 6 * amount5;
+  const velocity0 = amount - 6 * amount3 + 8 * amount4 - 3 * amount5;
+  const position1 = 10 * amount3 - 15 * amount4 + 6 * amount5;
+  const velocity1 = -4 * amount3 + 7 * amount4 - 3 * amount5;
   return output
     .copy(points[segmentIndex]).multiplyScalar(position0)
     .addScaledVector(derivatives[segmentIndex], velocity0 * duration)
     .addScaledVector(points[segmentIndex + 1], position1)
-
     .addScaledVector(derivatives[segmentIndex + 1], velocity1 * duration);
 }
 
@@ -4426,64 +4521,128 @@ function sampleCameraProjectionScale(progress) {
   return Math.max(1e-6, zoom / Math.tan(THREE.MathUtils.degToRad(fov) * 0.5));
 }
 
+const cameraCurveSample = { segmentIndex: 0, amount: 0 };
+
+function sampleCurrentCameraCurve(
+  progress,
+  positionOutput,
+  targetOutput,
+  cameraQuaternionOutput,
+  modelQuaternionOutput
+) {
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  const segmentCount = state.keyframes.length - 1;
+  const rawSegment = clampedProgress * segmentCount;
+  const segmentIndex = clampedProgress >= 1
+    ? segmentCount - 1
+    : Math.min(segmentCount - 1, Math.floor(rawSegment));
+  const amount = clampedProgress >= 1 ? 1 : rawSegment - segmentIndex;
+
+  state.cameraPositionCurve.getPoint(clampedProgress, positionOutput);
+  state.cameraTargetCurve.getPoint(clampedProgress, targetOutput);
+  interpolateSquad(
+    state.cameraQuaternions,
+    state.cameraQuaternionControls,
+    segmentIndex,
+    amount,
+    cameraQuaternionOutput
+  );
+  interpolateSquad(
+    state.cameraModelQuaternions,
+    state.cameraModelQuaternionControls,
+    segmentIndex,
+    amount,
+    modelQuaternionOutput
+  );
+  cameraCurveSample.segmentIndex = segmentIndex;
+  cameraCurveSample.amount = amount;
+  return cameraCurveSample;
+}
+
 function buildCameraMotionTable() {
   const segmentCount = Math.max(1, state.keyframes.length - 1);
   const sampleCount = Math.min(
     32768,
-    Math.max(384, segmentCount * CAMERA_MOTION_SAMPLES_PER_SEGMENT)
+    Math.max(512, segmentCount * CAMERA_MOTION_SAMPLES_PER_SEGMENT)
   );
   const progressSamples = new Float32Array(sampleCount + 1);
   const cumulativeDistances = new Float64Array(sampleCount + 1);
+  const positionSteps = new Float64Array(sampleCount + 1);
+  const perceptualSteps = new Float64Array(sampleCount + 1);
 
-  sampleCameraSpline(
+  sampleCurrentCameraCurve(
     0,
     cameraMotionPreviousPosition,
     cameraMotionPreviousTarget,
     cameraMotionPreviousQuaternion,
     cameraMotionPreviousModelQuaternion
   );
-  let previousProjectionScale = sampleCameraProjectionScale(0);
-  let totalMotion = 0;
+  let totalPosition = 0;
+  let rawPerceptualTotal = 0;
 
   for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
     const progress = sampleIndex / sampleCount;
-    sampleCameraSpline(
+    sampleCurrentCameraCurve(
       progress,
       cameraMotionCurrentPosition,
       cameraMotionCurrentTarget,
       cameraMotionCurrentQuaternion,
       cameraMotionCurrentModelQuaternion
     );
-    const projectionScale = sampleCameraProjectionScale(progress);
     const radius = Math.max(
       1e-4,
       cameraMotionCurrentPosition.distanceTo(cameraMotionCurrentTarget)
     );
     const positionMotion = cameraMotionCurrentPosition.distanceTo(cameraMotionPreviousPosition);
-    const targetMotion = cameraMotionCurrentTarget.distanceTo(cameraMotionPreviousTarget) * 0.6;
+    const targetMotion = cameraMotionCurrentTarget.distanceTo(cameraMotionPreviousTarget) * 0.12;
     const cameraRotationMotion = radius
       * getQuaternionAngularDistance(cameraMotionPreviousQuaternion, cameraMotionCurrentQuaternion)
-      * 0.75;
+      * 0.28;
     const modelRotationMotion = radius
       * getQuaternionAngularDistance(cameraMotionPreviousModelQuaternion, cameraMotionCurrentModelQuaternion)
-      * 0.35;
-    const projectionMotion = radius
-      * Math.abs(Math.log(projectionScale / previousProjectionScale))
-      * 0.5;
-    totalMotion += Math.hypot(
+      * 0.06;
+    const perceptualMotion = Math.hypot(
       positionMotion,
       targetMotion,
       cameraRotationMotion,
-      modelRotationMotion,
-      projectionMotion
+      modelRotationMotion
     );
     progressSamples[sampleIndex] = progress;
-    cumulativeDistances[sampleIndex] = totalMotion;
+    positionSteps[sampleIndex] = positionMotion;
+    perceptualSteps[sampleIndex] = perceptualMotion;
+    totalPosition += positionMotion;
+    rawPerceptualTotal += perceptualMotion;
     cameraMotionPreviousPosition.copy(cameraMotionCurrentPosition);
     cameraMotionPreviousTarget.copy(cameraMotionCurrentTarget);
     cameraMotionPreviousQuaternion.copy(cameraMotionCurrentQuaternion);
     cameraMotionPreviousModelQuaternion.copy(cameraMotionCurrentModelQuaternion);
-    previousProjectionScale = projectionScale;
+  }
+
+  // Smooth the local motion rate across keyframe boundaries. Translation stays
+  // the dominant lower bound, while rotation/target changes receive a limited
+  // amount of extra time instead of producing an abrupt perceptual speed jump.
+  const averagePositionStep = totalPosition / sampleCount;
+  const averagePerceptualStep = rawPerceptualTotal / sampleCount;
+  const paceBaseline = Math.max(averagePositionStep, averagePerceptualStep * 0.35, 1e-8);
+  const smoothingRadius = Math.max(8, Math.round(sampleCount / Math.max(16, segmentCount * 16)));
+  let totalMotion = 0;
+  for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
+    let weightedMotion = 0;
+    let totalWeight = 0;
+    for (let offset = -smoothingRadius; offset <= smoothingRadius; offset++) {
+      const sourceIndex = THREE.MathUtils.clamp(sampleIndex + offset, 1, sampleCount);
+      const weight = smoothingRadius + 1 - Math.abs(offset);
+      weightedMotion += perceptualSteps[sourceIndex] * weight;
+      totalWeight += weight;
+    }
+    const smoothedMotion = weightedMotion / totalWeight;
+    const pacedMotion = THREE.MathUtils.clamp(
+      smoothedMotion,
+      positionSteps[sampleIndex],
+      Math.max(positionSteps[sampleIndex], paceBaseline * 1.75)
+    );
+    totalMotion += Math.max(pacedMotion, 1e-10);
+    cumulativeDistances[sampleIndex] = totalMotion;
   }
 
   state.cameraMotionProgress = progressSamples;
@@ -4521,88 +4680,71 @@ function getCameraProgressAtMotion(progress) {
 
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
-  
   const positions = state.keyframes.map(frame => frame.position.clone());
-  const targets = buildFilteredCameraTargets();
+  const filteredTargets = buildFilteredCameraTargets();
   const cameraQuaternions = cloneContinuousCameraQuaternions('quaternion');
   const modelQuaternions = cloneContinuousCameraQuaternions('modelQuaternion');
 
-  // Centripetal Catmull-Rom 3D curves ensure 100% continuous spatial velocity without knot stalls or overshoots
+  // A centripetal Catmull-Rom curve avoids the zero derivatives introduced by
+  // component-wise monotone interpolation at ordinary direction changes.
   state.cameraPositionCurve = new THREE.CatmullRomCurve3(positions, false, 'centripetal');
-  state.cameraTargetCurve = new THREE.CatmullRomCurve3(targets, false, 'centripetal');
+  state.cameraTargetCurve = new THREE.CatmullRomCurve3(filteredTargets, false, 'centripetal');
+  state.cameraPositionCurve.arcLengthDivisions = Math.min(
+    16384,
+    Math.max(512, (state.keyframes.length - 1) * 256)
+  );
+  state.cameraPositionCurve.updateArcLengths();
+  state.cameraFilteredTargets = filteredTargets;
   state.cameraQuaternions = cameraQuaternions;
   state.cameraQuaternionControls = createSquadControls(cameraQuaternions);
   state.cameraModelQuaternions = modelQuaternions;
   state.cameraModelQuaternionControls = createSquadControls(modelQuaternions);
+  buildCameraMotionTable();
 
-  // Compute keyframe arc-length parameters u_i along position curve for orientation and projection synchronization
-  const numKeyframes = state.keyframes.length;
-  const keyframeU = [0];
-  const curveLengths = state.cameraPositionCurve.getLengths(Math.max(200, numKeyframes * 100));
-  const totalLength = curveLengths[curveLengths.length - 1] || 1;
-
-  for (let i = 1; i < numKeyframes; i++) {
-    const fraction = i / (numKeyframes - 1);
-    keyframeU.push(fraction);
-  }
-  state.cameraKeyframeU = keyframeU;
   return true;
 }
-
 function interpolateCamera(pct) {
-  if (!state.cameraPositionCurve || !state.cameraTargetCurve) return;
+  if (
+    !state.cameraPositionCurve
+    || !state.cameraTargetCurve
+    || !state.cameraQuaternions
+    || !state.cameraQuaternionControls
+    || !state.cameraModelQuaternions
+    || !state.cameraModelQuaternionControls
+    || !state.cameraMotionProgress
+    || !state.cameraMotionDistances
+  ) return;
 
-  // Global ease-in at flight start (t=0) and ease-out at flight end (t=1)
-  const progress = getGlobalCameraTimeProgress(pct);
-
-  // 1. Sample 3D position and lookAt target at constant spatial speed
-  state.cameraPositionCurve.getPointAt(progress, state.camera.position);
-  state.cameraTargetCurve.getPointAt(progress, state.controls.target);
-
-  // 2. Determine keyframe segment for quaternions and FOV/Zoom projection
-  const numSegments = state.keyframes.length - 1;
-  let segmentIndex = 0;
-  let amount = 0;
-
-  if (progress <= 0) {
-    segmentIndex = 0;
-    amount = 0;
-  } else if (progress >= 1) {
-    segmentIndex = numSegments - 1;
-    amount = 1;
-  } else {
-    const rawSeg = progress * numSegments;
-    segmentIndex = Math.min(numSegments - 1, Math.floor(rawSeg));
-    amount = rawSeg - segmentIndex;
-  }
-
+  // Convert elapsed time through the smoothed perceptual-motion table, then use
+  // one raw curve parameter for position, target, orientation and projection.
+  // Every saved viewpoint stays synchronized while keyframe speed changes blend.
+  const distanceProgress = getGlobalCameraTimeProgress(pct);
+  const curveProgress = getCameraProgressAtMotion(distanceProgress);
+  const { segmentIndex, amount } = sampleCurrentCameraCurve(
+    curveProgress,
+    cameraSplinePosition,
+    cameraSplineTarget,
+    cameraSplineQuaternion,
+    cameraSplineModelQuaternion
+  );
   const startFrame = state.keyframes[segmentIndex];
   const endFrame = state.keyframes[segmentIndex + 1];
 
-  // 3. Set camera rotation / quaternion
-  if (startFrame.quaternion && endFrame.quaternion && state.cameraQuaternions) {
-    interpolateSquad(
-      state.cameraQuaternions,
-      state.cameraQuaternionControls,
-      segmentIndex,
-      amount,
-      state.camera.quaternion
-    );
+  state.camera.position.copy(cameraSplinePosition);
+  state.controls.target.copy(cameraSplineTarget);
+  if (startFrame.quaternion && endFrame.quaternion) {
+    state.camera.quaternion.copy(cameraSplineQuaternion);
   } else {
-    state.camera.lookAt(state.controls.target);
+    state.camera.lookAt(cameraSplineTarget);
   }
 
-  // Up vector interpolation
   if (startFrame.up && endFrame.up) {
     state.camera.up.lerpVectors(startFrame.up, endFrame.up, amount).normalize();
   }
-
-  // 4. Smooth FOV / Zoom / Near / Far projection interpolation
   let projectionChanged = false;
   for (const property of ['fov', 'zoom', 'near', 'far']) {
     if (!Number.isFinite(startFrame[property]) || !Number.isFinite(endFrame[property])) continue;
-    const smoothAmount = amount * amount * (3 - 2 * amount);
-    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], smoothAmount);
+    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], amount);
     if (Math.abs(state.camera[property] - nextValue) > 1e-7) {
       state.camera[property] = nextValue;
       projectionChanged = true;
@@ -4610,20 +4752,10 @@ function interpolateCamera(pct) {
   }
   if (projectionChanged) state.camera.updateProjectionMatrix();
 
-  // 5. Model pivot rotation
-  if (state.cameraModelQuaternions) {
-    const modelQ = new THREE.Quaternion();
-    interpolateSquad(
-      state.cameraModelQuaternions,
-      state.cameraModelQuaternionControls,
-      segmentIndex,
-      amount,
-      modelQ
-    );
-    const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
-    for (const pivot of modelPivots) {
-      if (pivot) pivot.quaternion.copy(modelQ);
-    }
+  const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
+  for (const pivot of modelPivots) {
+    if (!pivot) continue;
+    pivot.quaternion.copy(cameraSplineModelQuaternion);
   }
 }
 
@@ -5904,12 +6036,6 @@ function setupEventListeners() {
     state.selectedKeyframeIndex = null;
     updateSelectedKeyframeUI();
   });
-  state.controls?.addEventListener('change', () => {
-    if (state.splatEraser?.active) {
-      updateSplatEraserBrushDimensions(state.splatEraser);
-      syncSplatEraserBrushCursor();
-    }
-  });
 
   const renderCanvas = state.renderer?.domElement;
   renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
@@ -6450,18 +6576,18 @@ function setupEventListeners() {
 
   dom.btnSplatCropToggle?.addEventListener('click', () => {
     state.settings.splatCropEnabled = !state.settings.splatCropEnabled;
-    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
-    if (state.settings.splatCropEnabled) {
-      applySplatCropShape('ellipsoid');
-    } else {
-      updateSplatCropShapeUI();
-      updateSplatCropFromSettings();
+    if (!isMobileViewport() && state.settings.splatCropEnabled) {
+      state.settings.splatCropShape = 'ellipsoid';
     }
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropShapeUI();
+    updateSplatCropFromSettings();
   });
 
   for (const button of [dom.btnSplatCropShapeEllipsoid, dom.btnSplatCropShapeBox]) {
     button?.addEventListener('click', () => {
-      if (!state.settings.splatCropEnabled) {
+      if (!isMobileViewport() && !state.settings.splatCropEnabled) return;
+      if (isMobileViewport() && !state.settings.splatCropEnabled) {
         state.settings.splatCropEnabled = true;
         updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
       }
@@ -6469,6 +6595,7 @@ function setupEventListeners() {
     });
   }
   dom.btnMobileSplatCropNone?.addEventListener('click', () => {
+    if (!isMobileViewport()) return;
     state.settings.splatCropEnabled = false;
     updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
     updateSplatCropShapeUI();

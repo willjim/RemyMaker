@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.49">
+  <link rel="stylesheet" href="css/style.css?v=3.51">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -328,9 +328,9 @@
             <div class="splat-crop-shape-options" role="group" aria-label="3DGS crop shape">
               <button
                 id="btn-mobile-splat-crop-none"
-                class="splat-crop-shape-option mobile-splat-crop-none active"
+                class="splat-crop-shape-option mobile-splat-crop-none"
                 type="button"
-                aria-pressed="true"
+                aria-pressed="false"
               >None</button>
               <button
                 id="btn-splat-crop-shape-ellipsoid"
@@ -355,7 +355,7 @@
             </div>
             <div class="splat-eraser-size-row">
               <label for="setting-splat-eraser-size">Eraser Size</label>
-              <input id="setting-splat-eraser-size" type="range" min="2" max="20" step="1" value="8">
+              <input id="setting-splat-eraser-size" type="range" min="0.2" max="20" step="0.2" value="8">
               <span id="setting-splat-eraser-size-val" class="setting-val-display">8%</span>
             </div>
             <div class="splat-eraser-actions">
