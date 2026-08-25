@@ -2017,6 +2017,11 @@ body.preview-mode-active .toolbar {
   display: none !important;
 }
 
+body.preview-mode-active #canvas-container {
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
 body.preview-mode-active .preview-controls {
   position: fixed;
   right: 16px;
