@@ -61,6 +61,7 @@ export function parseSplat(buffer, onProgress, options = {}) {
     cropOutliers = true,
     cropFactor = 1.0,
     minOpacity = 0.10,
+    deferCropToGpu = false,
   } = options;
   const view = new DataView(buffer);
   const inputCount = buffer.byteLength / rowSize;
@@ -71,7 +72,7 @@ export function parseSplat(buffer, onProgress, options = {}) {
   let avgDist = 0;
   let recommendedCropFactor = 2.5;
 
-  if (cropOutliers) {
+  if (cropOutliers || deferCropToGpu) {
     let validCount = 0;
     for (let i = 0; i < inputCount; i += sampleStep) {
       const offset = i * rowSize;
@@ -138,7 +139,12 @@ export function parseSplat(buffer, onProgress, options = {}) {
     const opacity = view.getUint8(offset + 27) / 255;
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
     if (Math.abs(x) > 100 || Math.abs(y) > 100 || Math.abs(z) > 100 || opacity < minOpacity) continue;
-    if (cropOutliers && avgDist > 0 && Math.hypot(x - meanX, y - meanY, z - meanZ) > avgDist * finalCropFactor) {
+    if (
+      cropOutliers
+      && !deferCropToGpu
+      && avgDist > 0
+      && Math.hypot(x - meanX, y - meanY, z - meanZ) > avgDist * finalCropFactor
+    ) {
       continue;
     }
     positions[outputCount * 3] = x;
@@ -158,6 +164,8 @@ export function parseSplat(buffer, onProgress, options = {}) {
     colors: colors.slice(0, outputCount * 3),
     count: outputCount,
     recommendedCropFactor: finalCropFactor,
+    particleCropCenter: { x: meanX, y: meanY, z: meanZ },
+    particleCropRadius: avgDist,
   };
 }
 /**
@@ -250,7 +258,8 @@ function parseBinary(buffer, header, onProgress, options = {}) {
     maxParticles = 500000,
     cropOutliers = true,
     cropFactor = 1.0,
-    minOpacity = 0.10
+    minOpacity = 0.10,
+    deferCropToGpu = false,
   } = options;
   const { vertexCount, properties, headerLength, stride } = header;
   const dataView = new DataView(buffer, headerLength);
@@ -296,7 +305,7 @@ function parseBinary(buffer, header, onProgress, options = {}) {
   let meanX = 0, meanY = 0, meanZ = 0;
   let avgDist = 0;
   let recommendedCropFactor = 2.5;
-  if (cropOutliers && posX && posY && posZ) {
+  if ((cropOutliers || deferCropToGpu) && posX && posY && posZ) {
     let sumX = 0, sumY = 0, sumZ = 0;
     let validCount = 0;
     // Sample up to 10,000 points to compute average center of mass
@@ -387,7 +396,7 @@ function parseBinary(buffer, header, onProgress, options = {}) {
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
     if (Math.abs(x) > 100 || Math.abs(y) > 100 || Math.abs(z) > 100) continue;
     // Apply Outlier Cropping (distance filter)
-    if (cropOutliers && avgDist > 0) {
+    if (cropOutliers && !deferCropToGpu && avgDist > 0) {
       const dist = Math.sqrt((x - meanX)**2 + (y - meanY)**2 + (z - meanZ)**2);
       if (dist > avgDist * finalCropFactor) {
         continue;
@@ -484,7 +493,9 @@ function parseBinary(buffer, header, onProgress, options = {}) {
     rotations: finalRotations,
     opacities: finalOpacities,
     count: outputIdx,
-    recommendedCropFactor: finalCropFactor
+    recommendedCropFactor: finalCropFactor,
+    particleCropCenter: { x: meanX, y: meanY, z: meanZ },
+    particleCropRadius: avgDist,
   };
 }
 /**
@@ -529,7 +540,8 @@ function parseASCII(buffer, header, onProgress, options = {}) {
     maxParticles = 500000,
     cropOutliers = true,
     cropFactor = 1.0,
-    minOpacity = 0.10
+    minOpacity = 0.10,
+    deferCropToGpu = false,
   } = options;
   const decoder = new TextDecoder('ascii');
   const text = decoder.decode(new Uint8Array(buffer, header.headerLength));
@@ -584,7 +596,7 @@ function parseASCII(buffer, header, onProgress, options = {}) {
   // --- Fast pre-pass for Outlier Detection (ASCII) ---
   let meanX = 0, meanY = 0, meanZ = 0;
   let avgDist = 0;
-  if (cropOutliers && xIdx !== -1 && yIdx !== -1 && zIdx !== -1) {
+  if ((cropOutliers || deferCropToGpu) && xIdx !== -1 && yIdx !== -1 && zIdx !== -1) {
     let sumX = 0, sumY = 0, sumZ = 0;
     let validCount = 0;
     const sampleStep = Math.max(1, Math.floor(lines.length / 5000)); // Sample 5,000 for ASCII speed
@@ -633,7 +645,7 @@ function parseASCII(buffer, header, onProgress, options = {}) {
     const x = values[xIdx], y = values[yIdx], z = values[zIdx];
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
     // Apply Outlier Crop
-    if (cropOutliers && avgDist > 0) {
+    if (cropOutliers && !deferCropToGpu && avgDist > 0) {
       const dist = Math.sqrt((x - meanX)**2 + (y - meanY)**2 + (z - meanZ)**2);
       if (dist > avgDist * cropFactor) {
         continue;
@@ -680,6 +692,8 @@ function parseASCII(buffer, header, onProgress, options = {}) {
     rotations: defaultRotations,
     opacities: new Float32Array(outputIdx).fill(1.0),
     count: outputIdx,
+    particleCropCenter: { x: meanX, y: meanY, z: meanZ },
+    particleCropRadius: avgDist,
   };
 }
 /**
@@ -690,6 +704,7 @@ function parseCompressedBinary(buffer, header, onProgress, options = {}) {
     maxParticles = 500000,
     cropOutliers = true,
     cropFactor = 1.0,
+    deferCropToGpu = false,
   } = options;
   const { vertexCount, chunkCount, headerLength, vertexStride, chunkStride } = header;
   // Read Chunk Data
@@ -709,7 +724,7 @@ function parseCompressedBinary(buffer, header, onProgress, options = {}) {
   // --- Fast pre-pass for Outlier Detection (Compressed) ---
   let meanX = 0, meanY = 0, meanZ = 0;
   let avgDist = 0;
-  if (cropOutliers) {
+  if (cropOutliers || deferCropToGpu) {
     let sumX = 0, sumY = 0, sumZ = 0;
     let validCount = 0;
     const sampleStep = Math.max(1, Math.floor(vertexCount / 10000));
@@ -796,7 +811,7 @@ function parseCompressedBinary(buffer, header, onProgress, options = {}) {
     const z = minZ + (zRaw / 2047) * (maxZ - minZ);
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
     // Apply Outlier Crop
-    if (cropOutliers && avgDist > 0) {
+    if (cropOutliers && !deferCropToGpu && avgDist > 0) {
       const dist = Math.sqrt((x - meanX)**2 + (y - meanY)**2 + (z - meanZ)**2);
       if (dist > avgDist * cropFactor) {
         continue;
@@ -869,6 +884,8 @@ function parseCompressedBinary(buffer, header, onProgress, options = {}) {
     rotations: rotations.slice(0, outputIdx * 4),
     opacities: opacities.slice(0, outputIdx),
     count: outputIdx,
+    particleCropCenter: { x: meanX, y: meanY, z: meanZ },
+    particleCropRadius: avgDist,
   };
 }
 /**
