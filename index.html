@@ -108,7 +108,7 @@
           type="text"
           id="url-input"
           class="url-input"
-          placeholder="Paste Remy3D or Kiri Engine share URL..."
+          placeholder="Paste Remy3D, Kiri Engine, or Insta360 share URL..."
           autocomplete="off"
           spellcheck="false"
         >
@@ -124,7 +124,7 @@
       <div class="toolbar-divider" id="toolbar-url-divider"></div>
       
       <!-- Upload Button (Hidden) -->
-      <button id="btn-upload" class="btn btn-secondary" title="Upload local PLY or Splat file" style="display: none;">
+      <button id="btn-upload" class="btn btn-secondary" title="Upload local PLY, Splat, or SOG file" style="display: none;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
@@ -133,7 +133,7 @@
         <span class="btn-text">Upload Model</span>
       </button>
       <!-- Hidden File Input -->
-      <input type="file" id="file-input" class="file-input-hidden" accept=".ply,.splat">
+      <input type="file" id="file-input" class="file-input-hidden" accept=".ply,.splat,.sog">
       <!-- 1. 点云模式 / Spark Mode Toggle -->
       <button id="btn-toggle-spark" class="btn btn-secondary" title="Toggle 3D Reality mode">
         <svg class="ui-icon btn-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span class="btn-text">3D Reality</span>
@@ -220,6 +220,9 @@
           <option value="heart">14. 3D Cardiomorphic Loop</option>
           <option value="turbulence">15. Turbulence Noise Flight</option>
           <option value="inceptionPush">16. Inception Push & Roll</option>
+          <option value="spaceDepthPush">17. Spatial Depth Entry</option>
+          <option value="spaceLateralSweep">18. Spatial Lateral Sweep</option>
+          <option value="spaceOutwardOrbit">19. Outward Spatial Orbit</option>
         </select>
       </div>
 
@@ -236,6 +239,7 @@
           <option value="13">7. Fractal Julia Orbit (分形几何轨道重组)</option>
           <option value="14">8. Wind Snap Sweep (风吹飞砂由后向前扫拂)</option>
           <option value="17">9. Rainfall Assembly (雨点下落重组)</option>
+          <option value="20">10. Interstellar Warp Meteor Assembly (星际穿越流星汇聚)</option>
         </select>
       </div>
       
@@ -355,7 +359,7 @@
             </div>
             <div class="splat-eraser-size-row">
               <label for="setting-splat-eraser-size">Eraser Size</label>
-              <input id="setting-splat-eraser-size" type="range" min="0.2" max="20" step="0.2" value="8">
+              <input id="setting-splat-eraser-size" type="range" min="0.1" max="20" step="0.1" value="8">
               <span id="setting-splat-eraser-size-val" class="setting-val-display">8%</span>
             </div>
             <div class="splat-eraser-actions">
@@ -536,14 +540,14 @@
       <div class="landing-card">
         <div class="landing-logo"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span>RemyMaker</span></div>
         <h2>Remy 自定义特效运镜工具</h2>
-        <p>在下方输入框中粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> 或 <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 分享链接，即可开始您的 3D 粒子和 3DGS 实景体验。</p>
+        <p>在下方输入框粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>、<a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 或 Insta360 分享链接<br>即可开始您的粒子艺术和 3DGS 体验</p>
         
         <!-- Center Input Box -->
         <div class="landing-input-box">
           <input
             type="text"
             id="landing-url-input"
-            placeholder="粘贴 Remy3D 分享链接，无链接直接点击加载体验"
+            placeholder="粘贴 Remy3D、Kiri 或 Insta360 分享链接，无链接直接点击加载体验"
             autocomplete="off"
             spellcheck="false"
           >
@@ -618,6 +622,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=3.90"></script>
+  <script type="module" src="js/app.js?v=4.7"></script>
 </body>
 </html>

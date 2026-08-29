@@ -14,19 +14,28 @@ const vertexShader = /* glsl */ `
   attribute vec3 aRandomDir;
   attribute float aRandomSpeed;
   attribute float aPhaseOffset;
+  attribute float aSourceOpacity;
   attribute vec3 aColor;
   uniform float uProgress;
   uniform float uTime;
   uniform float uPointSize;
+  uniform float uLogicalPointSize;
   uniform float uSplatInterpolation;
   uniform float uTransitionDirection; // 1.0 = point cloud -> 3DGS, -1.0 = 3DGS -> point cloud
-  uniform float uVectorField; // selected vector field index (0.0 to 14.0)
+  uniform float uVectorField; // selected vector field index (0.0 to 20.0)
+  uniform float uStarModelArrivalScale;
+  uniform float uStarFlightCycles;
+  uniform vec3 uStarScaleAnchor;
   uniform float uMinY; // model minimum Y coordinate for printer scan normalization
   uniform float uMaxY; // model maximum Y coordinate for printer scan normalization
   uniform float uParticleCropEnabled;
   uniform float uParticleCropFactor;
   uniform float uParticleCropRadius;
   uniform vec3 uParticleCropCenter;
+  uniform vec3 uCameraLocalPosition;
+  uniform vec3 uCameraLocalForward;
+  uniform vec3 uCameraLocalRight;
+  uniform vec3 uCameraLocalUp;
   varying vec3 vColor;
   varying float vAlpha;
 
@@ -148,6 +157,10 @@ const vertexShader = /* glsl */ `
     float easedProgress = prog;
     vec3 scatterOffset = vec3(0.0);
     vec3 pos = aOriginalPosition;
+    float effectReveal = 1.0;
+    float effectAccent = 0.0;
+    float effectImpact = 0.0;
+    float effectModelGlow = 0.0;
     
     // --- 1. Base Floating Particle Cloud ---
     // Instead of squishing scattered particles into a single point, they float as a loose,
@@ -288,6 +301,8 @@ const vertexShader = /* glsl */ `
       float bandWidth = 0.06;
       float sweepProgress = localEasedProgress * (1.0 + bandWidth);
       localProgress = clamp((sweepProgress - printOrder) / bandWidth, 0.0, 1.0);
+    } else if (effectId == 20) {
+      localProgress = smoothstep(0.0, 1.0, uProgress);
     }
     
     // Apply center smoothing for Rain Style to make center particles disperse/gather slowly
@@ -402,6 +417,55 @@ const vertexShader = /* glsl */ `
       float rainY = pos.y + 6.0 - rainProgress;
       vec3 rainTarget = vec3(pos.x + sin(phase * 15.0) * 0.4, rainY, pos.z + cos(phase * 15.0) * 0.4);
       scatterOffset = (rainTarget - pos) * localEased;
+    } else if (effectId == 20) {
+      // 20: The model remains a coherent whole and only scales from a distant
+      // light point. A minority of its own particles become a foreground star
+      // field; they cross-fade back into place without a visible gather path.
+      float seed = fract(phase / 6.2831853);
+      float gatherProgress = 1.0 - localEased;
+      float modelGatherProgress = clamp(gatherProgress * uStarModelArrivalScale, 0.0, 1.0);
+      float scaleApproach = pow(smoothstep(0.04, 1.0, modelGatherProgress), 1.20);
+      float modelScale = mix(0.00065, 1.0, scaleApproach);
+      // Scale around the detected subject anchor rather than the PLY coordinate
+      // origin. Its projection in the first camera frame therefore remains the
+      // visual arrival point, including deliberately off-centre compositions.
+      vec3 coherentModelPosition = uStarScaleAnchor
+        + (pos - uStarScaleAnchor) * modelScale;
+
+      float starDepthSeed = fract(seed * 47.13 + aRandomDir.x * 0.17);
+      float starMask = step(0.90, fract(seed * 83.71 + aRandomDir.z * 0.19));
+      // Progress-based phase keeps the effect truly reversible. Multiplying by
+      // the active duration preserves the same real-world speed in 4.75 s and
+      // 14 s previews while reversing correctly during particle dissipation.
+      float flightCycle = fract(
+        gatherProgress * uStarFlightCycles * (0.56 + starDepthSeed * 0.24)
+        + starDepthSeed * 0.92
+      );
+      float flightProgress = 1.0 - pow(1.0 - flightCycle, 2.45);
+      float starDepth = mix(12.0 + starDepthSeed * 5.0, 0.07 + starDepthSeed * 0.34, flightProgress);
+      // Hold screen-plane coordinates steady in world space. Apparent outward
+      // motion now comes only from perspective as the particle rushes forward.
+      float starSpread = 3.80 + starDepthSeed * 1.60;
+      vec3 flyingStarPosition = uCameraLocalPosition
+        + uCameraLocalForward * starDepth
+        + uCameraLocalRight * (aRandomDir.x * starSpread)
+        + uCameraLocalUp * (aRandomDir.y * starSpread);
+
+      float handoffStart = 0.72 + starDepthSeed * 0.16;
+      float starHandoff = smoothstep(
+        handoffStart,
+        min(1.0, handoffStart + 0.12),
+        modelGatherProgress
+      );
+      float settledStar = step(0.5, starHandoff);
+      float renderAsModel = max(1.0 - starMask, settledStar);
+      float handoffVisibility = smoothstep(0.05, 0.46, abs(starHandoff - 0.5));
+      vec3 effectPosition = mix(flyingStarPosition, coherentModelPosition, renderAsModel);
+      scatterOffset = effectPosition - pos;
+      effectReveal = mix(1.0, handoffVisibility, starMask);
+      effectAccent = starMask * (1.0 - settledStar);
+      effectImpact = effectAccent * pow(flightProgress, 2.20);
+      effectModelGlow = (1.0 - starMask) * (1.0 - scaleApproach);
     }
     
     // Tiny subtle per-particle jitter (keeps points alive without crawling/flowing on the surface)
@@ -429,6 +493,22 @@ const vertexShader = /* glsl */ `
     float spatialTransition = mix(1.0 - reverseCloudReveal, localSplatInterp, outwardMode);
 
     vec3 posInterp = mix(pointCloudPos, aOriginalPosition, spatialTransition);
+    if (effectId == 20) {
+      if (outwardMode > 0.5) {
+        // Interstellar -> 3DGS: never pull the star field into a temporary ball.
+        // The existing center-out wave instead pushes each point radially away
+        // while its alpha fades and the Gaussian layer becomes visible.
+        vec3 burstDirection = normalize(aOriginalPosition + aRandomDir * 0.18 + vec3(0.0001));
+        float burstProgress = smoothstep(0.0, 1.0, localSplatInterp);
+        float burstDistance = (0.42 + aRandomSpeed * 0.24) * burstProgress;
+        posInterp = pointCloudPos + burstDirection * burstDistance;
+      } else {
+        // 3DGS -> interstellar particles is a visibility cross-fade. Keeping
+        // particles at their current effect positions removes the unwanted
+        // full-size model -> spherical point shrink during mode switching.
+        posInterp = pointCloudPos;
+      }
+    }
     vec4 mvPosition = modelViewMatrix * vec4(posInterp, 1.0);
     gl_Position = projectionMatrix * mvPosition;
    
@@ -437,6 +517,16 @@ const vertexShader = /* glsl */ `
     float standardSize = uPointSize * sizeAttenuation;
     standardSize = clamp(standardSize, 1.5, 80.0);
     standardSize *= (1.0 + easedProgress * 0.5);
+    if (effectId == 20) {
+      float modelDotSize = min(standardSize * (1.0 + effectModelGlow * 2.8), 11.0);
+      // Keep distant stars restrained, then grow them more aggressively as
+      // they approach the camera to strengthen the fly-through impact.
+      float starPointSize = min(
+        standardSize * (0.46 + effectAccent * 0.30 + effectImpact * 3.60),
+        20.0
+      );
+      standardSize = mix(modelDotSize, starPointSize, effectAccent);
+    }
 
     // Fade out particles when they are dissipated for effects 1, 3, 11, and 14
     float fadeOut = 1.0;
@@ -472,14 +562,19 @@ const vertexShader = /* glsl */ `
       vec3 rainColor = vec3(0.4, 0.8, 1.0);
       shadedColor = mix(shadedColor, rainColor * 1.5, rainGlow * 0.7);
       gl_PointSize *= (1.0 + rainGlow * 0.3);
+    } else if (effectId == 20) {
+      vec3 starColor = vec3(1.0);
+      shadedColor = mix(shadedColor, starColor * (1.55 + effectImpact * 0.85), effectAccent * 0.98);
     }
     vColor = shadedColor;
     
     float pointCloudAlpha = mix(1.0, 0.08, easedProgress);
+    if (effectId == 20) pointCloudAlpha = mix(1.0, min(1.0, 0.68 + effectImpact * 0.32), effectAccent);
     float forwardAlpha = pointCloudAlpha * pow(1.0 - localSplatInterp, 3.0) + forwardBand * 0.12;
     float reverseAlpha = pointCloudAlpha * pow(reverseCloudReveal, 1.8);
     reverseAlpha += reverseBand * 0.28 * (1.0 - uSplatInterpolation);
-    vAlpha = mix(reverseAlpha, forwardAlpha, outwardMode) * fadeOut;
+    vAlpha = mix(reverseAlpha, forwardAlpha, outwardMode)
+      * fadeOut * effectReveal * clamp(aSourceOpacity, 0.0, 1.0);
   }
 `;
 // Fragment Shader
@@ -488,40 +583,55 @@ const fragmentShader = /* glsl */ `
   varying float vAlpha;
   uniform float uParticleBrightness;
   uniform float uPointSize;
+  uniform float uLogicalPointSize;
   uniform float uParticleSoftness;
   uniform float uParticleOpacity;
+  uniform float uExportColorCompensation;
  
   void main() {
     
     vec2 center = gl_PointCoord - vec2(0.5);
     float dist = length(center);
     
-    // --- Point Cloud Mode: Soft Gaussian Radial-Fade Glow Dot ---
+    // --- Point Cloud Mode: Ring-free radial particle core ---
     // Normalized distance: 0.0 at center, 1.0 at edge of point quad
     float r = dist * 2.0; // r in [0, 1] within the point sprite
-    // Gaussian-like soft falloff: bright center, smooth fade to transparent edge
-    float sharpAlpha = smoothstep(1.0, 0.95, r);
-    float softAlpha = max(0.0, 1.0 - r);
-    softAlpha = softAlpha * softAlpha;
-    float glowAlpha = mix(sharpAlpha, softAlpha, uParticleSoftness);
-
-    float finalAlpha = glowAlpha;
+    // A single monotonic curve replaces the former hard-disc/soft-glow blend.
+    // It has no secondary shoulder near the perimeter, so enlarged particles
+    // fade continuously without revealing a circular halo boundary.
+    float radialFade = 1.0 - smoothstep(0.0, 1.0, clamp(r, 0.0, 1.0));
+    float falloffPower = mix(3.6, 1.8, uParticleSoftness);
+    float coreAlpha = pow(radialFade, falloffPower);
+    // A broad, low-opacity aura restores the luminous point-cloud character.
+    // Both terms are monotonic and reach zero together, so there is no separate
+    // halo shoulder or visible circular boundary around enlarged particles.
+    float auraAlpha = pow(radialFade, 1.25) * mix(0.10, 0.24, uParticleSoftness);
+    float finalAlpha = 1.0 - (1.0 - coreAlpha) * (1.0 - auraAlpha);
     // Discard nearly invisible fragments for performance
     if (finalAlpha < 0.005) {
       discard;
     }
-    // In point cloud mode, the color IS the glow — no additional lighting needed.
-    // With AdditiveBlending, overlapping particles naturally accumulate brightness
-    // in dense areas, creating the luminous artistic look.
-    // We scale down individual particle brightness so that accumulation
-    // in dense regions produces the desired bright glow (not overblown white).
-    vec3 finalColor = vColor;
-    // Gentle brightness: each particle contributes a fraction,
-    // additive overlap in dense areas makes them glow bright.
-    finalColor *= uParticleBrightness;
-    float sizeComp = clamp(0.20 / uPointSize, 0.2, 2.5);
-    finalColor *= sizeComp;
-    gl_FragColor = vec4(finalColor, finalAlpha * vAlpha * uParticleOpacity);
+    // Keep additive emission, but softly compress part of the per-particle peak
+    // before it reaches the framebuffer. This retains some source hue while
+    // still allowing dense regions to build warm gold/white luminous highlights.
+    // Export resolution may change the rasterized point size. Brightness must
+    // follow the user's logical size instead, otherwise high-DPR exports become
+    // brighter/whiter than the interactive preview.
+    float sizeComp = clamp(0.20 / uLogicalPointSize, 0.2, 2.5);
+    float emissionGain = max(0.0, uParticleBrightness) * sizeComp;
+    float sourcePeak = max(max(vColor.r, vColor.g), max(vColor.b, 0.00001));
+    float rawPeak = sourcePeak * emissionGain;
+    float compressedPeak = 1.0 - exp(-rawPeak);
+    float balancedPeak = min(mix(rawPeak, compressedPeak, 0.45), 1.25);
+    vec3 emittedColor = vColor * (balancedPeak / sourcePeak);
+    // AVC commonly stores video as 4:2:0, which slightly desaturates tiny
+    // colored particles against a dark background. Compensate only while
+    // exporting; the interactive preview remains unchanged.
+    float emittedLuma = dot(emittedColor, vec3(0.2126, 0.7152, 0.0722));
+    vec3 exportColor = mix(vec3(emittedLuma), emittedColor, 1.10) * 1.015;
+    emittedColor = mix(emittedColor, max(exportColor, vec3(0.0)), uExportColorCompensation);
+    float particleAlpha = clamp(finalAlpha * vAlpha * uParticleOpacity, 0.0, 1.0);
+    gl_FragColor = vec4(emittedColor, particleAlpha);
   }
 `;
 
@@ -552,6 +662,15 @@ export class ParticleSystem {
     this.pivot = null; // group for rotation
     this.isGestureActive = false;
     this.density = 1.0;
+    this.cameraWorldPosition = new THREE.Vector3();
+    this.cameraWorldForward = new THREE.Vector3();
+    this.cameraWorldUp = new THREE.Vector3();
+    this.cameraLocalPosition = new THREE.Vector3();
+    this.cameraLocalForward = new THREE.Vector3(0, 0, -1);
+    this.cameraLocalRight = new THREE.Vector3(1, 0, 0);
+    this.cameraLocalUp = new THREE.Vector3(0, 1, 0);
+    this.inversePointsWorld = new THREE.Matrix4();
+    this.cameraWorldQuaternion = new THREE.Quaternion();
   }
   /**
    * Create particle system from parsed PLY data.
@@ -559,7 +678,7 @@ export class ParticleSystem {
    * @param {THREE.Scene} scene
    */
   createFromData(data, scene) {
-    const { positions, colors, count } = data;
+    const { positions, colors, opacities, count } = data;
     this.particleCount = count;
     // Clean up existing
     this.dispose();
@@ -593,6 +712,9 @@ export class ParticleSystem {
     const randomDirs = new Float32Array(count * 3);
     const randomSpeeds = new Float32Array(count);
     const phaseOffsets = new Float32Array(count);
+    const sourceOpacities = opacities?.length >= count
+      ? opacities
+      : new Float32Array(count).fill(1);
     for (let i = 0; i < count; i++) {
       // Random direction on unit sphere
       const theta = Math.random() * Math.PI * 2;
@@ -676,6 +798,7 @@ export class ParticleSystem {
     const orderedRandomDirs = reorderFloat32Attribute(randomDirs, 3, renderOrder);
     const orderedRandomSpeeds = reorderFloat32Attribute(randomSpeeds, 1, renderOrder);
     const orderedPhaseOffsets = reorderFloat32Attribute(phaseOffsets, 1, renderOrder);
+    const orderedSourceOpacities = reorderFloat32Attribute(sourceOpacities, 1, renderOrder);
 
     // --- Create geometry ---
     this.geometry = new THREE.BufferGeometry();
@@ -685,11 +808,11 @@ export class ParticleSystem {
     this.geometry.setAttribute('aRandomDir', new THREE.BufferAttribute(orderedRandomDirs, 3));
     this.geometry.setAttribute('aRandomSpeed', new THREE.BufferAttribute(orderedRandomSpeeds, 1));
     this.geometry.setAttribute('aPhaseOffset', new THREE.BufferAttribute(orderedPhaseOffsets, 1));
+    this.geometry.setAttribute('aSourceOpacity', new THREE.BufferAttribute(orderedSourceOpacities, 1));
     this.updateDrawRange();
     // --- Create material ---
-    // AdditiveBlending: particles accumulate brightness where they overlap
-    // depthWrite: false: particles never clip each other, free layering
-    // transparent: true: enable alpha channel for soft Gaussian falloff
+    // Additive emission lets overlapping particles build genuine luminous
+    // highlights; the fragment falloff stays monotonic to avoid halo rings.
     this.material = new THREE.ShaderMaterial({
       vertexShader,
       fragmentShader,
@@ -697,18 +820,27 @@ export class ParticleSystem {
         uProgress: { value: 0.0 },
         uTime: { value: 0.0 },
         uPointSize: { value: 0.5 },
+        uLogicalPointSize: { value: 0.5 },
         uParticleBrightness: { value: 0.7 },
         uParticleSoftness: { value: 0.7 },
         uParticleOpacity: { value: 1.0 },
+        uExportColorCompensation: { value: 0.0 },
         uSplatInterpolation: { value: 0.0 },
         uTransitionDirection: { value: 1.0 },
         uVectorField: { value: 0.0 },
+        uStarModelArrivalScale: { value: 1.0 },
+        uStarFlightCycles: { value: 4.75 },
+        uStarScaleAnchor: { value: scaledCropCenter.clone() },
         uMinY: { value: this.modelMinY },
         uMaxY: { value: this.modelMaxY },
         uParticleCropEnabled: { value: cropConfig.enabled ? 1.0 : 0.0 },
         uParticleCropFactor: { value: cropConfig.factor },
         uParticleCropRadius: { value: scaledCropRadius },
         uParticleCropCenter: { value: scaledCropCenter },
+        uCameraLocalPosition: { value: new THREE.Vector3() },
+        uCameraLocalForward: { value: new THREE.Vector3(0, 0, -1) },
+        uCameraLocalRight: { value: new THREE.Vector3(1, 0, 0) },
+        uCameraLocalUp: { value: new THREE.Vector3(0, 1, 0) },
       },
       transparent: true,
       depthWrite: false,
@@ -795,9 +927,10 @@ export class ParticleSystem {
   getShaderProgress(logicalProgress) {
     const progress = Math.max(0, Math.min(1, logicalProgress));
     const effectId = Math.round(this.material?.uniforms.uVectorField.value || 0);
-    if (effectId === 3) {
+    if (effectId === 3 || effectId === 18 || effectId === 19 || effectId === 20) {
       // Thanos assigns its subject/scene timing per particle in the shader, so it
-      // needs the full logical 0–1 range without the shared 60% compression.
+      // and the space-scene effects need the full logical 0–1 range without the
+      // shared 60% compression.
       return progress;
     }
     if (effectId === 17) {
@@ -829,11 +962,47 @@ export class ParticleSystem {
     return this.currentProgress;
   }
   /**
+   * Return the coherent-model scale used by the interstellar effect shader.
+   * Keeping this calculation in one place lets the app apply the exact same
+   * arrival scale to the 3DGS mesh during particle/reality cross-fades.
+   */
+  getStarModelScale() {
+    const effectId = Math.round(this.material?.uniforms.uVectorField?.value || 0);
+    if (effectId !== 20) return 1;
+
+    const shaderProgress = this.getShaderProgress(this.currentProgress);
+    const easedProgress = shaderProgress * shaderProgress * (3 - 2 * shaderProgress);
+    const gatherProgress = 1 - easedProgress;
+    const arrivalScale = Math.max(
+      1,
+      Number(this.material?.uniforms.uStarModelArrivalScale?.value) || 1
+    );
+    const modelGatherProgress = Math.max(0, Math.min(1, gatherProgress * arrivalScale));
+    const smoothstepInput = Math.max(0, Math.min(1, (modelGatherProgress - 0.04) / 0.96));
+    const scaleApproach = Math.pow(
+      smoothstepInput * smoothstepInput * (3 - 2 * smoothstepInput),
+      1.2
+    );
+    return THREE.MathUtils.lerp(0.00065, 1, scaleApproach);
+  }
+
+  /**
+   * Copy the shader's local scale anchor into the particle pivot's space.
+   */
+  getStarScaleAnchorInPivot(target = new THREE.Vector3()) {
+    target.copy(this.material?.uniforms.uStarScaleAnchor?.value || new THREE.Vector3());
+    if (this.points) {
+      this.points.updateMatrix();
+      target.applyMatrix4(this.points.matrix);
+    }
+    return target;
+  }
+  /**
    * Update particle system each frame.
    * @param {number} deltaTime - Time since last frame in seconds.
    * @param {number} elapsedTime - Total elapsed time in seconds.
    */
-  update(deltaTime, elapsedTime) {
+  update(deltaTime, elapsedTime, camera = null) {
     if (!this.material || !this.pivot) return;
     // Smooth interpolation of progress
     const lerpFactor = this.currentProgress < this.targetProgress ? 0.04 : 0.03;
@@ -845,6 +1014,26 @@ export class ParticleSystem {
     // Update uniforms
     this.syncProgressUniform();
     this.material.uniforms.uTime.value = elapsedTime;
+    const activeEffect = Math.round(this.material.uniforms.uVectorField.value || 0);
+    if (camera && this.points && (activeEffect === 18 || activeEffect === 19 || activeEffect === 20)) {
+      this.points.updateWorldMatrix(true, false);
+      this.inversePointsWorld.copy(this.points.matrixWorld).invert();
+      camera.getWorldPosition(this.cameraWorldPosition);
+      camera.getWorldDirection(this.cameraWorldForward);
+      camera.getWorldQuaternion(this.cameraWorldQuaternion);
+      this.cameraWorldUp.set(0, 1, 0).applyQuaternion(this.cameraWorldQuaternion);
+
+      this.cameraLocalPosition.copy(this.cameraWorldPosition).applyMatrix4(this.inversePointsWorld);
+      this.cameraLocalForward.copy(this.cameraWorldForward).transformDirection(this.inversePointsWorld);
+      this.cameraLocalUp.copy(this.cameraWorldUp).transformDirection(this.inversePointsWorld);
+      this.cameraLocalRight.crossVectors(this.cameraLocalForward, this.cameraLocalUp).normalize();
+      this.cameraLocalUp.crossVectors(this.cameraLocalRight, this.cameraLocalForward).normalize();
+
+      this.material.uniforms.uCameraLocalPosition.value.copy(this.cameraLocalPosition);
+      this.material.uniforms.uCameraLocalForward.value.copy(this.cameraLocalForward);
+      this.material.uniforms.uCameraLocalRight.value.copy(this.cameraLocalRight);
+      this.material.uniforms.uCameraLocalUp.value.copy(this.cameraLocalUp);
+    }
     // Auto rotation with slower speed during hand gesture controls
     if (this.autoRotate) {
       let speedFactor = 1.0;
@@ -854,9 +1043,15 @@ export class ParticleSystem {
       this.pivot.rotation.y += this.rotationSpeed * speedFactor * deltaTime;
     }
   }
-  setPointSize(size) {
+  setPointSize(size, logicalSize = size) {
     if (this.material) {
       this.material.uniforms.uPointSize.value = size;
+      this.material.uniforms.uLogicalPointSize.value = logicalSize;
+    }
+  }
+  setExportColorCompensation(enabled) {
+    if (this.material?.uniforms.uExportColorCompensation) {
+      this.material.uniforms.uExportColorCompensation.value = enabled ? 1.0 : 0.0;
     }
   }
   /**
@@ -932,6 +1127,111 @@ export class ParticleSystem {
       this.material.uniforms.uVectorField.value = parseFloat(index);
       this.syncProgressUniform();
     }
+  }
+  setStarFlightTiming(duration, modelArrivalDuration = 4.75) {
+    if (this.material) {
+      const safeDuration = Math.max(0.1, Number(duration) || 4.75);
+      const safeModelDuration = Math.max(0.1, Number(modelArrivalDuration) || 4.75);
+      this.material.uniforms.uStarModelArrivalScale.value = Math.max(1.0, safeDuration / safeModelDuration);
+      // The effect picker demo traverses a direction in 2.5 s. This multiplier
+      // keeps preview/export velocity perceptually identical to that demo.
+      this.material.uniforms.uStarFlightCycles.value = safeDuration * 1.85;
+    }
+  }
+  /**
+   * Capture the visible model's robust screen-space center in the current
+   * camera frame and convert it back to point-local space. Effect 20 can then
+   * shrink toward the actual first-frame composition instead of the PLY origin.
+   */
+  captureStarScaleAnchor(camera, firstFrameTarget = null) {
+    if (!camera || !this.points || !this.geometry || !this.material) return;
+    const effectId = Math.round(this.material.uniforms.uVectorField?.value || 0);
+    if (effectId !== 20 || !this.material.uniforms.uStarScaleAnchor) return;
+
+    const position = this.geometry.getAttribute('position');
+    if (!position?.count) return;
+    this.points.updateWorldMatrix(true, false);
+    camera.updateMatrixWorld(true);
+
+    const modelView = new THREE.Matrix4().multiplyMatrices(
+      camera.matrixWorldInverse,
+      this.points.matrixWorld
+    );
+    const inverseWorld = new THREE.Matrix4().copy(this.points.matrixWorld).invert();
+    // OrbitControls' target is the exact focal point chosen by the user for the
+    // first frame. Prefer it over any model-content estimate so large indoor
+    // backgrounds cannot pull the arrival point toward a corner of the screen.
+    if (
+      firstFrameTarget?.isVector3
+      && Number.isFinite(firstFrameTarget.x)
+      && Number.isFinite(firstFrameTarget.y)
+      && Number.isFinite(firstFrameTarget.z)
+    ) {
+      const anchorLocal = firstFrameTarget.clone().applyMatrix4(inverseWorld);
+      this.material.uniforms.uStarScaleAnchor.value.copy(anchorLocal);
+      return;
+    }
+    const localPoint = new THREE.Vector3();
+    const viewPoint = new THREE.Vector3();
+    const projectedPoint = new THREE.Vector3();
+    const visible = [];
+    const fallback = [];
+    const visibleCount = Math.min(
+      position.count,
+      Number.isFinite(this.geometry.drawRange.count)
+        ? this.geometry.drawRange.count
+        : position.count
+    );
+    const step = Math.max(1, Math.floor(visibleCount / 6000));
+    const cropEnabled = this.material.uniforms.uParticleCropEnabled?.value > 0.5;
+    const cropCenter = this.material.uniforms.uParticleCropCenter?.value;
+    const cropLimit = (this.material.uniforms.uParticleCropRadius?.value || 0)
+      * (this.material.uniforms.uParticleCropFactor?.value || 1);
+
+    for (let index = 0; index < visibleCount; index += step) {
+      localPoint.fromBufferAttribute(position, index);
+      if (cropEnabled && cropCenter && cropLimit > 0 && localPoint.distanceTo(cropCenter) > cropLimit) {
+        continue;
+      }
+      viewPoint.copy(localPoint).applyMatrix4(modelView);
+      if (!Number.isFinite(viewPoint.z) || viewPoint.z >= -0.001) continue;
+      projectedPoint.copy(viewPoint).applyMatrix4(camera.projectionMatrix);
+      if (!Number.isFinite(projectedPoint.x) || !Number.isFinite(projectedPoint.y)) continue;
+      const sample = {
+        x: projectedPoint.x,
+        y: projectedPoint.y,
+        depth: -viewPoint.z,
+      };
+      if (Math.abs(sample.x) <= 4 && Math.abs(sample.y) <= 4) fallback.push(sample);
+      if (
+        Math.abs(sample.x) <= 1.02
+        && Math.abs(sample.y) <= 1.02
+        && projectedPoint.z >= -1
+        && projectedPoint.z <= 1
+      ) {
+        visible.push(sample);
+      }
+    }
+
+    const samples = visible.length >= 24 ? visible : fallback;
+    if (samples.length < 4) return;
+    const xs = samples.map(sample => sample.x).sort((a, b) => a - b);
+    const ys = samples.map(sample => sample.y).sort((a, b) => a - b);
+    const depths = samples.map(sample => sample.depth).sort((a, b) => a - b);
+    const percentile = (values, ratio) => values[
+      Math.max(0, Math.min(values.length - 1, Math.round((values.length - 1) * ratio)))
+    ];
+    const screenX = (percentile(xs, 0.10) + percentile(xs, 0.90)) * 0.5;
+    const screenY = (percentile(ys, 0.10) + percentile(ys, 0.90)) * 0.5;
+    const depth = percentile(depths, 0.50);
+    const projection = camera.projectionMatrix.elements;
+    const anchorView = new THREE.Vector3(
+      screenX * depth / projection[0],
+      screenY * depth / projection[5],
+      -depth
+    );
+    const anchorLocal = anchorView.applyMatrix4(camera.matrixWorld).applyMatrix4(inverseWorld);
+    this.material.uniforms.uStarScaleAnchor.value.copy(anchorLocal);
   }
   /**
    * Set viewport size (for focal length calculations in shader).

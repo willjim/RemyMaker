@@ -1,13 +1,13 @@
 /**
  * Main Application
- * Orchestrates Three.js scene, PLY loading, particle system, and gesture control.
+ * Orchestrates Three.js scene, model loading, particle system, and gesture control.
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
-import { ParticleSystem } from './particleSystem.js?v=3.5';
+import { ParticleSystem } from './particleSystem.js?v=6.3';
 import { GestureControl } from './gestureControl.js?v=1.1';
-import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.1';
+import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.2';
 import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
@@ -85,6 +85,15 @@ const state = {
   sparkRenderer: null,
   splatMesh: null,
   splatPivot: null,
+  splatCropEdit: null,
+  splatCropSdf: null,
+  splatCropHelper: null,
+  splatCropHandles: null,
+  splatCropDrag: null,
+  splatEraser: null,
+  subjectCropBounds: null,
+  sparkCropApi: null,
+  sparkPainterApi: null,
   lang: getInitialLanguage(), // default to Chinese unless English was explicitly selected
   isModelLoaded: false,
   isGestureActive: false,
@@ -92,6 +101,7 @@ const state = {
   manualControl: false,     // true when user drags the slider
   splatInterpolation: 0.0,   // default starts fully at Particle Cloud (0.0)
   splatInterpolationTarget: 0.0,
+  sparkPrewarmActive: false,
   fps: 0,
   frameCount: 0,
   lastFpsTime: 0,
@@ -108,11 +118,22 @@ const state = {
   initialZoomScale: 1.0,    // scale when zoom gesture started
   keyframes: [],            // full camera snapshots used by custom paths and viewpoint recall
   selectedKeyframeIndex: null,
+  cameraKeyframeTimes: null,
   cameraSphericalPoints: null,
-  cameraSphericalTangents: null,
-  cameraLockedTarget: null,
-  cameraTimingCurve: null,
-  cameraTimingLength: 0,
+  cameraSphericalVelocities: null,
+  cameraFilteredTargets: null,
+  cameraTargetVelocities: null,
+  cameraProjectionValues: null,
+  cameraProjectionVelocities: null,
+  cameraQuaternions: null,
+  cameraQuaternionControls: null,
+  cameraModelQuaternions: null,
+  cameraModelQuaternionControls: null,
+  cameraPositionCurve: null,
+  cameraTargetCurve: null,
+  cameraMotionProgress: null,
+  cameraMotionDistances: null,
+  cameraMotionTotal: 0,
   cameraModeActive: false,  // true when camera path panel is visible
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
@@ -120,6 +141,7 @@ const state = {
   cameraPathFirstFrame: null,
   restoreCameraPathFirstFrameOnOpen: false,
   previewCompleted: false,
+  previewZoomWasEnabled: true,
   previewInitialRenderer: null,
   previewRendererTimeline: [],
   lastFlightGatherPercent: -1,
@@ -143,8 +165,12 @@ const state = {
     maxParticles: 500000,
     cropOutliers: true,
     cropFactor: 2.5,
+    splatCropEnabled: false,
+    splatCropShape: 'ellipsoid',
+    splatCropRadiiScale: { x: 1, y: 1, z: 1 },
+    splatCropOffset: { x: 0, y: 0, z: 0 },
     minOpacity: 0.50,
-    pointSize: 0.20,         // default point size 0.20 for soft overlapping glow dots (AdditiveBlending)
+    pointSize: 0.20,         // default point size for soft additive-glow particles
     pointDensity: 1.00,      // default point cloud density (100%)
     particleBrightness: 0.70, // default particle brightness multiplier
     particleSoftness: 0.70,   // default softness multiplier
@@ -153,10 +179,1719 @@ const state = {
     presetFlight: 'none',   // active preset flight
     originalFov: 60.0,      // camera base field of view
     flightStartSpherical: { radius: 1.0, phi: Math.PI / 2, theta: 0 }, // cache starting spherical coords
-    scatterEffect: 0.0,     // active scatter effect index (0 to 14)
+    scatterEffect: 0.0,     // active scatter effect index (0 to 20)
     particleEffectEnabled: false,
   }
 };
+
+function getSortedQuantile(sortedValues, quantile) {
+  if (!sortedValues.length) return 0;
+  const index = Math.max(0, Math.min(
+    sortedValues.length - 1,
+    Math.round((sortedValues.length - 1) * quantile)
+  ));
+  return sortedValues[index];
+}
+
+/**
+ * Estimate an axis-aligned subject ellipsoid from a bounded sample of visible
+ * splat centers. The two-pass robust-distance trim prevents a small number of
+ * remote scene splats from stretching the crop volume around the background.
+ */
+function estimateSubjectEllipsoid(positions) {
+  const pointCount = Math.floor((positions?.length || 0) / 3);
+  if (!pointCount) {
+    return {
+      center: new THREE.Vector3(),
+      radii: new THREE.Vector3(1, 1, 1),
+      sampleCount: 0,
+    };
+  }
+
+  const maxSamples = 24000;
+  const sampleCount = Math.min(pointCount, maxSamples);
+  const step = pointCount / sampleCount;
+  const samples = [];
+  const axes = [[], [], []];
+
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+    const pointIndex = Math.min(pointCount - 1, Math.floor(sampleIndex * step));
+    const offset = pointIndex * 3;
+    const x = positions[offset];
+    const y = positions[offset + 1];
+    const z = positions[offset + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    samples.push({ x, y, z });
+    axes[0].push(x);
+    axes[1].push(y);
+    axes[2].push(z);
+  }
+
+  if (!samples.length) {
+    return {
+      center: new THREE.Vector3(),
+      radii: new THREE.Vector3(1, 1, 1),
+      sampleCount: 0,
+    };
+  }
+
+  axes.forEach(axis => axis.sort((a, b) => a - b));
+  const firstCenter = new THREE.Vector3(
+    getSortedQuantile(axes[0], 0.5),
+    getSortedQuantile(axes[1], 0.5),
+    getSortedQuantile(axes[2], 0.5)
+  );
+  const deviations = [[], [], []];
+  for (const sample of samples) {
+    deviations[0].push(Math.abs(sample.x - firstCenter.x));
+    deviations[1].push(Math.abs(sample.y - firstCenter.y));
+    deviations[2].push(Math.abs(sample.z - firstCenter.z));
+  }
+  deviations.forEach(axis => axis.sort((a, b) => a - b));
+  const robustScale = new THREE.Vector3(
+    Math.max(getSortedQuantile(deviations[0], 0.5), 1e-5),
+    Math.max(getSortedQuantile(deviations[1], 0.5), 1e-5),
+    Math.max(getSortedQuantile(deviations[2], 0.5), 1e-5)
+  );
+
+  const scoredSamples = samples.map(sample => {
+    const dx = (sample.x - firstCenter.x) / robustScale.x;
+    const dy = (sample.y - firstCenter.y) / robustScale.y;
+    const dz = (sample.z - firstCenter.z) / robustScale.z;
+    return { sample, distance: Math.hypot(dx, dy, dz) };
+  }).sort((a, b) => a.distance - b.distance);
+  const coreLimit = getSortedQuantile(scoredSamples.map(item => item.distance), 0.78);
+  const coreSamples = scoredSamples
+    .filter(item => item.distance <= coreLimit)
+    .map(item => item.sample);
+  const subjectSamples = coreSamples.length >= 16 ? coreSamples : samples;
+  const subjectAxes = [[], [], []];
+  for (const sample of subjectSamples) {
+    subjectAxes[0].push(sample.x);
+    subjectAxes[1].push(sample.y);
+    subjectAxes[2].push(sample.z);
+  }
+  subjectAxes.forEach(axis => axis.sort((a, b) => a - b));
+  const center = new THREE.Vector3(
+    getSortedQuantile(subjectAxes[0], 0.5),
+    getSortedQuantile(subjectAxes[1], 0.5),
+    getSortedQuantile(subjectAxes[2], 0.5)
+  );
+  const subjectDeviations = [[], [], []];
+  for (const sample of subjectSamples) {
+    subjectDeviations[0].push(Math.abs(sample.x - center.x));
+    subjectDeviations[1].push(Math.abs(sample.y - center.y));
+    subjectDeviations[2].push(Math.abs(sample.z - center.z));
+  }
+  subjectDeviations.forEach(axis => axis.sort((a, b) => a - b));
+
+  const radii = new THREE.Vector3(
+    getSortedQuantile(subjectDeviations[0], 0.99) * 1.14,
+    getSortedQuantile(subjectDeviations[1], 0.99) * 1.14,
+    getSortedQuantile(subjectDeviations[2], 0.99) * 1.14
+  );
+  const longestRadius = Math.max(radii.x, radii.y, radii.z, 1e-3);
+  const minimumRadius = longestRadius * 0.08;
+  radii.set(
+    Math.max(radii.x, minimumRadius),
+    Math.max(radii.y, minimumRadius),
+    Math.max(radii.z, minimumRadius)
+  );
+
+  return { center, radii, sampleCount: samples.length };
+}
+
+function analyzeParticleCropBounds(positions, count) {
+  const safeCount = Math.min(count || 0, Math.floor((positions?.length || 0) / 3));
+  if (!positions || safeCount <= 0) {
+    return {
+      center: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      recommendedFactor: 2.5,
+    };
+  }
+
+  const sampleLimit = Math.min(10000, safeCount);
+  const sampleStep = Math.max(1, Math.floor(safeCount / sampleLimit));
+  const samples = [];
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+
+  for (let i = 0; i < safeCount && samples.length < sampleLimit; i += sampleStep) {
+    const offset = i * 3;
+    const x = positions[offset];
+    const y = positions[offset + 1];
+    const z = positions[offset + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    samples.push([x, y, z]);
+    sumX += x;
+    sumY += y;
+    sumZ += z;
+  }
+
+  if (samples.length === 0) {
+    return {
+      center: { x: 0, y: 0, z: 0 },
+      radius: 0,
+      recommendedFactor: 2.5,
+    };
+  }
+
+  const center = {
+    x: sumX / samples.length,
+    y: sumY / samples.length,
+    z: sumZ / samples.length,
+  };
+  const distances = samples
+    .map(([x, y, z]) => Math.hypot(x - center.x, y - center.y, z - center.z))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  if (distances.length === 0) {
+    return { center, radius: 0, recommendedFactor: 2.5 };
+  }
+
+  const radius = distances[Math.floor(distances.length * 0.5)];
+  if (!(radius > 0)) {
+    return { center, radius: 0, recommendedFactor: 2.5 };
+  }
+
+  let farCount = 0;
+  let sumSqDiff = 0;
+  for (const distance of distances) {
+    sumSqDiff += (distance - radius) ** 2;
+    if (distance > radius * 1.8) farCount++;
+  }
+  const coefficientOfVariation = Math.sqrt(sumSqDiff / distances.length) / radius;
+  const farRatio = farCount / distances.length;
+  let recommendedFactor = 2.5;
+  if (coefficientOfVariation > 0.8) {
+    recommendedFactor = farRatio < 0.05 ? 1.5 : (farRatio < 0.12 ? 2.0 : 3.0);
+  }
+
+  return { center, radius, recommendedFactor };
+}
+
+function isSplatCropEnabled() {
+  return state.settings.splatCropEnabled;
+}
+
+function updateCropToggleUI(button, enabled, mode) {
+  if (!button) return;
+  const isParticle = mode === 'particle';
+  const modeName = state.lang === 'zh'
+    ? (isParticle ? '粒子裁剪' : '3DGS 裁剪')
+    : (isParticle ? 'Particle crop' : '3DGS crop');
+  button.classList.toggle('active', enabled);
+  button.setAttribute('aria-pressed', String(enabled));
+  button.setAttribute(
+    'aria-label',
+    state.lang === 'zh'
+      ? `${enabled ? '关闭' : '打开'}${modeName}`
+      : `${enabled ? 'Disable' : 'Enable'} ${modeName}`
+  );
+  button.title = state.lang === 'zh'
+    ? `${modeName}：${enabled ? '开启' : '关闭'}`
+    : `${modeName}: ${enabled ? 'On' : 'Off'}`;
+}
+
+function normalizeSplatCropShape(shape) {
+  return shape === 'box' ? 'box' : 'ellipsoid';
+}
+
+function updateSplatCropShapeUI() {
+  const shape = normalizeSplatCropShape(state.settings.splatCropShape);
+  const mobileCropDisabled = isMobileViewport() && !state.settings.splatCropEnabled;
+  const cropDisabled = !state.settings.splatCropEnabled;
+  const buttons = [
+    [dom.btnSplatCropShapeEllipsoid, 'ellipsoid'],
+    [dom.btnSplatCropShapeBox, 'box'],
+  ];
+  for (const [button, buttonShape] of buttons) {
+    if (!button) continue;
+    const selected = buttonShape === shape && !cropDisabled;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  if (dom.btnMobileSplatCropNone) {
+    dom.btnMobileSplatCropNone.classList.toggle('active', mobileCropDisabled);
+    dom.btnMobileSplatCropNone.setAttribute('aria-pressed', String(mobileCropDisabled));
+  }
+}
+
+function disposeObject3DResources(root) {
+  if (!root) return;
+  const geometries = new Set();
+  const materials = new Set();
+  root.traverse((object) => {
+    if (object.geometry) geometries.add(object.geometry);
+    const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of objectMaterials) {
+      if (material) materials.add(material);
+    }
+  });
+  geometries.forEach((geometry) => geometry.dispose());
+  materials.forEach((material) => material.dispose());
+}
+
+function createEllipsoidCropGuideGeometry() {
+  const positions = [];
+  const longitudeCount = 12;
+  const latitudeRingCount = 6;
+  // These subdivisions smooth each curve; they do not add visible grid lines.
+  const meridianCurveSegments = 32;
+  const latitudeCurveSegments = 48;
+  const addPoint = (phi, theta) => {
+    const sinPhi = Math.sin(phi);
+    positions.push(
+      sinPhi * Math.cos(theta),
+      Math.cos(phi),
+      sinPhi * Math.sin(theta)
+    );
+  };
+
+  for (let longitude = 0; longitude < longitudeCount; longitude += 1) {
+    const theta = (longitude / longitudeCount) * Math.PI * 2;
+    for (let segment = 0; segment < meridianCurveSegments; segment += 1) {
+      addPoint((segment / meridianCurveSegments) * Math.PI, theta);
+      addPoint(((segment + 1) / meridianCurveSegments) * Math.PI, theta);
+    }
+  }
+
+  for (let latitude = 1; latitude <= latitudeRingCount; latitude += 1) {
+    const phi = (latitude / (latitudeRingCount + 1)) * Math.PI;
+    for (let segment = 0; segment < latitudeCurveSegments; segment += 1) {
+      addPoint(phi, (segment / latitudeCurveSegments) * Math.PI * 2);
+      addPoint(phi, ((segment + 1) / latitudeCurveSegments) * Math.PI * 2);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute([...positions], 3));
+  return geometry;
+}
+
+function createBoxCropGuideGeometry() {
+  const surfaceGeometry = new THREE.BoxGeometry(2, 2, 2);
+  const geometry = new THREE.EdgesGeometry(surfaceGeometry);
+  surfaceGeometry.dispose();
+  const positions = geometry.getAttribute('position');
+  const normals = new Float32Array(positions.count * 3);
+
+  for (let index = 0; index < positions.count; index += 1) {
+    const x = positions.getX(index);
+    const y = positions.getY(index);
+    const z = positions.getZ(index);
+    const inverseLength = 1 / Math.hypot(x, y, z);
+    normals[index * 3] = x * inverseLength;
+    normals[index * 3 + 1] = y * inverseLength;
+    normals[index * 3 + 2] = z * inverseLength;
+  }
+
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  return geometry;
+}
+
+function createBoxCropDiagonalGeometry() {
+  const positions = [
+    -1, -1, -1, -1, 1, 1,
+     1, -1, -1,  1, 1, 1,
+    -1, -1, -1,  1, -1, 1,
+    -1,  1, -1,  1, 1, 1,
+    -1, -1, -1,  1, 1, -1,
+    -1, -1,  1,  1, 1, 1,
+  ];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(
+    positions.map(value => value / Math.sqrt(3)),
+    3
+  ));
+  return geometry;
+}
+
+function createDepthCuedCropGuideMaterial(nearOpacity = 0.82, farOpacity = 0.32) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      guideColor: { value: new THREE.Color(0x00a8ff) },
+      nearOpacity: { value: nearOpacity },
+      farOpacity: { value: farOpacity },
+    },
+    vertexShader: /* glsl */ `
+      varying float vFacing;
+
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vec3 viewNormal = normalize(normalMatrix * normal);
+        vec3 viewDirection = normalize(-viewPosition.xyz);
+        vFacing = dot(viewNormal, viewDirection);
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 guideColor;
+      uniform float nearOpacity;
+      uniform float farOpacity;
+      varying float vFacing;
+
+      void main() {
+        float facingBlend = smoothstep(-0.06, 0.06, vFacing);
+        gl_FragColor = vec4(guideColor, mix(farOpacity, nearOpacity, facingBlend));
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+}
+
+function createSplatCropHelper(shape) {
+  const normalizedShape = normalizeSplatCropShape(shape);
+  const helper = new THREE.Group();
+  const guideLines = new THREE.LineSegments(
+    normalizedShape === 'ellipsoid'
+      ? createEllipsoidCropGuideGeometry()
+      : createBoxCropGuideGeometry(),
+    createDepthCuedCropGuideMaterial()
+  );
+  guideLines.name = normalizedShape === 'ellipsoid'
+    ? '3DGS Crop Ellipsoid Guide'
+    : '3DGS Crop Box Guide';
+  guideLines.renderOrder = 9999;
+  helper.add(guideLines);
+  if (normalizedShape === 'box') {
+    const diagonalLines = new THREE.LineSegments(
+      createBoxCropDiagonalGeometry(),
+      createDepthCuedCropGuideMaterial(0.28, 0.11)
+    );
+    diagonalLines.name = '3DGS Crop Box Face Diagonals';
+    diagonalLines.renderOrder = 9998;
+    helper.add(diagonalLines);
+  }
+  helper.name = normalizedShape === 'box'
+    ? '3DGS Subject Crop Box'
+    : '3DGS Subject Crop Ellipsoid';
+  helper.userData.cropShape = normalizedShape;
+  return helper;
+}
+
+const SPLAT_CROP_AXIS_COLORS = {
+  x: 0xff5365,
+  y: 0x3dc76f,
+  z: 0x347eff,
+};
+
+function createSplatCropHandles(bounds) {
+  const handles = new THREE.Group();
+  handles.name = '3DGS Crop Face Handles';
+  const handleLength = Math.max(bounds.radii.x, bounds.radii.y, bounds.radii.z, 1e-3) * 0.2;
+  const shaftLength = handleLength * 0.58;
+  const coneLength = handleLength * 0.34;
+  const shaftRadius = handleLength * 0.055;
+  const coneRadius = handleLength * 0.15;
+  const defaultDirection = new THREE.Vector3(0, 1, 0);
+
+  for (const axis of ['x', 'y', 'z']) {
+    for (const sign of [-1, 1]) {
+      const direction = new THREE.Vector3(
+        axis === 'x' ? sign : 0,
+        axis === 'y' ? sign : 0,
+        axis === 'z' ? sign : 0
+      );
+      const handle = new THREE.Group();
+      handle.name = `3DGS Crop ${axis.toUpperCase()} ${sign > 0 ? 'Positive' : 'Negative'} Handle`;
+      handle.userData.cropHandle = { axis, sign };
+      handle.quaternion.setFromUnitVectors(defaultDirection, direction);
+
+      const material = new THREE.MeshBasicMaterial({
+        color: SPLAT_CROP_AXIS_COLORS[axis],
+        transparent: true,
+        opacity: 0.96,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftLength, 12),
+        material
+      );
+      shaft.position.y = shaftLength * 0.5;
+      shaft.renderOrder = 10002;
+
+      const head = new THREE.Mesh(
+        new THREE.ConeGeometry(coneRadius, coneLength, 16),
+        material
+      );
+      head.position.y = shaftLength + coneLength * 0.5;
+      head.renderOrder = 10002;
+      // Only the visible shaft and cone participate in raycasting so the
+      // surrounding empty area cannot accidentally start a crop drag.
+      handle.add(shaft, head);
+      handles.add(handle);
+    }
+  }
+  return handles;
+}
+
+function updateSplatCropHandlePositions(cropCenter, cropRadii) {
+  if (!state.splatCropHandles) return;
+  for (const handle of state.splatCropHandles.children) {
+    const { axis, sign } = handle.userData.cropHandle || {};
+    if (!axis || !sign) continue;
+    handle.position.copy(cropCenter);
+    handle.position[axis] += cropRadii[axis] * sign;
+  }
+  state.splatCropHandles.updateMatrixWorld(true);
+}
+
+function updateSplatCropHandleDepthOpacity() {
+  const handles = state.splatCropHandles;
+  if (!handles?.visible || !state.camera) return;
+  state.camera.updateMatrixWorld(true);
+  handles.updateWorldMatrix(true, true);
+  const samples = handles.children.map((handle) => {
+    const worldPosition = handle.getWorldPosition(new THREE.Vector3());
+    const viewPosition = worldPosition.applyMatrix4(state.camera.matrixWorldInverse);
+    return { handle, depth: Math.max(0, -viewPosition.z) };
+  });
+  if (!samples.length) return;
+  const minDepth = Math.min(...samples.map(sample => sample.depth));
+  const maxDepth = Math.max(...samples.map(sample => sample.depth));
+  const depthSpan = Math.max(maxDepth - minDepth, 1e-5);
+
+  for (const { handle, depth } of samples) {
+    const depthRatio = THREE.MathUtils.clamp((depth - minDepth) / depthSpan, 0, 1);
+    const opacity = THREE.MathUtils.lerp(0.96, 0.3, depthRatio);
+    handle.traverse((object) => {
+      if (object.material) object.material.opacity = opacity;
+    });
+  }
+}
+
+function createSplatCropSdf(shape) {
+  const { SplatEditSdf, SplatEditSdfType } = state.sparkCropApi || {};
+  if (!SplatEditSdf || !SplatEditSdfType) return null;
+  const normalizedShape = normalizeSplatCropShape(shape);
+  return new SplatEditSdf({
+    type: normalizedShape === 'box' ? SplatEditSdfType.BOX : SplatEditSdfType.ELLIPSOID,
+    invert: true,
+    opacity: 0,
+    color: new THREE.Color(1, 1, 1),
+    displace: new THREE.Vector3(0, 0, 0),
+  });
+}
+
+function replaceSplatCropHelper() {
+  if (!state.splatMesh) return;
+  if (state.splatCropHelper) {
+    state.splatCropHelper.removeFromParent();
+    disposeObject3DResources(state.splatCropHelper);
+  }
+  state.splatCropHelper = createSplatCropHelper(state.settings.splatCropShape);
+  state.splatMesh.add(state.splatCropHelper);
+}
+
+function applySplatCropShape(shape) {
+  const normalizedShape = normalizeSplatCropShape(shape);
+  state.settings.splatCropShape = normalizedShape;
+  updateSplatCropShapeUI();
+  if (!state.splatCropEdit || !state.splatMesh) return;
+
+  state.splatCropSdf?.removeFromParent();
+  const nextSdf = createSplatCropSdf(normalizedShape);
+  if (!nextSdf) return;
+  state.splatCropEdit.add(nextSdf);
+  state.splatCropSdf = nextSdf;
+  replaceSplatCropHelper();
+  state.splatMesh.updateGenerator?.();
+  updateSplatCropFromSettings();
+}
+
+function disposeSplatCrop() {
+  if (state.splatCropHelper) {
+    state.splatCropHelper.removeFromParent();
+    disposeObject3DResources(state.splatCropHelper);
+  }
+  if (state.splatCropHandles) {
+    state.splatCropHandles.removeFromParent();
+    disposeObject3DResources(state.splatCropHandles);
+  }
+  state.splatCropEdit?.removeFromParent();
+  endSplatCropDrag();
+  state.splatCropHelper = null;
+  state.splatCropHandles = null;
+  state.splatCropEdit = null;
+  state.splatCropSdf = null;
+}
+
+function syncSplatCropHelperVisibility() {
+  const settingsVisible = dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden');
+  const mobileCropEditorVisible = !isMobileViewport() || Boolean(
+    dom.settingsPanel?.classList.contains('mobile-settings-detail')
+    && dom.settingsPanel?.classList.contains('mobile-settings-spark')
+    && dom.settingsPanel?.classList.contains('mobile-splat-crop-view')
+  );
+  const visible = Boolean(
+    isSplatCropEnabled()
+    && settingsVisible
+    && mobileCropEditorVisible
+    && state.settings.renderer === 'spark'
+    && !state.splatEraser?.active
+    && !state.previewActive
+    && !state.recordingActive
+    && !state.compositingActive
+  );
+  if (state.splatCropHelper) state.splatCropHelper.visible = visible;
+  if (state.splatCropHandles) state.splatCropHandles.visible = visible;
+  if (!visible && state.renderer?.domElement && !state.splatCropDrag) {
+    state.renderer.domElement.style.cursor = '';
+  }
+}
+
+function updateSplatCropFromSettings() {
+  const bounds = state.subjectCropBounds;
+  if (!bounds || !state.splatCropEdit || !state.splatCropSdf) return;
+  const enabled = isSplatCropEnabled();
+  const radiiScale = state.settings.splatCropRadiiScale;
+  const cropRadii = bounds.radii.clone().multiply(new THREE.Vector3(
+    THREE.MathUtils.clamp(radiiScale.x, 0.1, 10),
+    THREE.MathUtils.clamp(radiiScale.y, 0.1, 10),
+    THREE.MathUtils.clamp(radiiScale.z, 0.1, 10)
+  ));
+  const offset = state.settings.splatCropOffset;
+  const cropCenter = bounds.center.clone().add(new THREE.Vector3(
+    bounds.radii.x * offset.x,
+    bounds.radii.y * offset.y,
+    bounds.radii.z * offset.z
+  ));
+
+  state.splatCropEdit.visible = enabled;
+  state.splatCropSdf.position.copy(cropCenter);
+  state.splatCropSdf.scale.copy(cropRadii);
+  state.splatCropSdf.updateMatrixWorld(true);
+
+  if (state.splatCropHelper) {
+    state.splatCropHelper.position.copy(cropCenter);
+    state.splatCropHelper.scale.copy(cropRadii);
+    state.splatCropHelper.updateMatrixWorld(true);
+  }
+  updateSplatCropHandlePositions(cropCenter, cropRadii);
+  syncSplatCropHelperVisibility();
+}
+
+function configureSplatCrop(mesh, data) {
+  const {
+    SplatEdit,
+    SplatEditSdf,
+    SplatEditSdfType,
+    SplatEditRgbaBlendMode,
+  } = state.sparkCropApi || {};
+  if (!SplatEdit || !SplatEditSdf || !SplatEditSdfType || !SplatEditRgbaBlendMode) {
+    console.warn('Spark SplatEdit is unavailable; 3DGS background crop was not applied.');
+    return;
+  }
+
+  if (!state.subjectCropBounds) {
+    state.subjectCropBounds = estimateSubjectEllipsoid(data.positions);
+    console.log('[3DGS Subject Crop]', {
+      center: state.subjectCropBounds.center.toArray(),
+      radii: state.subjectCropBounds.radii.toArray(),
+      sampleCount: state.subjectCropBounds.sampleCount,
+    });
+  }
+
+  const cropEdit = new SplatEdit({
+    name: 'RemyMaker Subject Crop',
+    rgbaBlendMode: SplatEditRgbaBlendMode.MULTIPLY,
+    sdfSmooth: 0,
+    softEdge: 0,
+  });
+  const cropSdf = createSplatCropSdf(state.settings.splatCropShape);
+  if (!cropSdf) return;
+  cropEdit.add(cropSdf);
+  mesh.add(cropEdit);
+
+  const helper = createSplatCropHelper(state.settings.splatCropShape);
+  mesh.add(helper);
+  const handles = createSplatCropHandles(state.subjectCropBounds);
+  mesh.add(handles);
+
+  state.splatCropEdit = cropEdit;
+  state.splatCropSdf = cropSdf;
+  state.splatCropHelper = helper;
+  state.splatCropHandles = handles;
+  updateSplatCropFromSettings();
+}
+
+const splatCropRaycaster = new THREE.Raycaster();
+const splatCropPointer = new THREE.Vector2();
+
+function getSplatCropHandleFromObject(object) {
+  let current = object;
+  while (current && current !== state.splatCropHandles) {
+    if (current.userData?.cropHandle) return current;
+    current = current.parent;
+  }
+  return null;
+}
+
+function getSplatCropHandleAtPointer(event) {
+  const canvas = state.renderer?.domElement;
+  if (!canvas || !state.camera || !state.splatCropHandles?.visible) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  splatCropPointer.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  state.scene?.updateMatrixWorld(true);
+  state.camera.updateMatrixWorld(true);
+  splatCropRaycaster.setFromCamera(splatCropPointer, state.camera);
+  const intersections = splatCropRaycaster.intersectObjects(state.splatCropHandles.children, true);
+  return intersections.length ? getSplatCropHandleFromObject(intersections[0].object) : null;
+}
+
+function vectorToCanvasPoint(vector, rect) {
+  const projected = vector.clone().project(state.camera);
+  return {
+    x: rect.left + (projected.x + 1) * 0.5 * rect.width,
+    y: rect.top + (1 - (projected.y + 1) * 0.5) * rect.height,
+  };
+}
+
+function beginSplatCropDrag(event) {
+  if (state.splatEraser?.active) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (!event.isPrimary) return;
+  const handle = getSplatCropHandleAtPointer(event);
+  if (!handle || !state.subjectCropBounds || !state.splatMesh) return;
+
+  const { axis, sign } = handle.userData.cropHandle;
+  const bounds = state.subjectCropBounds;
+  const radiiScale = state.settings.splatCropRadiiScale;
+  const startRadii = bounds.radii.clone().multiply(new THREE.Vector3(
+    radiiScale.x,
+    radiiScale.y,
+    radiiScale.z
+  ));
+  const startCenter = bounds.center.clone().add(new THREE.Vector3(
+    bounds.radii.x * state.settings.splatCropOffset.x,
+    bounds.radii.y * state.settings.splatCropOffset.y,
+    bounds.radii.z * state.settings.splatCropOffset.z
+  ));
+  const rect = state.renderer.domElement.getBoundingClientRect();
+  const centerWorld = state.splatMesh.localToWorld(startCenter.clone());
+  const faceLocal = startCenter.clone();
+  faceLocal[axis] += startRadii[axis] * sign;
+  const faceWorld = state.splatMesh.localToWorld(faceLocal);
+  const centerPoint = vectorToCanvasPoint(centerWorld, rect);
+  const facePoint = vectorToCanvasPoint(faceWorld, rect);
+  let directionX = facePoint.x - centerPoint.x;
+  let directionY = facePoint.y - centerPoint.y;
+  let projectedRadius = Math.hypot(directionX, directionY);
+
+  if (projectedRadius < 8) {
+    if (axis === 'x') {
+      directionX = sign;
+      directionY = 0;
+    } else {
+      directionX = 0;
+      directionY = -sign;
+    }
+    projectedRadius = Math.max(72, Math.min(rect.width, rect.height) * 0.18);
+  } else {
+    directionX /= projectedRadius;
+    directionY /= projectedRadius;
+  }
+
+  const startRadius = startRadii[axis];
+  state.splatCropDrag = {
+    pointerId: event.pointerId,
+    axis,
+    sign,
+    startX: event.clientX,
+    startY: event.clientY,
+    directionX,
+    directionY,
+    localUnitsPerPixel: startRadius / projectedRadius,
+    startFace: startCenter[axis] + sign * startRadius,
+    oppositeFace: startCenter[axis] - sign * startRadius,
+    controlsWereEnabled: state.controls?.enabled !== false,
+    autoRotateWasEnabled: Boolean(state.particleSystem?.autoRotate),
+  };
+
+  if (state.controls) state.controls.enabled = false;
+  if (state.particleSystem) state.particleSystem.autoRotate = false;
+  state.renderer.domElement.setPointerCapture?.(event.pointerId);
+  state.renderer.domElement.style.cursor = 'grabbing';
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function moveSplatCropDrag(event) {
+  const drag = state.splatCropDrag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const pixelDelta = (
+    (event.clientX - drag.startX) * drag.directionX
+    + (event.clientY - drag.startY) * drag.directionY
+  );
+  const outwardDelta = pixelDelta * drag.localUnitsPerPixel;
+  const requestedFace = drag.startFace + drag.sign * outwardDelta;
+  const bounds = state.subjectCropBounds;
+  const baseRadius = Math.max(bounds.radii[drag.axis], 1e-6);
+  const requestedRadius = drag.sign * (requestedFace - drag.oppositeFace) * 0.5;
+  const nextRadius = THREE.MathUtils.clamp(requestedRadius, baseRadius * 0.1, baseRadius * 10);
+  const nextFace = drag.oppositeFace + drag.sign * nextRadius * 2;
+  const nextCenter = (nextFace + drag.oppositeFace) * 0.5;
+
+  state.settings.splatCropRadiiScale[drag.axis] = nextRadius / baseRadius;
+  state.settings.splatCropOffset[drag.axis] = (nextCenter - bounds.center[drag.axis]) / baseRadius;
+  updateSplatCropFromSettings();
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function endSplatCropDrag(event) {
+  const drag = state.splatCropDrag;
+  if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+  const canvas = state.renderer?.domElement;
+  if (canvas && drag.pointerId !== undefined && canvas.hasPointerCapture?.(drag.pointerId)) {
+    canvas.releasePointerCapture(drag.pointerId);
+  }
+  if (state.controls) state.controls.enabled = drag.controlsWereEnabled;
+  if (state.particleSystem) state.particleSystem.autoRotate = drag.autoRotateWasEnabled;
+  state.splatCropDrag = null;
+  if (canvas) canvas.style.cursor = '';
+  event?.preventDefault?.();
+  event?.stopImmediatePropagation?.();
+}
+
+function updateSplatCropHandleHover(event) {
+  if (state.splatCropDrag || !state.renderer?.domElement) return;
+  if (state.splatEraser?.active) {
+    updateSplatEraserBrushCursor(event);
+    state.renderer.domElement.style.cursor = state.splatEraser.touchLayout
+      ? (state.splatEraser.navigationMode ? 'grab' : 'crosshair')
+      : (event?.altKey ? 'grab' : ((event?.buttons || 0) & 6 ? 'grabbing' : 'none'));
+    return;
+  }
+  state.renderer.domElement.style.cursor = getSplatCropHandleAtPointer(event) ? 'grab' : '';
+}
+
+function createSplatEraserModifier(eraser) {
+  const { dyno, readRgbaArray } = state.sparkPainterApi;
+  return dyno.dynoBlock(
+    { gsplat: dyno.Gsplat },
+    { gsplat: dyno.Gsplat },
+    ({ gsplat }) => {
+      const { index, rgb, opacity } = dyno.splitGsplat(gsplat).outputs;
+      const selection = readRgbaArray(eraser.selectionMask.dyno, index);
+      const isSelected = dyno.greaterThan(
+        dyno.length(selection),
+        dyno.dynoFloat(0.5)
+      );
+      const highlightedRgb = dyno.select(
+        isSelected,
+        eraser.selectionColor,
+        rgb
+      );
+      const erasedOpacity = dyno.select(
+        dyno.and(eraser.commitEnabled, isSelected),
+        dyno.dynoFloat(0),
+        opacity
+      );
+      return {
+        gsplat: dyno.combineGsplat({
+          gsplat,
+          rgb: highlightedRgb,
+          opacity: erasedOpacity,
+        }),
+      };
+    }
+  );
+}
+
+function getSplatEraserInsideBrush(eraser, center) {
+  const { dyno } = state.sparkPainterApi;
+  const brushSegment = dyno.sub(eraser.brushEnd, eraser.brushStart);
+  const segmentLengthSq = dyno.dot(brushSegment, brushSegment);
+  const segmentAmount = dyno.clamp(
+    dyno.div(
+      dyno.dot(dyno.sub(center, eraser.brushStart), brushSegment),
+      dyno.max(segmentLengthSq, dyno.dynoFloat(1e-8))
+    ),
+    dyno.dynoFloat(0),
+    dyno.dynoFloat(1)
+  );
+  const closestPoint = dyno.add(
+    eraser.brushStart,
+    dyno.mul(brushSegment, segmentAmount)
+  );
+  // A finite 3D capsule follows the visible surface instead of selecting an
+  // effectively infinite camera ray that also reaches distant background.
+  return dyno.lessThan(
+    dyno.length(dyno.sub(closestPoint, center)),
+    eraser.brushRadius
+  );
+}
+
+function createEmptySplatEraserSelectionMask(eraser) {
+  const { RgbaArray } = state.sparkPainterApi;
+  const count = eraser.mesh.packedSplats.numSplats;
+  return new RgbaArray({
+    array: new Uint8Array(count * 4),
+    count,
+  });
+}
+
+function resetSplatEraserSelectionMask(eraser) {
+  if (!eraser) return;
+  eraser.selectionMask?.dispose?.();
+  eraser.selectionMask = createEmptySplatEraserSelectionMask(eraser);
+  eraser.modifier = createSplatEraserModifier(eraser);
+}
+
+function updateSplatEraserUI() {
+  const active = Boolean(state.splatEraser?.active);
+  const labelKey = active ? 'btn-splat-eraser-exit' : 'btn-splat-eraser';
+  const label = translations[state.lang]?.[labelKey]
+    || (state.lang === 'zh' ? '高斯点擦除' : 'Erase Gaussian splats');
+  if (dom.btnSplatEraser) {
+    dom.btnSplatEraser.classList.toggle('active', active);
+    dom.btnSplatEraser.setAttribute('aria-pressed', String(active));
+    dom.btnSplatEraser.setAttribute('aria-label', label);
+    dom.btnSplatEraser.title = label;
+  }
+
+  const eraser = state.splatEraser;
+  const hasSelection = Boolean(eraser?.hasSelection);
+  const canUndo = Boolean(eraser?.staged || eraser?.history?.length);
+  const touchLayout = Boolean(eraser?.touchLayout || isMobileViewport());
+  const navigationMode = Boolean(eraser?.navigationMode);
+  if (dom.btnSplatEraserPaint) {
+    const paintSelected = active && !navigationMode;
+    dom.btnSplatEraserPaint.classList.toggle('active', paintSelected);
+    dom.btnSplatEraserPaint.setAttribute('aria-pressed', String(paintSelected));
+    dom.btnSplatEraserPaint.textContent = state.lang === 'zh'
+      ? (touchLayout ? '涂抹' : (active ? '停止涂抹' : '涂抹选区'))
+      : (touchLayout ? 'Paint' : (active ? 'Stop Painting' : 'Paint Selection'));
+  }
+  if (dom.btnSplatEraserConfirm) {
+    dom.btnSplatEraserConfirm.disabled = !hasSelection || Boolean(eraser?.baking);
+    dom.btnSplatEraserConfirm.textContent = state.lang === 'zh'
+      ? (touchLayout ? '清除' : '确定擦除')
+      : (touchLayout ? 'Clear' : 'Confirm Erase');
+  }
+  if (dom.btnSplatEraserUndo) {
+    dom.btnSplatEraserUndo.disabled = !canUndo || Boolean(eraser?.baking);
+    dom.btnSplatEraserUndo.textContent = state.lang === 'zh' ? '撤销' : 'Undo';
+  }
+  if (dom.splatEraserStatus) {
+    dom.splatEraserStatus.classList.toggle('has-selection', hasSelection);
+    dom.splatEraserStatus.textContent = state.lang === 'zh'
+      ? (hasSelection
+        ? (touchLayout ? '粉色区域待确认' : '粉色区域待确认 · [ / ] 调大小')
+        : (active
+          ? (navigationMode ? '拖动模型调整视角' : (touchLayout ? '在模型表面拖动涂抹' : '左键在表面涂抹 · [ / ] 调大小 · Alt/Option 旋转'))
+          : '点击涂抹选区开始'))
+      : (hasSelection
+        ? (touchLayout ? 'Pink area ready' : 'Pink area ready · [ / ] resize')
+        : (active
+          ? (navigationMode ? 'Drag the model to adjust the view' : (touchLayout ? 'Paint across the model surface' : 'Paint the surface · [ / ] resize · Alt/Option orbit'))
+          : 'Choose Paint Selection to begin'));
+  }
+}
+
+function updateSplatEraserBrushDimensions(eraser) {
+  if (!eraser) return;
+  const subjectRadius = Math.max(
+    state.subjectCropBounds?.radii.x || 0,
+    state.subjectCropBounds?.radii.y || 0,
+    state.subjectCropBounds?.radii.z || 0,
+    0.1
+  ) * state.modelScale * state.settings.splatScale;
+  // Include the gesture-controlled pivot scale so the displayed percentage
+  // continues to represent the same share of the visible model after zooming.
+  eraser.brushRadius.value = Math.max(subjectRadius, 0.05)
+    * state.modelZoomScale
+    * eraser.brushScale;
+  syncSplatEraserBrushCursor();
+}
+
+function setSplatEraserBrushPercent(value) {
+  const slider = dom.settingSplatEraserSize;
+  const parsedMinimum = parseFloat(slider?.min);
+  const parsedMaximum = parseFloat(slider?.max);
+  const parsedValue = parseFloat(value);
+  const minimum = Number.isFinite(parsedMinimum) ? parsedMinimum : 0.1;
+  const maximum = Number.isFinite(parsedMaximum) ? parsedMaximum : 20;
+  const fallback = state.splatEraser?.brushScale * 100 || 8;
+  const percent = THREE.MathUtils.clamp(
+    Number.isFinite(parsedValue) ? parsedValue : fallback,
+    minimum,
+    maximum
+  );
+  if (slider) slider.value = String(percent);
+  if (dom.settingSplatEraserSizeVal) {
+    const displayPercent = Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1);
+    dom.settingSplatEraserSizeVal.textContent = `${displayPercent}%`;
+  }
+  if (!state.splatEraser && state.isModelLoaded && state.splatMesh) {
+    configureSplatEraser(state.splatMesh);
+  }
+  if (state.splatEraser) {
+    state.splatEraser.brushScale = percent / 100;
+    updateSplatEraserBrushDimensions(state.splatEraser);
+    showSplatEraserBrushPreview(null, { center: true, duration: 1000 });
+  }
+}
+
+function getSplatEraserCursorDiameter(eraser) {
+  const canvas = state.renderer?.domElement;
+  const camera = state.camera;
+  if (!eraser || !canvas || !camera) return 24;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.height) return 24;
+
+  let focusDepth = camera.position.distanceTo(state.controls?.target || new THREE.Vector3());
+  // Keep the screen-space brush icon stable while it moves. The actual eraser
+  // remains a fixed world-space sphere; only its visual size is projected from
+  // the subject center instead of jumping between different surface depths.
+  if (state.subjectCropBounds && eraser.mesh) {
+    eraser.mesh.updateWorldMatrix(true, false);
+    camera.updateMatrixWorld(true);
+    const subjectWorld = eraser.mesh.localToWorld(state.subjectCropBounds.center.clone());
+    const subjectView = subjectWorld.applyMatrix4(camera.matrixWorldInverse);
+    if (-subjectView.z > camera.near) focusDepth = -subjectView.z;
+  }
+
+  const focalPixels = rect.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
+  const diameter = (eraser.brushRadius.value * focalPixels * 2) / Math.max(focusDepth, camera.near);
+  const maxDiameter = eraser.touchLayout || isMobileViewport()
+    ? Math.max(rect.width, rect.height) * 2
+    : Math.min(rect.width, rect.height) * 0.9;
+  return THREE.MathUtils.clamp(diameter, 12, maxDiameter);
+}
+
+function syncSplatEraserBrushCursor() {
+  const eraser = state.splatEraser;
+  const cursor = dom.splatEraserBrushCursor;
+  if (!cursor) return;
+  const sizePreviewVisible = Boolean(eraser?.sizePreviewActive);
+  const visible = Boolean(
+    sizePreviewVisible
+    || (
+      eraser?.active
+      && eraser.cursorInside
+      && !eraser.cursorNavigation
+      && !eraser.touchGesture
+    )
+  );
+  cursor.classList.toggle('visible', visible);
+  cursor.classList.toggle('size-preview', sizePreviewVisible);
+  if (visible) {
+    const diameter = getSplatEraserCursorDiameter(eraser);
+    cursor.style.left = `${eraser.cursorX}px`;
+    cursor.style.top = `${eraser.cursorY}px`;
+    cursor.style.width = `${diameter}px`;
+    cursor.style.height = `${diameter}px`;
+  }
+}
+
+function updateSplatEraserBrushCursor(event) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser?.active || !canvas || !event) {
+    syncSplatEraserBrushCursor();
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  eraser.cursorX = event.clientX;
+  eraser.cursorY = event.clientY;
+  eraser.cursorInside = (
+    event.clientX >= rect.left
+    && event.clientX <= rect.right
+    && event.clientY >= rect.top
+    && event.clientY <= rect.bottom
+  );
+  eraser.cursorNavigation = eraser.touchLayout
+    ? Boolean(eraser.touchGesture)
+    : Boolean(event.altKey || ((event.buttons || 0) & 6));
+  syncSplatEraserBrushCursor();
+}
+
+function showSplatEraserBrushPreview(event = null, { center = false, duration = 2000 } = {}) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser || !canvas || eraser.touchGesture) return;
+  if (!center && (!eraser.active || !eraser.touchLayout)) return;
+  const rect = canvas.getBoundingClientRect();
+  if (center) {
+    eraser.cursorX = window.innerWidth * 0.5;
+    eraser.cursorY = window.innerHeight * 0.5;
+    eraser.sizePreviewActive = true;
+  } else {
+    eraser.cursorX = event?.clientX ?? (rect.left + rect.width * 0.5);
+    eraser.cursorY = event?.clientY ?? (rect.top + rect.height * 0.42);
+    eraser.cursorInside = true;
+  }
+  eraser.cursorNavigation = false;
+  const timerProperty = center ? 'sizePreviewTimer' : 'cursorHideTimer';
+  if (eraser[timerProperty]) clearTimeout(eraser[timerProperty]);
+  syncSplatEraserBrushCursor();
+  eraser[timerProperty] = setTimeout(() => {
+    eraser[timerProperty] = null;
+    if (center) {
+      eraser.sizePreviewActive = false;
+      eraser.cursorInside = false;
+      syncSplatEraserBrushCursor();
+    } else if (!eraser.drawing && !eraser.touchGesture) {
+      hideSplatEraserBrushCursor();
+    }
+  }, duration);
+}
+
+function hideSplatEraserBrushCursor() {
+  if (state.splatEraser) {
+    state.splatEraser.cursorInside = false;
+    if (state.splatEraser.cursorHideTimer) {
+      clearTimeout(state.splatEraser.cursorHideTimer);
+      state.splatEraser.cursorHideTimer = null;
+    }
+  }
+  syncSplatEraserBrushCursor();
+}
+
+function configureSplatEraser(mesh) {
+  const { RgbaArray, dyno, readRgbaArray } = state.sparkPainterApi || {};
+  const packedSplats = mesh?.packedSplats;
+  if (!RgbaArray || !dyno || !readRgbaArray || !packedSplats?.numSplats) {
+    state.splatEraser = null;
+    updateSplatEraserUI();
+    return;
+  }
+
+  const eraser = {
+    mesh,
+    active: false,
+    drawing: false,
+    baking: false,
+    pointerId: null,
+    frameId: null,
+    controlsWereEnabled: true,
+    autoRotateWasEnabled: false,
+    touchLayout: isMobileViewport(),
+    navigationMode: false,
+    staged: false,
+    hasSelection: false,
+    stageBaseRgba: null,
+    history: [],
+    cursorX: 0,
+    cursorY: 0,
+    cursorInside: false,
+    cursorNavigation: false,
+    cursorHideTimer: null,
+    sizePreviewActive: false,
+    sizePreviewTimer: null,
+    touchPointers: new Map(),
+    touchGesture: null,
+    touchSequenceNavigating: false,
+    hasSurfacePoint: false,
+    surfacePoint: new THREE.Vector3(),
+    strokePlane: new THREE.Plane(),
+    lastSurfacePickTime: 0,
+    lastSurfacePickX: 0,
+    lastSurfacePickY: 0,
+    brushScale: THREE.MathUtils.clamp(
+      (parseFloat(dom.settingSplatEraserSize?.value) || 8) / 100,
+      0.001,
+      0.2
+    ),
+    commitEnabled: dyno.dynoBool(false),
+    brushRadius: dyno.dynoFloat(0.05),
+    brushStart: dyno.dynoVec3(new THREE.Vector3()),
+    brushEnd: dyno.dynoVec3(new THREE.Vector3()),
+    selectionColor: dyno.dynoVec3(new THREE.Vector3(1, 32 / 255, 160 / 255)),
+    selectionMask: null,
+  };
+  updateSplatEraserBrushDimensions(eraser);
+
+  mesh.splatRgba = new RgbaArray().fromPackedSplats({
+    packedSplats,
+    base: 0,
+    count: packedSplats.numSplats,
+    renderer: state.renderer,
+  });
+  resetSplatEraserSelectionMask(eraser);
+  mesh.worldModifier = null;
+  state.splatEraser = eraser;
+  mesh.updateGenerator();
+  updateSplatEraserUI();
+}
+
+function disposeSplatEraser() {
+  const eraser = state.splatEraser;
+  if (!eraser) return;
+  setSplatEraserActive(false, { silent: true });
+  if (eraser.frameId !== null) cancelAnimationFrame(eraser.frameId);
+  if (eraser.sizePreviewTimer) clearTimeout(eraser.sizePreviewTimer);
+  if (eraser.staged) cancelSplatEraserSelection({ silent: true });
+  eraser.selectionMask?.dispose?.();
+  eraser.selectionMask = null;
+  for (const snapshot of eraser.history) snapshot?.dispose?.();
+  eraser.history.length = 0;
+  eraser.mesh.worldModifier = null;
+  state.splatEraser = null;
+  updateSplatEraserUI();
+}
+
+const splatEraserRaycaster = new THREE.Raycaster();
+const splatEraserPointer = new THREE.Vector2();
+const splatEraserSurfacePoint = new THREE.Vector3();
+const splatEraserPlanePoint = new THREE.Vector3();
+const splatEraserPlaneNormal = new THREE.Vector3();
+const SPLAT_ERASER_REPICK_INTERVAL_MS = 140;
+
+function setSplatEraserPointerRay(event) {
+  const eraser = state.splatEraser;
+  const canvas = state.renderer?.domElement;
+  if (!eraser?.active || !canvas || !state.camera || !event) return false;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return false;
+  splatEraserPointer.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  state.camera.updateMatrixWorld(true);
+  eraser.mesh.updateWorldMatrix(true, false);
+  splatEraserRaycaster.setFromCamera(splatEraserPointer, state.camera);
+  return true;
+}
+
+function setSplatEraserSurfacePoint(eraser, point, { resetSegment = false } = {}) {
+  if (!eraser || !point) return false;
+  if (resetSegment || !eraser.hasSurfacePoint) eraser.brushStart.value.copy(point);
+  else eraser.brushStart.value.copy(eraser.brushEnd.value);
+  eraser.brushEnd.value.copy(point);
+  eraser.surfacePoint.copy(point);
+  eraser.hasSurfacePoint = true;
+  splatEraserPlaneNormal.copy(splatEraserRaycaster.ray.direction).normalize();
+  eraser.strokePlane.setFromNormalAndCoplanarPoint(splatEraserPlaneNormal, point);
+  syncSplatEraserBrushCursor();
+  return true;
+}
+
+function pickSplatEraserSurface(event, { resetSegment = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser || !setSplatEraserPointerRay(event)) return false;
+  const intersections = splatEraserRaycaster.intersectObject(eraser.mesh, false);
+  const hit = intersections.find(intersection => intersection?.point);
+  if (!hit) {
+    eraser.hasSurfacePoint = false;
+    syncSplatEraserBrushCursor();
+    return false;
+  }
+  eraser.lastSurfacePickTime = performance.now();
+  eraser.lastSurfacePickX = event.clientX;
+  eraser.lastSurfacePickY = event.clientY;
+  splatEraserSurfacePoint.copy(hit.point);
+  const crossedDepthGap = eraser.hasSurfacePoint
+    && eraser.surfacePoint.distanceTo(splatEraserSurfacePoint) > eraser.brushRadius.value * 2.5;
+  return setSplatEraserSurfacePoint(eraser, splatEraserSurfacePoint, {
+    resetSegment: resetSegment || crossedDepthGap,
+  });
+}
+
+function updateSplatEraserStrokePoint(event, { resetSegment = false, forceSurfacePick = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser?.active || !event) return false;
+  if (forceSurfacePick || !eraser.hasSurfacePoint) {
+    return pickSplatEraserSurface(event, { resetSegment });
+  }
+  if (!setSplatEraserPointerRay(event)) return false;
+
+  const elapsed = performance.now() - eraser.lastSurfacePickTime;
+  const repickDistance = Math.max(12, getSplatEraserCursorDiameter(eraser) * 0.35);
+  const pointerDistance = Math.hypot(
+    event.clientX - eraser.lastSurfacePickX,
+    event.clientY - eraser.lastSurfacePickY
+  );
+  if (elapsed >= SPLAT_ERASER_REPICK_INTERVAL_MS && pointerDistance >= repickDistance) {
+    return pickSplatEraserSurface(event, { resetSegment });
+  }
+
+  const projectedPoint = splatEraserRaycaster.ray.intersectPlane(
+    eraser.strokePlane,
+    splatEraserPlanePoint
+  );
+  if (!projectedPoint) return false;
+  return setSplatEraserSurfacePoint(eraser, projectedPoint, { resetSegment });
+}
+
+function bakeSplatEraserSelectionMask() {
+  const eraser = state.splatEraser;
+  const mesh = eraser?.mesh;
+  const { RgbaArray, dyno, readRgbaArray } = state.sparkPainterApi || {};
+  if (!eraser?.active || eraser.baking || !mesh || !RgbaArray || !dyno || !readRgbaArray) {
+    return false;
+  }
+
+  const cropVisible = state.splatCropEdit?.visible;
+  const meshOpacity = mesh.opacity;
+  const previousMask = eraser.selectionMask;
+  let nextMask = null;
+  eraser.baking = true;
+  try {
+    // Sample unmodified splat centers while updating only the separate mask.
+    // Model RGB is never used as selection state and remains untouched here.
+    if (state.splatCropEdit) state.splatCropEdit.visible = false;
+    mesh.opacity = 1;
+    mesh.worldModifier = null;
+    mesh.updateGenerator();
+    nextMask = new RgbaArray();
+    nextMask.render({
+      renderer: state.renderer,
+      count: mesh.packedSplats.numSplats,
+      reader: dyno.dynoBlock(
+        { index: 'int' },
+        { rgba8: 'vec4' },
+        ({ index }) => {
+          const { gsplat } = mesh.generator.apply({ index });
+          const { center } = dyno.splitGsplat(gsplat).outputs;
+          const wasSelected = dyno.greaterThan(
+            dyno.length(readRgbaArray(previousMask.dyno, index)),
+            dyno.dynoFloat(0.5)
+          );
+          const isSelected = dyno.or(
+            wasSelected,
+            getSplatEraserInsideBrush(eraser, center)
+          );
+          return {
+            rgba8: dyno.select(
+              isSelected,
+              dyno.dynoVec4(new THREE.Vector4(1, 1, 1, 1)),
+              dyno.dynoVec4(new THREE.Vector4(0, 0, 0, 0))
+            ),
+          };
+        }
+      ),
+    });
+
+    eraser.selectionMask = nextMask;
+    nextMask = null;
+    eraser.modifier = createSplatEraserModifier(eraser);
+    previousMask?.dispose?.();
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.worldModifier = eraser.modifier;
+    mesh.updateGenerator();
+    return true;
+  } catch (error) {
+    nextMask?.dispose?.();
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.worldModifier = eraser.modifier;
+    mesh.updateGenerator?.();
+    console.error('Spark Splat Painter selection failed:', error);
+    showToast(
+      state.lang === 'zh'
+        ? `高斯点选区失败：${error.message}`
+        : `Gaussian selection failed: ${error.message}`,
+      'error',
+      5000
+    );
+    return false;
+  } finally {
+    eraser.baking = false;
+  }
+}
+
+function bakeSplatEraserResult({ preservePrevious = false } = {}) {
+  const eraser = state.splatEraser;
+  const mesh = eraser?.mesh;
+  const { RgbaArray, dyno } = state.sparkPainterApi || {};
+  if (!eraser?.active || eraser.baking || !mesh || !RgbaArray || !dyno) return false;
+
+  const cropVisible = state.splatCropEdit?.visible;
+  const meshOpacity = mesh.opacity;
+  let nextRgba = null;
+  eraser.baking = true;
+  try {
+    // Do not permanently bake the adjustable crop volume or transition opacity
+    // into the painter result; only the eraser worldModifier is committed.
+    if (state.splatCropEdit) state.splatCropEdit.visible = false;
+    mesh.opacity = 1;
+    mesh.updateGenerator();
+    nextRgba = new RgbaArray();
+    nextRgba.render({
+      renderer: state.renderer,
+      count: mesh.packedSplats.numSplats,
+      reader: dyno.dynoBlock(
+        { index: 'int' },
+        { rgba8: 'vec4' },
+        ({ index }) => {
+          const { gsplat } = mesh.generator.apply({ index });
+          const { rgba } = dyno.splitGsplat(gsplat).outputs;
+          return { rgba8: rgba };
+        }
+      ),
+    });
+    const previousRgba = mesh.splatRgba;
+    mesh.splatRgba = nextRgba;
+    nextRgba = null;
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.updateGenerator();
+    if (!preservePrevious) previousRgba?.dispose?.();
+    return true;
+  } catch (error) {
+    nextRgba?.dispose?.();
+    if (state.splatCropEdit) state.splatCropEdit.visible = cropVisible;
+    mesh.opacity = meshOpacity;
+    mesh.updateGenerator?.();
+    console.error('Spark Splat Painter operation failed:', error);
+    showToast(
+      state.lang === 'zh'
+        ? `高斯点擦除失败：${error.message}`
+        : `Gaussian erase failed: ${error.message}`,
+      'error',
+      5000
+    );
+    return false;
+  } finally {
+    eraser.baking = false;
+  }
+}
+
+function beginSplatEraserSelection(eraser) {
+  if (!eraser || eraser.staged) return true;
+  eraser.stageBaseRgba = eraser.mesh.splatRgba;
+  eraser.staged = true;
+  eraser.hasSelection = false;
+  eraser.mesh.worldModifier = eraser.modifier;
+  eraser.mesh.updateGenerator();
+  updateSplatEraserUI();
+  return true;
+}
+
+function cancelSplatEraserSelection({ silent = false } = {}) {
+  const eraser = state.splatEraser;
+  if (!eraser?.staged || !eraser.stageBaseRgba) return false;
+  eraser.commitEnabled.value = false;
+  eraser.mesh.worldModifier = null;
+  eraser.stageBaseRgba = null;
+  eraser.staged = false;
+  eraser.hasSelection = false;
+  resetSplatEraserSelectionMask(eraser);
+  if (eraser.active) {
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+  }
+  updateSplatEraserUI();
+  if (!silent) {
+    showToast(state.lang === 'zh' ? '已撤销当前涂抹选区' : 'Current painted selection cleared', 'info');
+  }
+  return true;
+}
+
+function confirmSplatEraserSelection() {
+  const eraser = state.splatEraser;
+  if (!eraser?.staged || !eraser.hasSelection || eraser.baking) return;
+  eraser.commitEnabled.value = true;
+  eraser.mesh.worldModifier = eraser.modifier;
+  eraser.mesh.updateGenerator();
+  const confirmed = bakeSplatEraserResult({ preservePrevious: true });
+  eraser.commitEnabled.value = false;
+  if (!confirmed) return;
+
+  eraser.history.push(eraser.stageBaseRgba);
+  if (eraser.history.length > 8) eraser.history.shift()?.dispose?.();
+  eraser.stageBaseRgba = null;
+  eraser.staged = false;
+  eraser.hasSelection = false;
+  resetSplatEraserSelectionMask(eraser);
+  eraser.mesh.worldModifier = eraser.active ? eraser.modifier : null;
+  eraser.mesh.updateGenerator();
+  updateSplatEraserUI();
+  showToast(state.lang === 'zh' ? '已确认擦除高亮区域' : 'Highlighted splats erased', 'success');
+}
+
+function undoSplatEraser() {
+  const eraser = state.splatEraser;
+  if (!eraser || eraser.baking) return;
+  if (eraser.staged) {
+    cancelSplatEraserSelection();
+    return;
+  }
+  const previousRgba = eraser.history.pop();
+  if (!previousRgba) return;
+  const currentRgba = eraser.mesh.splatRgba;
+  eraser.mesh.worldModifier = null;
+  eraser.mesh.splatRgba = previousRgba;
+  eraser.mesh.updateGenerator();
+  currentRgba?.dispose?.();
+  if (eraser.active) {
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+  }
+  updateSplatEraserUI();
+  showToast(state.lang === 'zh' ? '已撤销上一次擦除' : 'Last erase undone', 'info');
+}
+
+function scheduleSplatEraserBake() {
+  const eraser = state.splatEraser;
+  if (!eraser?.drawing || eraser.frameId !== null) return;
+  eraser.frameId = requestAnimationFrame(() => {
+    eraser.frameId = null;
+    if (!eraser.drawing) return;
+    if (!bakeSplatEraserSelectionMask()) setSplatEraserActive(false, { silent: true });
+    else {
+      eraser.hasSelection = true;
+      updateSplatEraserUI();
+    }
+  });
+}
+
+function beginSplatEraserTouchNavigation(eraser) {
+  const points = Array.from(eraser.touchPointers.values()).slice(0, 2);
+  if (points.length < 2 || !state.camera || !state.controls) return false;
+  const [first, second] = points;
+  const midpoint = new THREE.Vector2(
+    (first.x + second.x) * 0.5,
+    (first.y + second.y) * 0.5
+  );
+  const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+  const offset = state.camera.position.clone().sub(state.controls.target);
+  eraser.touchGesture = {
+    midpoint,
+    distance,
+    target: state.controls.target.clone(),
+    spherical: new THREE.Spherical().setFromVector3(offset),
+  };
+  eraser.touchSequenceNavigating = true;
+  eraser.cursorNavigation = true;
+  eraser.hasSurfacePoint = false;
+  hideSplatEraserBrushCursor();
+  return true;
+}
+
+function updateSplatEraserTouchNavigation(eraser) {
+  const gesture = eraser.touchGesture;
+  const points = Array.from(eraser.touchPointers.values()).slice(0, 2);
+  if (!gesture || points.length < 2 || !state.camera || !state.controls) return false;
+  const [first, second] = points;
+  const midpointX = (first.x + second.x) * 0.5;
+  const midpointY = (first.y + second.y) * 0.5;
+  const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+  const spherical = gesture.spherical.clone();
+  spherical.theta -= (midpointX - gesture.midpoint.x) * 0.006;
+  spherical.phi = THREE.MathUtils.clamp(
+    spherical.phi + (midpointY - gesture.midpoint.y) * 0.006,
+    0.05,
+    Math.PI - 0.05
+  );
+  spherical.radius = THREE.MathUtils.clamp(
+    gesture.spherical.radius * gesture.distance / distance,
+    state.controls.minDistance,
+    state.controls.maxDistance
+  );
+  state.controls.target.copy(gesture.target);
+  state.camera.position.copy(gesture.target).add(new THREE.Vector3().setFromSpherical(spherical));
+  state.camera.lookAt(gesture.target);
+  state.controls.update();
+  return true;
+}
+
+function beginSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (!eraser?.active) return;
+  if (eraser.touchLayout && event.pointerType === 'touch') {
+    eraser.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (eraser.touchPointers.size >= 2) {
+      if (eraser.drawing) endSplatEraserStroke();
+      beginSplatEraserTouchNavigation(eraser);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (eraser.touchSequenceNavigating) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!event.isPrimary || (event.button !== undefined && event.button !== 0)) return;
+  if (eraser.navigationMode) return;
+  updateSplatEraserBrushCursor(event);
+  // Desktop painting keeps OrbitControls enabled. Holding Alt/Option lets the
+  // normal left-drag event pass through to OrbitControls for camera rotation.
+  if (!eraser.touchLayout && event.altKey) return;
+  if (!updateSplatEraserStrokePoint(event, { resetSegment: true, forceSurfacePick: true })) return;
+  if (!beginSplatEraserSelection(eraser)) {
+    setSplatEraserActive(false, { silent: true });
+    return;
+  }
+  eraser.drawing = true;
+  eraser.pointerId = event.pointerId;
+  state.renderer.domElement.setPointerCapture?.(event.pointerId);
+  state.renderer.domElement.style.cursor = eraser.touchLayout ? 'crosshair' : 'none';
+  if (!bakeSplatEraserSelectionMask()) setSplatEraserActive(false, { silent: true });
+  else {
+    eraser.hasSelection = true;
+    updateSplatEraserUI();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function moveSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (eraser?.active && eraser.touchLayout && event.pointerType === 'touch') {
+    if (eraser.touchPointers.has(event.pointerId)) {
+      eraser.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (eraser.touchSequenceNavigating) {
+      updateSplatEraserTouchNavigation(eraser);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!eraser?.active || !eraser.drawing || event.pointerId !== eraser.pointerId) return;
+  updateSplatEraserBrushCursor(event);
+  if (eraser.touchLayout) showSplatEraserBrushPreview(event);
+  if (updateSplatEraserStrokePoint(event)) scheduleSplatEraserBake();
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function endSplatEraserStroke(event) {
+  const eraser = state.splatEraser;
+  if (eraser?.touchLayout && event?.pointerType === 'touch') {
+    eraser.touchPointers.delete(event.pointerId);
+    if (eraser.touchSequenceNavigating) {
+      if (eraser.touchPointers.size < 2) eraser.touchGesture = null;
+      if (eraser.touchPointers.size === 0) {
+        eraser.touchSequenceNavigating = false;
+        eraser.cursorNavigation = false;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+  if (!eraser?.drawing || (event?.pointerId !== undefined && event.pointerId !== eraser.pointerId)) return;
+  if (eraser.frameId !== null) {
+    cancelAnimationFrame(eraser.frameId);
+    eraser.frameId = null;
+  }
+  if (event?.clientX !== undefined) updateSplatEraserStrokePoint(event);
+  const baked = bakeSplatEraserSelectionMask();
+  eraser.drawing = false;
+  const canvas = state.renderer?.domElement;
+  if (canvas?.hasPointerCapture?.(eraser.pointerId)) canvas.releasePointerCapture(eraser.pointerId);
+  eraser.pointerId = null;
+  if (canvas) canvas.style.cursor = eraser.active
+    ? (eraser.touchLayout ? (eraser.navigationMode ? 'grab' : 'crosshair') : 'none')
+    : '';
+  if (event?.clientX !== undefined) updateSplatEraserBrushCursor(event);
+  if (eraser.touchLayout && event?.clientX !== undefined) showSplatEraserBrushPreview(event);
+  event?.preventDefault?.();
+  event?.stopImmediatePropagation?.();
+  if (!baked) setSplatEraserActive(false, { silent: true });
+  else {
+    eraser.hasSelection = true;
+    updateSplatEraserUI();
+  }
+}
+
+function setSplatEraserActive(active, { silent = false } = {}) {
+  const nextActive = Boolean(active);
+  if (nextActive && !state.splatEraser && state.isModelLoaded && state.splatMesh) {
+    configureSplatEraser(state.splatMesh);
+  }
+  const eraser = state.splatEraser;
+  if (nextActive && (!eraser || !state.isModelLoaded)) {
+    showToast(
+      state.lang === 'zh' ? '请先加载支持擦除的 3DGS 模型' : 'Load a 3DGS model before erasing',
+      'warning'
+    );
+    return;
+  }
+  if (nextActive && (state.previewActive || state.recordingActive || state.compositingActive)) {
+    showToast(
+      state.lang === 'zh' ? '请先停止预览或视频导出' : 'Stop preview or export before erasing',
+      'warning'
+    );
+    return;
+  }
+  if (!eraser || eraser.active === nextActive) return;
+
+  if (nextActive) {
+    if (state.settings.renderer !== 'spark') setRendererMode('spark', 'button');
+    updateSplatEraserBrushDimensions(eraser);
+    eraser.touchLayout = isMobileViewport();
+    eraser.navigationMode = false;
+    eraser.touchPointers.clear();
+    eraser.touchGesture = null;
+    eraser.touchSequenceNavigating = false;
+    eraser.hasSurfacePoint = false;
+    eraser.controlsWereEnabled = state.controls?.enabled !== false;
+    eraser.autoRotateWasEnabled = Boolean(state.particleSystem?.autoRotate);
+    eraser.active = true;
+    eraser.mesh.worldModifier = eraser.modifier;
+    eraser.mesh.updateGenerator();
+    if (state.controls) {
+      state.controls.enabled = eraser.touchLayout ? false : eraser.controlsWereEnabled;
+    }
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    document.body.classList.add('splat-eraser-active');
+    if (state.renderer?.domElement) {
+      state.renderer.domElement.style.cursor = eraser.touchLayout ? 'crosshair' : 'none';
+    }
+    syncSplatEraserBrushCursor();
+    showSplatEraserBrushPreview(null, { center: true, duration: 1000 });
+    if (!silent) {
+      showToast(
+        state.lang === 'zh'
+          ? (eraser.touchLayout
+            ? '橡皮擦已开启：单指涂抹，双指调整视角或缩放'
+            : '左键涂抹，[ / ] 调整大小；Alt/Option 拖动旋转，滚轮缩放、右键平移')
+          : (eraser.touchLayout
+            ? 'Eraser enabled: paint with one finger; use two fingers to orbit or zoom'
+            : 'Paint with left-drag; [ / ] resizes; Alt/Option-drag orbits, wheel zooms, right-drag pans'),
+        'info',
+        5000
+      );
+    }
+  } else {
+    if (eraser.drawing) endSplatEraserStroke();
+    if (eraser.staged) cancelSplatEraserSelection({ silent: true });
+    if (eraser.sizePreviewTimer) clearTimeout(eraser.sizePreviewTimer);
+    eraser.sizePreviewTimer = null;
+    eraser.sizePreviewActive = false;
+    eraser.commitEnabled.value = false;
+    eraser.touchPointers.clear();
+    eraser.touchGesture = null;
+    eraser.touchSequenceNavigating = false;
+    eraser.hasSurfacePoint = false;
+    eraser.active = false;
+    eraser.mesh.worldModifier = null;
+    eraser.mesh.updateGenerator();
+    if (state.controls && !state.previewActive && !state.recordingActive) {
+      state.controls.enabled = eraser.controlsWereEnabled;
+    }
+    if (state.particleSystem) state.particleSystem.autoRotate = eraser.autoRotateWasEnabled;
+    document.body.classList.remove('splat-eraser-active');
+    if (state.renderer?.domElement) state.renderer.domElement.style.cursor = '';
+    hideSplatEraserBrushCursor();
+  }
+  updateSplatEraserUI();
+  syncSplatCropHelperVisibility();
+}
 // ============================================================
 // DOM References
 // ============================================================
@@ -174,14 +1909,37 @@ function cacheDom() {
     btnToggleRotation: document.getElementById('btn-toggle-rotation'),
     btnMobileToggleRotation: document.getElementById('btn-mobile-toggle-rotation'),
     settingsPanel: document.getElementById('settings-panel'),
+    btnDesktopParticleSettings: document.getElementById('btn-desktop-particle-settings'),
+    btnDesktopSplatSettings: document.getElementById('btn-desktop-splat-settings'),
+    btnMobileParticleSettings: document.getElementById('btn-mobile-particle-settings'),
+    btnMobileSplatSettings: document.getElementById('btn-mobile-splat-settings'),
+    btnMobileSettingsReset: document.getElementById('btn-mobile-settings-reset'),
+    btnMobileSettingsConfirm: document.getElementById('btn-mobile-settings-confirm'),
+    mobileSettingsGroupLabel: document.getElementById('mobile-settings-group-label'),
     mobileCameraOptions: document.getElementById('mobile-camera-options'),
     desktopFlightAnchor: document.getElementById('desktop-flight-anchor'),
-    desktopScatterAnchor: document.getElementById('desktop-scatter-anchor'),
     flightPresetItem: document.getElementById('flight-preset-item'),
-    scatterEffectItem: document.getElementById('scatter-effect-item'),
     settingMaxParticles: document.getElementById('setting-max-particles'),
     settingCropFactor: document.getElementById('setting-crop-factor'),
     settingCropFactorVal: document.getElementById('setting-crop-factor-val'),
+    btnMobileSplatCropPanel: document.getElementById('btn-mobile-splat-crop-panel'),
+    btnMobileSplatEraserPanel: document.getElementById('btn-mobile-splat-eraser-panel'),
+    splatCropControls: document.getElementById('splat-crop-controls'),
+    particleCropControls: document.getElementById('particle-crop-controls'),
+    btnParticleCropToggle: document.getElementById('btn-particle-crop-toggle'),
+    btnSplatCropToggle: document.getElementById('btn-splat-crop-toggle'),
+    btnSplatEraser: document.getElementById('btn-splat-eraser'),
+    btnSplatEraserPaint: document.getElementById('btn-splat-eraser-paint'),
+    btnSplatEraserConfirm: document.getElementById('btn-splat-eraser-confirm'),
+    btnSplatEraserUndo: document.getElementById('btn-splat-eraser-undo'),
+    settingSplatEraserSize: document.getElementById('setting-splat-eraser-size'),
+    settingSplatEraserSizeVal: document.getElementById('setting-splat-eraser-size-val'),
+    splatEraserStatus: document.getElementById('splat-eraser-status'),
+    splatEraserToolTitle: document.querySelector('.splat-eraser-tool-title-text'),
+    splatEraserBrushCursor: document.getElementById('splat-eraser-brush-cursor'),
+    btnSplatCropShapeEllipsoid: document.getElementById('btn-splat-crop-shape-ellipsoid'),
+    btnSplatCropShapeBox: document.getElementById('btn-splat-crop-shape-box'),
+    btnMobileSplatCropNone: document.getElementById('btn-mobile-splat-crop-none'),
     settingMinOpacity: document.getElementById('setting-min-opacity'),
     settingMinOpacityVal: document.getElementById('setting-min-opacity-val'),
     settingPointSize: document.getElementById('setting-point-size'),
@@ -196,7 +1954,6 @@ function cacheDom() {
     settingParticleOpacityVal: document.getElementById('setting-particle-opacity-val'),
     settingSplatScale: document.getElementById('setting-splat-scale'),
     settingSplatScaleVal: document.getElementById('setting-splat-scale-val'),
-    settingScatterEffect: document.getElementById('setting-scatter-effect'),
     cameraScatterEffect: document.getElementById('camera-scatter-effect'),
     desktopCameraScatterItem: document.getElementById('desktop-camera-scatter-item'),
 
@@ -313,32 +2070,166 @@ function onResize() {
     state.particleSystem.setViewportSize(w, h);
   }
   syncResponsiveControlLayout();
+  syncSplatCropHelperVisibility();
+}
+
+function updateMobileSettingsUI() {
+  if (!dom.settingsPanel) return;
+  if (!isMobileViewport()) {
+    dom.settingsPanel.classList.remove(
+      'mobile-settings-root',
+      'mobile-settings-detail',
+      'mobile-settings-particles',
+      'mobile-settings-spark',
+      'mobile-splat-crop-view',
+      'mobile-splat-eraser-view'
+    );
+    return;
+  }
+
+  if (
+    !dom.settingsPanel.classList.contains('mobile-settings-root')
+    && !dom.settingsPanel.classList.contains('mobile-settings-detail')
+  ) {
+    dom.settingsPanel.classList.add('mobile-settings-root');
+  }
+
+  const isSpark = state.settings.renderer === 'spark';
+  dom.settingsPanel.classList.toggle('mobile-settings-particles', !isSpark);
+  dom.settingsPanel.classList.toggle('mobile-settings-spark', isSpark);
+  if (dom.mobileSettingsGroupLabel) {
+    dom.mobileSettingsGroupLabel.textContent = isSpark
+      ? (state.lang === 'zh' ? '3DGS 设置' : '3DGS Settings')
+      : (state.lang === 'zh' ? '粒子设置' : 'Particle Settings');
+  }
+  if (
+    !dom.settingsPanel.classList.contains('mobile-splat-crop-view')
+    && !dom.settingsPanel.classList.contains('mobile-splat-eraser-view')
+  ) {
+    dom.settingsPanel.classList.add('mobile-splat-crop-view');
+  }
+
+  for (const [button, selected] of [
+    [dom.btnMobileParticleSettings, !isSpark],
+    [dom.btnMobileSplatSettings, isSpark],
+  ]) {
+    if (!button) continue;
+    button.classList.remove('active');
+    button.setAttribute('aria-selected', String(selected));
+  }
+
+  const cropSelected = dom.settingsPanel.classList.contains('mobile-splat-crop-view');
+  for (const [button, selected] of [
+    [dom.btnMobileSplatCropPanel, cropSelected],
+    [dom.btnMobileSplatEraserPanel, !cropSelected],
+  ]) {
+    if (!button) continue;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+  }
+  updateSplatCropShapeUI();
+}
+
+function setMobileSettingsLevel(level) {
+  if (!dom.settingsPanel || !isMobileViewport()) return;
+  const showDetail = level === 'detail';
+  dom.settingsPanel.classList.toggle('mobile-settings-root', !showDetail);
+  dom.settingsPanel.classList.toggle('mobile-settings-detail', showDetail);
+  if (!showDetail && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
+}
+
+function setMobileSettingsMode(mode) {
+  setRendererMode(mode, 'settings');
+  setMobileSettingsLevel('detail');
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
+}
+
+function setMobileSplatTool(tool) {
+  if (!dom.settingsPanel || !isMobileViewport()) return;
+  const showEraser = tool === 'eraser';
+  dom.settingsPanel.classList.toggle('mobile-splat-crop-view', !showEraser);
+  dom.settingsPanel.classList.toggle('mobile-splat-eraser-view', showEraser);
+  if (!showEraser && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
+}
+
+function resetMobileSettingsParameter() {
+  if (!isMobileViewport()) return;
+  if (state.settings.renderer === 'spark') {
+    if (dom.settingsPanel?.classList.contains('mobile-splat-eraser-view')) {
+      if (state.splatEraser?.staged) cancelSplatEraserSelection({ silent: true });
+      setSplatEraserBrushPercent(8);
+    } else {
+      state.settings.splatCropEnabled = false;
+      state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
+      state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
+      updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
+      applySplatCropShape('ellipsoid');
+      updateSplatCropFromSettings();
+    }
+  } else {
+    const activeTarget = document.querySelector('.mobile-particle-setting-tag.active')?.dataset.settingTarget;
+    const sliderDefaults = {
+      'setting-size-item': [dom.settingPointSize, 0.20],
+      'setting-brightness-item': [dom.settingParticleBrightness, 0.70],
+      'setting-density-item': [dom.settingPointDensity, 1.00],
+    };
+    if (activeTarget === 'setting-crop-item') {
+      state.settings.cropOutliers = true;
+      updateCropToggleUI(dom.btnParticleCropToggle, true, 'particle');
+      state.particleSystem?.setCropEnabled(true);
+      if (dom.settingCropFactor) {
+        dom.settingCropFactor.value = '2.5';
+        dom.settingCropFactor.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } else {
+      const [slider, defaultValue] = sliderDefaults[activeTarget] || [];
+      if (slider) {
+        slider.value = String(defaultValue);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+  }
+  showToast(state.lang === 'zh' ? '当前参数已重置' : 'Current parameter reset', 'info', 1800);
+}
+
+function confirmMobileSettings() {
+  if (!isMobileViewport()) return;
+  setMobileSettingsLevel('root');
+  showToast(state.lang === 'zh' ? '参数已保存' : 'Settings saved', 'success', 1600);
 }
 
 function syncResponsiveControlLayout() {
-  if (!dom.mobileCameraOptions || !dom.flightPresetItem || !dom.scatterEffectItem) return;
+  if (!dom.mobileCameraOptions || !dom.flightPresetItem || !dom.desktopCameraScatterItem) return;
 
-  if (isMobileViewport()) {
-    dom.mobileCameraOptions.append(dom.flightPresetItem, dom.scatterEffectItem);
+  const mobile = isMobileViewport();
+  dom.settingsPanel?.classList.toggle('desktop-settings-layout', !mobile);
+  if (mobile) {
+    dom.mobileCameraOptions.append(dom.flightPresetItem, dom.desktopCameraScatterItem);
   } else {
     dom.desktopFlightAnchor.after(dom.flightPresetItem);
-    dom.desktopScatterAnchor.after(dom.scatterEffectItem);
+    dom.flightPresetItem.after(dom.desktopCameraScatterItem);
   }
-}
-
-function initializeScatterEffectControls() {
-  if (!dom.settingScatterEffect || !dom.cameraScatterEffect) return;
-  if (dom.cameraScatterEffect.options.length === 0) {
-    const clonedOptions = Array.from(dom.settingScatterEffect.options, option => option.cloneNode(true));
-    dom.cameraScatterEffect.append(...clonedOptions);
-  }
-  dom.cameraScatterEffect.value = dom.settingScatterEffect.value;
+  updateDesktopSettingsUI();
+  updateMobileSettingsUI();
 }
 
 function syncModelRendererVisibility() {
   if (!state.isModelLoaded) return;
   const showParticles = state.splatInterpolation < (1.0 - RENDERER_VISIBILITY_EPSILON);
-  const showSpark = state.splatInterpolation > RENDERER_VISIBILITY_EPSILON;
+  // Keep transparent 3DGS rendering alive briefly before an exported
+  // particle -> reality switch. Spark can then settle its camera sorting and
+  // SplatEdit crop before the first visible 3DGS frame is encoded.
+  const showSpark = state.sparkPrewarmActive
+    || state.splatInterpolation > RENDERER_VISIBILITY_EPSILON;
 
   if (
     state.rendererVisibility.particles === showParticles &&
@@ -360,16 +2251,77 @@ function syncModelRendererVisibility() {
     state.sparkRenderer.visible = showSpark;
   }
 }
+
+const splatStarAnchor = new THREE.Vector3();
+const splatBasePosition = new THREE.Vector3();
+
+/**
+ * Keep the 3DGS model on the same coherent arrival scale as effect 20's point
+ * cloud. Position compensation around the captured first-frame anchor prevents
+ * off-centre compositions from drifting while the model grows.
+ */
+function syncSplatStarEffectTransform() {
+  if (!state.splatMesh || !state.particleSystem) return;
+
+  const rotationX = state.xFlipped ? 0 : Math.PI;
+  const modelScale = Number.isFinite(state.modelScale) ? state.modelScale : 1;
+  const displayScale = Number.isFinite(state.settings.splatScale)
+    ? state.settings.splatScale
+    : 1;
+  const center = state.modelCenter || { x: 0, y: 0, z: 0 };
+
+  if (rotationX === 0) {
+    splatBasePosition.set(
+      -center.x * modelScale,
+      -center.y * modelScale,
+      -center.z * modelScale
+    );
+  } else {
+    splatBasePosition.set(
+      -center.x * modelScale,
+      center.y * modelScale,
+      center.z * modelScale
+    );
+  }
+
+  const starEffectActive = state.settings.particleEffectEnabled
+    && Math.round(Number(state.settings.scatterEffect) || 0) === 20;
+  const starScale = starEffectActive
+    ? state.particleSystem.getStarModelScale()
+    : 1;
+
+  state.splatMesh.scale.setScalar(modelScale * displayScale * starScale);
+  if (starEffectActive) {
+    state.particleSystem.getStarScaleAnchorInPivot(splatStarAnchor);
+    if (state.particleSystem.pivot && state.splatPivot) {
+      state.particleSystem.pivot.updateWorldMatrix(true, false);
+      state.splatPivot.updateWorldMatrix(true, false);
+      state.particleSystem.pivot.localToWorld(splatStarAnchor);
+      state.splatPivot.worldToLocal(splatStarAnchor);
+    } else {
+      // During initial mesh construction the shared 3DGS pivot does not exist
+      // yet; its default transform is identity while particle display scale is
+      // already stored on the particle pivot.
+      splatStarAnchor.multiplyScalar(displayScale);
+    }
+    state.splatMesh.position.copy(splatBasePosition)
+      .sub(splatStarAnchor)
+      .multiplyScalar(starScale)
+      .add(splatStarAnchor);
+  } else {
+    state.splatMesh.position.copy(splatBasePosition);
+  }
+}
 // ============================================================
 // Internationalization (i18n) translation system
 // ============================================================
 const translations = {
   zh: {
     // Toolbar
-    'url-placeholder': '粘贴 Remy3D 或 Kiri Engine 分享链接...',
+    'url-placeholder': '粘贴 Remy3D、Kiri Engine 或 Insta360 分享链接...',
     'btn-load-title': '从链接加载模型',
     'btn-load-text': '加载',
-    'btn-upload-title': '上传本地 PLY 或 Splat 文件',
+    'btn-upload-title': '上传本地 PLY、Splat 或 SOG 文件',
     'btn-upload-text': '上传模型',
     'btn-spark-title': '切换 3D 实景模式',
     'btn-spark-text': '3D实景',
@@ -408,6 +2360,9 @@ const translations = {
     'preset-heart': '14. 3D 心形循环飞行',
     'preset-turbulence': '15. 乱噪波流体飞行',
     'preset-inceptionPush': '16. 盗梦空间缓慢推进旋转',
+    'preset-spaceDepthPush': '17. 空间纵深缓慢进入',
+    'preset-spaceLateralSweep': '18. 空间横向平移扫景',
+    'preset-spaceOutwardOrbit': '19. 朝外环绕空间场景',
     'btn-add-keyframe': '添加关键帧',
     'btn-clear-keyframes': '清空',
     'btn-preview-path': '预览',
@@ -421,12 +2376,28 @@ const translations = {
     'composition-failed-no-fallback': '逐帧视频合成失败，未切换到实时录制',
     // Rendering Settings
     'settings-title': '渲染设置',
+    'desktop-particle-settings': '粒子设置',
+    'desktop-splat-settings': '3DGS 设置',
     'label-max-particles': '最大粒子数 (点云模式)',
     'opt-particles-50k': '50,000 (极速)',
     'opt-particles-150k': '150,000 (推荐)',
     'opt-particles-300k': '300,000 (高精)',
     'opt-particles-500k': '500,000 (极精)',
-    'label-crop-factor': '过滤背景范围 (裁剪)',
+    'label-crop-factor': '粒子裁剪背景',
+    'label-splat-crop-factor': '3DGS 裁剪背景',
+    'label-splat-crop-shape': '裁剪形状',
+    'splat-crop-shape-ellipsoid': '椭球',
+    'splat-crop-shape-box': '方形',
+    'splat-crop-shape-none': '无',
+    'splat-crop-direct-hint': '拖动裁剪框上的 X / Y / Z 箭头调整各面',
+    'btn-splat-eraser': '高斯点擦除',
+    'btn-splat-eraser-exit': '退出高斯点擦除',
+    'splat-eraser-tool-title': '高斯点橡皮擦',
+    'splat-eraser-size': '橡皮擦大小',
+    'btn-mobile-splat-crop': '裁剪背景',
+    'btn-mobile-splat-eraser': '橡皮擦',
+    'btn-mobile-settings-reset': '重置当前参数',
+    'btn-mobile-settings-confirm': '保存参数',
     'label-min-opacity': '最小不透明度 (3DGS模式)',
     'label-point-size': '点云粒子大小',
     'label-point-density': '点云粒子密度',
@@ -447,6 +2418,7 @@ const translations = {
     'effect-13': '7. 分形几何轨道重组',
     'effect-14': '8. 风吹飞砂由后向前扫拂',
     'effect-17': '9. 雨点由天而降重组',
+    'effect-20': '10. 星际穿越流星汇聚',
     // Stats & Progress
     'stat-label-particles': '当前粒子数',
     'stat-label-fps': '当前帧率',
@@ -472,16 +2444,16 @@ const translations = {
     'remy-intro-content': '照片视频很美好，但 3D 影像更显珍贵。Remy 是一款 3D 空间记录 App，让美好记忆场景可以保存并沉浸式体验。本网页使用 Vibe Coding 制作，你可以导入 Remy 已生成的 3D 影像，体验自定义运镜、发光粒子特效、手势控制等玩法，让 3D 影像变成更好玩的数字载体，祝你玩的开心！',
     // Welcome Hint & Loading
     'welcome-title': 'Remy 自定义特效运镜工具',
-    'welcome-desc': '在下方输入框中粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> 或 <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 分享链接，即可开始您的 3D 粒子和 3DGS 实景体验。',
-    'landing-url-placeholder': '粘贴 Remy3D 分享链接，无链接直接点击加载体验',
+    'welcome-desc': '在下方输入框粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>、<a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 或 Insta360 分享链接<br>即可开始您的粒子艺术和 3DGS 体验',
+    'landing-url-placeholder': '粘贴 Remy3D、Kiri 或 Insta360 分享链接，无链接直接点击加载体验',
     'loading-init': '加载中...',
     'loading-downloading': '正在获取 3DGS 数据，请稍候...',
-    'loading-parsing': '正在读取 PLY 点云数据，请稍候...',
+    'loading-parsing': '正在读取模型数据，请稍候...',
     'loading-processing': '正在构建 GPU 渲染管线...',
     'loading-spark': '正在加载并初始化渲染引擎...',
     // Alerts/Toasts
-    'enter-valid-url': '请输入 Remy3D 或 Kiri Engine 分享链接',
-    'enter-valid-url-2': '请输入有效的 Remy3D 或 Kiri Engine 分享链接',
+    'enter-valid-url': '请输入 Remy3D、Kiri Engine 或 Insta360 分享链接',
+    'enter-valid-url-2': '请输入有效的 Remy3D、Kiri Engine 或 Insta360 分享链接',
     'failed-parse-ply': '解析 PLY 文件失败: ',
     'failed-load-spark': '加载渲染引擎失败: ',
     'loaded-success-prefix': '',
@@ -505,7 +2477,7 @@ const translations = {
     'previewing-camera-flight': '正在预览镜头自定义轨迹飞行...',
     'video-exported-success': 'MP4 运镜视频成功导出并已开始下载！',
     'recording-camera-flight-toast': '正在后台进行离屏 1080p 超清运镜录制中，请稍候...',
-    'drop-ply-only': '请拖放有效的 .ply 或 .splat 格式文件',
+    'drop-ply-only': '请拖放有效的 .ply、.splat 或 .sog 格式文件',
     'model-inverted': '模型方向已垂直翻转 (纠正上下颠倒)',
     'model-restored': '已恢复模型的默认方向',
     'reprocessing-settings': '正在以新的参数重新解析并过滤粒子...',
@@ -528,10 +2500,10 @@ const translations = {
   },
   en: {
     // Toolbar
-    'url-placeholder': 'Paste Remy3D or Kiri Engine share URL...',
+    'url-placeholder': 'Paste a Remy3D, Kiri Engine, or Insta360 share URL...',
     'btn-load-title': 'Load model from URL',
     'btn-load-text': 'Load',
-    'btn-upload-title': 'Upload local PLY or Splat file',
+    'btn-upload-title': 'Upload local PLY, Splat, or SOG file',
     'btn-upload-text': 'Upload Model',
     'btn-spark-title': 'Toggle 3D Reality mode',
     'btn-spark-text': '3D Reality',
@@ -570,6 +2542,9 @@ const translations = {
     'preset-heart': '14. 3D Cardiomorphic Loop',
     'preset-turbulence': '15. Turbulence Noise Flight',
     'preset-inceptionPush': '16. Inception Push & Roll',
+    'preset-spaceDepthPush': '17. Spatial Depth Entry',
+    'preset-spaceLateralSweep': '18. Spatial Lateral Sweep',
+    'preset-spaceOutwardOrbit': '19. Outward Spatial Orbit',
     'btn-add-keyframe': 'Add Keyframe',
     'btn-clear-keyframes': 'Clear',
     'btn-preview-path': 'Preview',
@@ -583,12 +2558,28 @@ const translations = {
     'composition-failed-no-fallback': 'Frame composition failed; live recording was not started',
     // Rendering Settings
     'settings-title': 'Rendering Settings',
+    'desktop-particle-settings': 'Particle Settings',
+    'desktop-splat-settings': '3DGS Settings',
     'label-max-particles': 'Max Particles (Particle Cloud)',
     'opt-particles-50k': '50,000 (Fastest)',
     'opt-particles-150k': '150,000 (Recommended)',
     'opt-particles-300k': '300,000 (High Detail)',
     'opt-particles-500k': '500,000 (Maximum)',
-    'label-crop-factor': 'Filter Background (Crop)',
+    'label-crop-factor': 'Particle Background Crop',
+    'label-splat-crop-factor': '3DGS Background Crop',
+    'label-splat-crop-shape': 'Crop Shape',
+    'splat-crop-shape-ellipsoid': 'Ellipsoid',
+    'splat-crop-shape-box': 'Box',
+    'splat-crop-shape-none': 'None',
+    'splat-crop-direct-hint': 'Drag the X / Y / Z arrows on the crop volume to adjust each face',
+    'btn-splat-eraser': 'Erase Gaussian splats',
+    'btn-splat-eraser-exit': 'Exit Gaussian eraser',
+    'splat-eraser-tool-title': 'Gaussian Splat Eraser',
+    'splat-eraser-size': 'Eraser Size',
+    'btn-mobile-splat-crop': 'Crop Background',
+    'btn-mobile-splat-eraser': 'Eraser',
+    'btn-mobile-settings-reset': 'Reset current parameter',
+    'btn-mobile-settings-confirm': 'Save settings',
     'label-min-opacity': 'Min Opacity (3DGS)',
     'label-point-size': 'Base Particle Size',
     'label-point-density': 'Point Cloud Density',
@@ -609,6 +2600,7 @@ const translations = {
     'effect-13': '7. Fractal Julia Orbit',
     'effect-14': '8. Wind Snap Sweep',
     'effect-17': '9. Raindrop Falling Assembly',
+    'effect-20': '10. Interstellar Warp Meteor Assembly',
     // Stats & Progress
     'stat-label-particles': 'Particles',
     'stat-label-fps': 'FPS',
@@ -634,16 +2626,16 @@ const translations = {
     'remy-intro-content': 'Photos and videos are beautiful, but 3D imagery is even more precious. Remy is a 3D spatial capture App that preserves cherished memories for immersive replay. Built using Vibe Coding, this web app lets you import your Remy 3D captures to experiment with custom camera paths, glowing particle effects, and hand gestures. Let\'s make 3D captures a more playful digital medium. Have fun!',
     // Welcome Hint & Loading
     'welcome-title': 'Remy Custom Effects & Camera Tool',
-    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a> or <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> share URL below to explore Particle Mode and 3D Reality.',
-    'landing-url-placeholder': 'Paste a Remy3D share link, or load without one to try the demo',
+    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>, <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a>, or Insta360 share link in the box below.<br>Start your particle art and 3DGS experience.',
+    'landing-url-placeholder': 'Paste a Remy3D, Kiri, or Insta360 share link, or load without one to try the demo',
     'loading-init': 'Loading...',
     'loading-downloading': 'Downloading 3DGS data, please wait...',
-    'loading-parsing': 'Parsing PLY point cloud, please wait...',
+    'loading-parsing': 'Parsing model data, please wait...',
     'loading-processing': 'Building GPU pipeline...',
     'loading-spark': 'Loading and initializing the rendering engine...',
     // Alerts/Toasts
-    'enter-valid-url': 'Please enter a Remy3D or Kiri Engine share URL',
-    'enter-valid-url-2': 'Please enter a valid Remy3D or Kiri Engine share URL',
+    'enter-valid-url': 'Please enter a Remy3D, Kiri Engine, or Insta360 share URL',
+    'enter-valid-url-2': 'Please enter a valid Remy3D, Kiri Engine, or Insta360 share URL',
     'failed-parse-ply': 'Failed to parse PLY file: ',
     'failed-load-spark': 'Failed to load rendering engine: ',
     'loaded-success-prefix': '',
@@ -667,7 +2659,7 @@ const translations = {
     'previewing-camera-flight': 'Previewing camera flight path...',
     'video-exported-success': 'Video exported successfully!',
     'recording-camera-flight-toast': 'Recording 1080p MP4 camera flight...',
-    'drop-ply-only': 'Please drop a valid .ply or .splat file',
+    'drop-ply-only': 'Please drop a valid .ply, .splat, or .sog file',
     'model-inverted': 'Model inverted vertically',
     'model-restored': 'Model orientation restored',
     'reprocessing-settings': 'Re-processing with new settings...',
@@ -801,6 +2793,9 @@ function applyTranslations(lang) {
       dom.selectPresetFlight.options[14].textContent = dict['preset-heart'];
       dom.selectPresetFlight.options[15].textContent = dict['preset-turbulence'];
       dom.selectPresetFlight.options[16].textContent = dict['preset-inceptionPush'];
+      dom.selectPresetFlight.options[17].textContent = dict['preset-spaceDepthPush'];
+      dom.selectPresetFlight.options[18].textContent = dict['preset-spaceLateralSweep'];
+      dom.selectPresetFlight.options[19].textContent = dict['preset-spaceOutwardOrbit'];
     }
     
     if (dom.btnAddKeyframe) {
@@ -834,11 +2829,67 @@ function applyTranslations(lang) {
   if (dom.settingsPanel) {
     const h3 = dom.settingsPanel.querySelector('h3');
     if (h3) h3.textContent = dict['settings-title'];
+    if (dom.btnDesktopParticleSettings) {
+      dom.btnDesktopParticleSettings.textContent = dict['desktop-particle-settings'];
+    }
+    if (dom.btnDesktopSplatSettings) {
+      dom.btnDesktopSplatSettings.textContent = dict['desktop-splat-settings'];
+    }
+    if (dom.btnMobileParticleSettings) {
+      dom.btnMobileParticleSettings.textContent = dict['desktop-particle-settings'];
+    }
+    if (dom.btnMobileSplatSettings) {
+      dom.btnMobileSplatSettings.textContent = dict['desktop-splat-settings'];
+    }
+    if (dom.splatEraserToolTitle) {
+      dom.splatEraserToolTitle.textContent = dict['splat-eraser-tool-title'];
+    }
+    const eraserSizeLabel = dom.settingsPanel.querySelector('label[for="setting-splat-eraser-size"]');
+    if (eraserSizeLabel) eraserSizeLabel.textContent = dict['splat-eraser-size'];
     
     const labelParticles = dom.settingsPanel.querySelector('label[for="setting-max-particles"]');
     if (labelParticles) labelParticles.textContent = dict['label-max-particles'];
     const labelCrop = dom.settingsPanel.querySelector('label[for="setting-crop-factor"]');
     if (labelCrop) labelCrop.textContent = dict['label-crop-factor'];
+    const labelSplatCrop = dom.settingsPanel.querySelector('.splat-crop-title');
+    if (labelSplatCrop) labelSplatCrop.textContent = dict['label-splat-crop-factor'];
+    const splatCropShapeLabel = dom.settingsPanel.querySelector('.splat-crop-shape-label');
+    if (splatCropShapeLabel) splatCropShapeLabel.textContent = dict['label-splat-crop-shape'];
+    if (dom.btnSplatCropShapeEllipsoid) {
+      dom.btnSplatCropShapeEllipsoid.textContent = dict['splat-crop-shape-ellipsoid'];
+    }
+    if (dom.btnSplatCropShapeBox) {
+      dom.btnSplatCropShapeBox.textContent = dict['splat-crop-shape-box'];
+    }
+    if (dom.btnMobileSplatCropNone) {
+      dom.btnMobileSplatCropNone.textContent = dict['splat-crop-shape-none'];
+    }
+    const mobileSplatCropShapeTitle = dom.settingsPanel.querySelector('.mobile-splat-crop-shape-title');
+    if (mobileSplatCropShapeTitle) {
+      mobileSplatCropShapeTitle.textContent = dict['label-splat-crop-shape'];
+    }
+    updateSplatEraserUI();
+    if (dom.btnMobileSplatCropPanel) {
+      dom.btnMobileSplatCropPanel.textContent = dict['btn-mobile-splat-crop'];
+    }
+    if (dom.btnMobileSplatEraserPanel) {
+      dom.btnMobileSplatEraserPanel.textContent = dict['btn-mobile-splat-eraser'];
+    }
+    if (dom.btnMobileSettingsReset) {
+      dom.btnMobileSettingsReset.title = dict['btn-mobile-settings-reset'];
+      dom.btnMobileSettingsReset.setAttribute('aria-label', dict['btn-mobile-settings-reset']);
+    }
+    if (dom.btnMobileSettingsConfirm) {
+      dom.btnMobileSettingsConfirm.title = dict['btn-mobile-settings-confirm'];
+      dom.btnMobileSettingsConfirm.setAttribute('aria-label', dict['btn-mobile-settings-confirm']);
+    }
+    if (dom.mobileSettingsGroupLabel) {
+      dom.mobileSettingsGroupLabel.textContent = state.settings.renderer === 'spark'
+        ? dict['desktop-splat-settings']
+        : dict['desktop-particle-settings'];
+    }
+    const splatCropDirectHint = dom.settingsPanel.querySelector('.splat-crop-direct-hint-text');
+    if (splatCropDirectHint) splatCropDirectHint.textContent = dict['splat-crop-direct-hint'];
     const labelMinOpacity = dom.settingsPanel.querySelector('label[for="setting-min-opacity"]');
     if (labelMinOpacity) labelMinOpacity.textContent = dict['label-min-opacity'];
     const labelPointSize = dom.settingsPanel.querySelector('label[for="setting-point-size"]');
@@ -853,18 +2904,19 @@ function applyTranslations(lang) {
     if (labelParticleOpacity) labelParticleOpacity.textContent = dict['label-particle-opacity'];
     const labelSplatScale = dom.settingsPanel.querySelector('label[for="setting-splat-scale"]');
     if (labelSplatScale) labelSplatScale.textContent = dict['label-splat-scale'];
-    const labelScatter = dom.scatterEffectItem?.querySelector('label[for="setting-scatter-effect"]');
-    if (labelScatter) labelScatter.textContent = dict['label-scatter-effect'];
     const cameraScatterLabel = dom.desktopCameraScatterItem?.querySelector('label[for="camera-scatter-effect"]');
     if (cameraScatterLabel) cameraScatterLabel.textContent = dict['label-scatter-effect'];
 
-    const mobileTags = document.querySelectorAll('.mobile-setting-tag');
+    const mobileTags = document.querySelectorAll('.mobile-particle-setting-tag');
     const tagLabels = lang === 'zh'
       ? ['裁剪背景', '粒子大小', '粒子亮度', '粒子密度']
       : ['Crop Background', 'Particle Size', 'Particle Light', 'Particle Density'];
     mobileTags.forEach((tag, index) => {
       tag.textContent = tagLabels[index];
     });
+    updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropShapeUI();
     
     if (dom.settingMaxParticles) {
       dom.settingMaxParticles.options[0].textContent = dict['opt-particles-50k'];
@@ -873,7 +2925,7 @@ function applyTranslations(lang) {
       dom.settingMaxParticles.options[3].textContent = dict['opt-particles-500k'];
     }
 
-    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
+    for (const effectSelect of [dom.cameraScatterEffect]) {
       if (effectSelect) {
         for (const opt of effectSelect.options) {
           const val = opt.value;
@@ -1068,16 +3120,21 @@ function showToast(message, type = 'info', duration = 4000) {
 // Model Loading
 // ============================================================
 /**
- * Load model from Remy3D URL.
+ * Load model from a supported share URL.
  */
 async function loadFromUrl() {
   const url = dom.urlInput.value.trim();
   if (!url) {
-    showToast('Please enter a Remy3D or Kiri Engine share URL', 'error');
+    showToast('Please enter a Remy3D, Kiri Engine, or Insta360 share URL', 'error');
     return;
   }
-  if (!url.includes('remy3d') && !url.includes('remy') && !url.includes('kiriengine')) {
-    showToast('Please enter a valid Remy3D or Kiri Engine share URL', 'error');
+  if (
+    !url.includes('remy3d')
+    && !url.includes('remy')
+    && !url.includes('kiriengine')
+    && !url.includes('insta360.com')
+  ) {
+    showToast('Please enter a valid Remy3D, Kiri Engine, or Insta360 share URL', 'error');
     return;
   }
   showLoading('Extracting model URL...');
@@ -1085,16 +3142,18 @@ async function loadFromUrl() {
     let lastDownloadError = null;
     const downloadResolvedModel = async (resolvedModel) => {
       const urlsToTry = [
-        resolvedModel.splatUrl,
-        resolvedModel.plyUrl,
-        resolvedModel.pcdUrl
-      ].filter(Boolean);
+        ['sog', resolvedModel.sogUrl],
+        ['splat', resolvedModel.splatUrl],
+        ['ply', resolvedModel.plyUrl],
+        ['ply', resolvedModel.pcdUrl],
+      ].filter(([, candidateUrl]) => Boolean(candidateUrl));
 
-      for (const tryUrl of urlsToTry) {
+      for (const [fileFormat, tryUrl] of urlsToTry) {
         try {
-          return await downloadPLY(tryUrl, (p) => {
+          const buffer = await downloadPLY(tryUrl, (p) => {
             updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
           });
+          return { buffer, fileFormat };
         } catch (error) {
           lastDownloadError = error;
           console.warn(`Failed to download ${tryUrl.substring(0, 60)}:`, error.message);
@@ -1103,33 +3162,36 @@ async function loadFromUrl() {
       return null;
     };
 
-    // Step 1: Extract PLY/Splat URL from the share page
+    // Step 1: Resolve supported model assets from the share page.
     updateLoadingProgress(0.1, 'Parsing share page...');
     let result = await extractPLYFromUrl(url);
     state.initialCameraPosition = result.initialCameraPosition || null;
-    if (!result.plyUrl && !result.pcdUrl && !result.splatUrl) {
+    if (!result.plyUrl && !result.pcdUrl && !result.splatUrl && !result.sogUrl) {
       throw new Error('No 3D model file URL found');
     }
-    // Step 2: Download the file (try 3DGS.splat -> 3DGS.ply -> pcd.ply)
+    // Step 2: Download the file (prefer compact SOG when available).
     updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-    let buffer = await downloadResolvedModel(result);
+    let download = await downloadResolvedModel(result);
 
     // A Remy share page may be cached with an expired signed model URL.
     // Re-resolve once before reporting a download failure.
-    if (!buffer) {
+    if (!download) {
       updateLoadingProgress(0.1, 'Parsing share page...');
       result = await extractPLYFromUrl(url, { forceRefresh: true });
       state.initialCameraPosition = result.initialCameraPosition || null;
       updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-      buffer = await downloadResolvedModel(result);
+      download = await downloadResolvedModel(result);
     }
 
-    if (!buffer) {
+    if (!download) {
       const reason = lastDownloadError?.message ? ` (${lastDownloadError.message})` : '';
       throw new Error(`Could not load model data from this share link.${reason}`);
     }
     // Step 3: Parse and create particles
-    await processBuffer(buffer, result.name, true);
+    await processBuffer(download.buffer, result.name, true, {
+      fileFormat: download.fileFormat,
+      flipVertical: result.source === 'insta360',
+    });
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);
@@ -1150,7 +3212,10 @@ async function loadFromFile(file) {
   showLoading(`Loading: ${file.name}`);
   try {
     const buffer = await file.arrayBuffer();
-    await processBuffer(buffer, file.name.replace(/\.(?:ply|splat)$/i, ''), true);
+    const fileFormat = file.name.split('.').pop()?.toLowerCase();
+    await processBuffer(buffer, file.name.replace(/\.(?:ply|splat|sog)$/i, ''), true, {
+      fileFormat,
+    });
   } catch (error) {
     hideLoading();
     console.error('Load from file failed:', error);
@@ -1166,6 +3231,8 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  disposeSplatEraser();
+  disposeSplatCrop();
   if (state.splatPivot) {
     state.scene.remove(state.splatPivot);
     state.splatPivot = null;
@@ -1182,10 +3249,61 @@ function disposeModel() {
   state.xFlipped = true;
   state.modelCenter = null;
 }
+function detectModelFileFormat(buffer, explicitFormat = '') {
+  const normalized = String(explicitFormat || '').toLowerCase();
+  const bytes = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+  // Some Remy resources keep a `.splat` URL while the downloaded payload is
+  // actually a PLY file. Trust the file signature before the URL-derived
+  // format so these captures do not enter the legacy 32-byte Splat parser.
+  if (bytes[0] === 0x70 && bytes[1] === 0x6c && bytes[2] === 0x79) return 'ply';
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return 'sog';
+  if (normalized === 'sog' || normalized === 'ply' || normalized === 'splat') return normalized;
+  return 'splat';
+}
+
+function createParticleDataFromSplatMesh(mesh, onProgress, options = {}) {
+  const total = mesh?.numSplats || mesh?.packedSplats?.numSplats || 0;
+  if (!total || typeof mesh.forEachSplat !== 'function') {
+    throw new Error('Decoded SOG model does not contain readable Gaussian splats');
+  }
+  const maxParticles = Math.max(1, options.maxParticles || 500000);
+  const minOpacity = Number.isFinite(options.minOpacity) ? options.minOpacity : (1 / 255);
+  const sampleStep = Math.max(1, Math.ceil(total / maxParticles));
+  const capacity = Math.ceil(total / sampleStep);
+  const positions = new Float32Array(capacity * 3);
+  const colors = new Float32Array(capacity * 3);
+  const opacities = new Float32Array(capacity);
+  let count = 0;
+
+  mesh.forEachSplat((index, center, _scales, _quaternion, opacity, color) => {
+    if (index % sampleStep !== 0 || opacity < minOpacity || count >= capacity) return;
+    if (!Number.isFinite(center.x) || !Number.isFinite(center.y) || !Number.isFinite(center.z)) return;
+    positions[count * 3] = center.x;
+    positions[count * 3 + 1] = center.y;
+    positions[count * 3 + 2] = center.z;
+    colors[count * 3] = THREE.MathUtils.clamp(color.r, 0, 1);
+    colors[count * 3 + 1] = THREE.MathUtils.clamp(color.g, 0, 1);
+    colors[count * 3 + 2] = THREE.MathUtils.clamp(color.b, 0, 1);
+    opacities[count] = THREE.MathUtils.clamp(opacity, 0, 1);
+    count++;
+    if (index % 50000 === 0) onProgress?.(index / total);
+  });
+
+  if (!count) throw new Error('SOG model contains no visible Gaussian splats');
+  onProgress?.(1);
+  return {
+    positions: positions.slice(0, count * 3),
+    colors: colors.slice(0, count * 3),
+    opacities: opacities.slice(0, count),
+    count,
+  };
+}
+
 /**
- * Process a PLY or standard Splat buffer and load both available render modes.
+ * Process a SOG, PLY, or standard Splat buffer and load both render modes.
  */
-async function processBuffer(buffer, name, isFreshLoad = false) {
+async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
+  const fileFormat = detectModelFileFormat(buffer, options.fileFormat);
   // Cache raw buffer for quick reloading on settings changes
   state.lastLoadedBuffer = buffer;
   state.lastLoadedName = name;
@@ -1196,6 +3314,17 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.previewStart = null;
   state.cameraPathFirstFrame = null;
   state.restoreCameraPathFirstFrameOnOpen = false;
+  if (isFreshLoad) {
+    state.subjectCropBounds = null;
+    // Every newly imported model starts uncropped. Once the user explicitly
+    // enables cropping, settings-tab and menu navigation preserve that choice.
+    state.settings.splatCropEnabled = false;
+    state.settings.splatCropShape = 'ellipsoid';
+    state.settings.splatCropRadiiScale = { x: 1, y: 1, z: 1 };
+    state.settings.splatCropOffset = { x: 0, y: 0, z: 0 };
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropShapeUI();
+  }
   invalidateCustomCameraPath();
   if (state.cameraModeActive) {
     toggleCameraMode();
@@ -1204,14 +3333,35 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   }
   // Clean up previous loaded model
   disposeModel();
+  // Insta360 captures use the opposite vertical model orientation from the
+  // existing Remy/Kiri pipeline. Apply it only for this fresh import source.
+  if (options.flipVertical === true) state.xFlipped = false;
   // 1. Ensure Spark 2.0 Engine is dynamically loaded on demand (prevents slow page loading)
   if (!state.sparkRenderer) {
     updateLoadingProgress(0.72, 'Loading rendering engine...');
     try {
-      const { SparkRenderer, SplatMesh } = await import('@sparkjsdev/spark');
+      const sparkModule = await import('@sparkjsdev/spark');
+      const {
+        SparkRenderer,
+        SplatMesh,
+        SplatEdit,
+        SplatEditSdf,
+        SplatEditSdfType,
+        SplatEditRgbaBlendMode,
+        RgbaArray,
+        readRgbaArray,
+        dyno,
+      } = sparkModule;
       state.sparkRenderer = new SparkRenderer({ renderer: state.renderer });
       state.scene.add(state.sparkRenderer);
       state.SplatMeshClass = SplatMesh;
+      state.sparkCropApi = {
+        SplatEdit,
+        SplatEditSdf,
+        SplatEditSdfType,
+        SplatEditRgbaBlendMode,
+      };
+      state.sparkPainterApi = { RgbaArray, readRgbaArray, dyno };
     } catch (err) {
       console.error('Failed to load rendering engine dynamically:', err);
       showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
@@ -1226,36 +3376,82 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   updateLoadingProgress(0.78, 'Parsing model data...');
   await new Promise(resolve => setTimeout(resolve, 50));
   let data;
+  let decodedSogMesh = null;
   try {
-    const header = new TextDecoder('ascii').decode(new Uint8Array(buffer, 0, Math.min(3, buffer.byteLength)));
-    const parseModel = header === 'ply' ? parsePLY : parseSplat;
-    data = parseModel(buffer, (p) => {
-      updateLoadingProgress(0.78 + p * 0.1, `Parsing: ${Math.round(p * 100)}%`);
-    }, {
-      maxParticles: state.settings.maxParticles,
-      cropOutliers: state.settings.cropOutliers,
-      cropFactor: state.settings.cropFactor,
-      autoCropFactor: isFreshLoad,
-      minOpacity: state.settings.minOpacity
-    });
-    
+    if (fileFormat === 'sog') {
+      decodedSogMesh = new state.SplatMeshClass({
+        fileBytes: buffer.slice(0),
+        fileName: `${name}.sog`,
+        onProgress: (event) => {
+          if (event.total > 0) {
+            updateLoadingProgress(
+              0.78 + (event.loaded / event.total) * 0.08,
+              `Decoding SOG: ${Math.round((event.loaded / event.total) * 100)}%`
+            );
+          }
+        },
+      });
+      await decodedSogMesh.initialized;
+      data = createParticleDataFromSplatMesh(decodedSogMesh, (p) => {
+        updateLoadingProgress(0.86 + p * 0.02, `Creating particles: ${Math.round(p * 100)}%`);
+      }, {
+        maxParticles: state.settings.maxParticles,
+        // SOG scenes often build foliage and other foreground detail from
+        // low-opacity splats. Preserve every visibly encoded Gaussian and pass
+        // its source alpha into the point shader so both render modes describe
+        // the same spatial content.
+        minOpacity: 1 / 255,
+      });
+    } else {
+      const parseModel = fileFormat === 'ply' ? parsePLY : parseSplat;
+      data = parseModel(buffer, (p) => {
+        updateLoadingProgress(0.78 + p * 0.1, `Parsing: ${Math.round(p * 100)}%`);
+      }, {
+        maxParticles: state.settings.maxParticles,
+        // Retain sampled particles once; particle background crop is applied
+        // live in the GPU shader instead of rebuilding the model.
+        cropOutliers: true,
+        deferCropToGpu: true,
+        cropFactor: state.settings.cropFactor,
+        autoCropFactor: isFreshLoad,
+        minOpacity: state.settings.minOpacity
+      });
+    }
+
+    const fallbackParticleCrop = analyzeParticleCropBounds(data.positions, data.count);
+    const parserCropCenter = data.particleCropCenter;
+    const parserCropRadius = data.particleCropRadius;
+    const particleCrop = {
+      center: (
+        parserCropCenter
+        && Number.isFinite(parserCropCenter.x)
+        && Number.isFinite(parserCropCenter.y)
+        && Number.isFinite(parserCropCenter.z)
+      ) ? parserCropCenter : fallbackParticleCrop.center,
+      radius: parserCropRadius > 0 ? parserCropRadius : fallbackParticleCrop.radius,
+      recommendedFactor: Number.isFinite(data.recommendedCropFactor)
+        ? data.recommendedCropFactor
+        : fallbackParticleCrop.recommendedFactor,
+    };
+    data.particleCropCenter = particleCrop.center;
+    data.particleCropRadius = particleCrop.radius;
+    data.particleCropEnabled = state.settings.cropOutliers;
+    data.particleCropFactor = state.settings.cropFactor;
+
     // Dynamically apply recommended crop factor for fresh model loads
-    if (isFreshLoad && data && data.recommendedCropFactor !== undefined) {
-      const factor = data.recommendedCropFactor;
+    if (isFreshLoad) {
+      const factor = THREE.MathUtils.clamp(particleCrop.recommendedFactor, 0.5, 3.0);
       state.settings.cropFactor = factor;
-      if (factor >= 3.0) {
-        state.settings.cropOutliers = false;
-      } else {
-        state.settings.cropOutliers = true;
-      }
+      data.particleCropFactor = factor;
       if (dom.settingCropFactor) {
         dom.settingCropFactor.value = factor.toFixed(2);
       }
       if (dom.settingCropFactorVal) {
-        dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
+        dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
       }
     }
   } catch (err) {
+    decodedSogMesh?.dispose?.();
     hideLoading();
     console.error(err);
     showToast(`Failed to parse model data: ${err.message}`, 'error');
@@ -1267,6 +3463,8 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   state.particleSystem.setViewportSize(window.innerWidth, window.innerHeight);
   state.particleSystem.setPointSize(state.settings.pointSize);
   state.particleSystem.setDensity(state.settings.pointDensity);
+  state.particleSystem.setCropEnabled(state.settings.cropOutliers);
+  state.particleSystem.setCropFactor(state.settings.cropFactor);
   state.particleSystem.setParticleBrightness(state.settings.particleBrightness);
   state.particleSystem.setParticleSoftness(state.settings.particleSoftness);
   state.particleSystem.setParticleOpacity(state.settings.particleOpacity);
@@ -1290,77 +3488,87 @@ async function processBuffer(buffer, name, isFreshLoad = false) {
   // 4. Create and align Spark SplatMesh
   updateLoadingProgress(0.92, 'Loading 3D Reality...');
   try {
-    const currentSplatMesh = new state.SplatMeshClass({
-      fileBytes: buffer.slice(0), // 3DGS mode keeps all contents (no cropping)
-      onLoad: (mesh) => {
-        // Prevent race condition (only load if this is still the active mesh)
-        if (state.splatMesh !== currentSplatMesh) return;
+    let currentSplatMesh = decodedSogMesh;
+    const finishSplatMeshLoad = (mesh) => {
+      // Prevent race condition (only load if this is still the active mesh)
+      if (state.splatMesh !== currentSplatMesh) return;
+
+      // Align Spark SplatMesh position, scale and orientation EXACTLY with Particle System
+      mesh.rotation.x = rotationX;
         
-        // Align Spark SplatMesh position, scale and orientation EXACTLY with Particle System
-        mesh.rotation.x = rotationX;
-        
-        // Align Spark SplatMesh position and scale with Particle System
-        mesh.scale.setScalar(scale * state.settings.splatScale);
-        if (rotationX === 0) {
-          mesh.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
-        } else {
-          mesh.position.set(-center.x * scale, center.y * scale, center.z * scale);
-        }
-        
-        // Set default opacity based on current interpolation setting
-        mesh.opacity = state.splatInterpolation;
-        // Add splat mesh to the pivot group (ensuring matching world-space rotation Y direction)
-        state.splatPivot = new THREE.Group();
-        state.splatPivot.add(mesh);
-        state.scene.add(state.splatPivot);
-        
-        // Update camera position
-        if (state.initialCameraPosition) {
-          const camPos = new THREE.Vector3(
-            state.initialCameraPosition[0],
-            -state.initialCameraPosition[1], // Flip Y (since Colmap Y is down, Three.js Y is up)
-            state.initialCameraPosition[2]   // Keep Z (no flip to maintain the front view)
-          );
-          // Apply model center translation offset and scale normalization
-          camPos.sub(center).multiplyScalar(scale);
-          // Apply model rotation align
-          if (rotationX !== 0) {
-            camPos.y = -camPos.y;
-            camPos.z = -camPos.z;
-          }
-          state.camera.position.copy(camPos);
-          console.log('Using initial camera position from cameras.json (flipped Y):', camPos);
-        } else {
-          const cropFactor = state.settings.cropOutliers ? state.settings.cropFactor : 1.0;
-          const targetDistance = 1.0 / cropFactor;
-          state.camera.position.set(0, 0.15 * targetDistance, targetDistance);
-        }
-        state.controls.target.set(0, 0, 0);
-        state.controls.update();
-        state.isModelLoaded = true;
-        state.rendererVisibility.particles = null;
-        state.rendererVisibility.spark = null;
-        // Show stats and UI
-        dom.statsPanel.classList.add('visible');
-        updateRendererUI();
-        syncModelRendererVisibility();
-        dom.statParticles.textContent = info.particleCount.toLocaleString();
-        dom.welcomeHint.classList.add('hidden');
-        document.body.classList.remove('landing-mode');
-        updateLoadingProgress(1.0, 'Done!');
-        setTimeout(() => {
-          hideLoading();
-          showToast(`${name} — ${info.particleCount.toLocaleString()} elements loaded`, 'success');
-        }, 300);
-      },
-      onProgress: (event) => {
-        if (event.total > 0) {
-          updateLoadingProgress(0.92 + (event.loaded / event.total) * 0.07, `Rendering engine load: ${Math.round((event.loaded / event.total) * 100)}%`);
-        }
+      // Align Spark SplatMesh position and scale with Particle System
+      mesh.scale.setScalar(scale * state.settings.splatScale);
+      if (rotationX === 0) {
+        mesh.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
+      } else {
+        mesh.position.set(-center.x * scale, center.y * scale, center.z * scale);
       }
-    });
-    state.splatMesh = currentSplatMesh;
+        
+      // Set default opacity based on current interpolation setting
+      mesh.opacity = state.splatInterpolation;
+      syncSplatStarEffectTransform();
+      configureSplatCrop(mesh, data);
+      // Add splat mesh to the pivot group (ensuring matching world-space rotation Y direction)
+      state.splatPivot = new THREE.Group();
+      state.splatPivot.add(mesh);
+      state.scene.add(state.splatPivot);
+        
+      // Update camera position
+      if (state.initialCameraPosition) {
+        const camPos = new THREE.Vector3(
+          state.initialCameraPosition[0],
+          -state.initialCameraPosition[1], // Flip Y (since Colmap Y is down, Three.js Y is up)
+          state.initialCameraPosition[2]   // Keep Z (no flip to maintain the front view)
+        );
+        // Apply model center translation offset and scale normalization
+        camPos.sub(center).multiplyScalar(scale);
+        // Apply model rotation align
+        if (rotationX !== 0) {
+          camPos.y = -camPos.y;
+          camPos.z = -camPos.z;
+        }
+        state.camera.position.copy(camPos);
+        console.log('Using initial camera position from cameras.json (flipped Y):', camPos);
+      } else {
+        state.camera.position.set(0, 0.15, 1.0);
+      }
+      state.controls.target.set(0, 0, 0);
+      state.controls.update();
+      state.isModelLoaded = true;
+      state.rendererVisibility.particles = null;
+      state.rendererVisibility.spark = null;
+      // Show stats and UI
+      dom.statsPanel.classList.add('visible');
+      updateRendererUI();
+      syncModelRendererVisibility();
+      dom.statParticles.textContent = info.particleCount.toLocaleString();
+      dom.welcomeHint.classList.add('hidden');
+      document.body.classList.remove('landing-mode');
+      updateLoadingProgress(1.0, 'Done!');
+      setTimeout(() => {
+        hideLoading();
+        showToast(`${name} — ${info.particleCount.toLocaleString()} elements loaded`, 'success');
+      }, 300);
+    };
+
+    if (currentSplatMesh) {
+      state.splatMesh = currentSplatMesh;
+      finishSplatMeshLoad(currentSplatMesh);
+    } else {
+      currentSplatMesh = new state.SplatMeshClass({
+        fileBytes: buffer.slice(0), // 3DGS mode keeps all contents (no cropping)
+        fileName: `${name}.${fileFormat}`,
+        onLoad: finishSplatMeshLoad,
+        onProgress: (event) => {
+          if (event.total > 0) {
+            updateLoadingProgress(0.92 + (event.loaded / event.total) * 0.07, `Rendering engine load: ${Math.round((event.loaded / event.total) * 100)}%`);
+          }
+        },
+      });
+      state.splatMesh = currentSplatMesh;
+    }
   } catch (err) {
+    decodedSogMesh?.dispose?.();
     hideLoading();
     console.error(err);
     showToast(`Rendering engine load failed: ${err.message}`, 'error', 6000);
@@ -1378,6 +3586,7 @@ const updateRemyPosition = () => {
   const recordingControlsActive = document.body.classList.contains('recording-mode-active');
   const webcamActive = dom.webcamContainer && !dom.webcamContainer.classList.contains('hidden');
   const progressActive = dom.progressControl && dom.progressControl.classList.contains('visible');
+  const mobileModelPage = isMobileViewport() && state.isModelLoaded;
 
   // Preview/export controls are fixed to the bottom edge on phones. Anchor the
   // Remy card above the top-most active control (including the progress bar)
@@ -1409,7 +3618,23 @@ const updateRemyPosition = () => {
   } else if (progressActive) {
     const pcRect = dom.progressControl.getBoundingClientRect();
     const viewH = window.innerHeight;
-    panel.style.setProperty('bottom', (viewH - pcRect.top + gap) + 'px');
+    panel.style.setProperty(
+      'bottom',
+      (viewH - pcRect.top + gap) + 'px',
+      mobileModelPage ? 'important' : ''
+    );
+  } else if (mobileModelPage) {
+    const toolbar = document.getElementById('toolbar');
+    const toolbarRect = toolbar?.getBoundingClientRect();
+    if (toolbarRect && toolbarRect.width > 0 && toolbarRect.height > 0) {
+      panel.style.setProperty(
+        'bottom',
+        (window.innerHeight - toolbarRect.top + gap) + 'px',
+        'important'
+      );
+    } else {
+      panel.style.removeProperty('bottom');
+    }
   } else {
     panel.style.removeProperty('bottom');
   }
@@ -1550,6 +3775,9 @@ async function toggleGestureControl() {
         if (state.splatPivot) {
           state.splatPivot.scale.setScalar(state.modelZoomScale);
         }
+        if (state.splatEraser) {
+          updateSplatEraserBrushDimensions(state.splatEraser);
+        }
         
         // Update UI display text with scale zoom percentage
         const percentage = Math.round(state.modelZoomScale * 100);
@@ -1682,17 +3910,26 @@ function animate() {
     state.lastGesture = currentGesture;
   }
   if (state.previewActive) {
+    setSparkPrewarmActive(false);
     applyRendererTimelineAtTime(
       state.previewTime,
       state.previewInitialRenderer,
       state.previewRendererTimeline
     );
   } else if (state.recordingActive) {
+    setSparkPrewarmActive(shouldPrewarmSparkAtTime(
+      state.recordTime,
+      state.exportInitialRenderer,
+      state.exportRendererTimeline,
+      state.recordingFps
+    ));
     applyRendererTimelineAtTime(
       state.recordTime,
       state.exportInitialRenderer,
       state.exportRendererTimeline
     );
+  } else {
+    setSparkPrewarmActive(false);
   }
   if (state.previewActive) {
     updateFlightGatherProgress(state.previewTime);
@@ -1721,12 +3958,12 @@ function animate() {
     // 2. Update Particle System (fades out internally in shader)
     if (state.particleSystem) {
       if (state.particleSystem.material) {
-        // depthWrite stays false for artistic AdditiveBlending glow;
+        // depthWrite stays false for soft additive particle glow;
         // no dynamic toggling needed anymore
       }
       state.particleSystem.setTransitionDirection(transitionDirection);
       state.particleSystem.setSplatInterpolation(state.splatInterpolation);
-      state.particleSystem.update(renderDelta, renderElapsed);
+      state.particleSystem.update(renderDelta, renderElapsed, state.camera);
       const progress = state.particleSystem.getProgress();
       const progressPercent = Math.round(progress * 100);
       if (progressPercent !== state.lastProgressPercent) {
@@ -1745,6 +3982,7 @@ function animate() {
     if (state.splatPivot && state.particleSystem?.pivot) {
       state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
     }
+    syncSplatStarEffectTransform();
   }
   // Camera Path Flight Animation (interpolates camera positions and targets)
   if (state.previewActive) {
@@ -1758,7 +3996,7 @@ function animate() {
     state.recordTime += renderDelta;
     const totalDuration = state.settings.presetFlight !== 'none'
       ? getPresetFlightDuration(state.settings.presetFlight)
-      : (state.keyframes.length - 1) * 2.0;
+      : (state.keyframes.length - 1) * CUSTOM_KEYFRAME_SEGMENT_DURATION;
     const flightProgress = Math.min(state.recordTime / totalDuration, 1);
 
     if (state.settings.presetFlight !== 'none') {
@@ -1769,6 +4007,7 @@ function animate() {
     
     if (state.recordTime >= totalDuration) {
       state.recordingActive = false;
+      setSparkPrewarmActive(false);
       state.controls.enabled = true; // Restore OrbitControls
       // Stop after this animation turn has rendered its exact t=1 endpoint.
       const recorder = state.mediaRecorder;
@@ -1819,12 +4058,29 @@ function animate() {
   if (!state.previewActive && !state.recordingActive && state.isModelLoaded) {
     state.controls.update();
   }
+  updateSplatCropHandleDepthOpacity();
+  syncSplatEraserBrushCursor();
   // Render
   state.renderer.render(state.scene, state.camera);
 }
 // ============================================================
 // Renderer Mode Toggle (Spark 2.0 vs Particles)
 // ============================================================
+function updateDesktopSettingsUI() {
+  if (!dom.settingsPanel) return;
+  const isSpark = state.settings.renderer === 'spark';
+  dom.settingsPanel.classList.toggle('desktop-setting-spark', isSpark);
+  for (const [button, selected] of [
+    [dom.btnDesktopParticleSettings, !isSpark],
+    [dom.btnDesktopSplatSettings, isSpark],
+  ]) {
+    if (!button) continue;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+}
+
 function updateRendererUI() {
   if (!dom.btnToggleSpark) return;
   const iconSpan = dom.btnToggleSpark.querySelector('.btn-icon');
@@ -1861,10 +4117,16 @@ function updateRendererUI() {
       updateRemyPositionDeferred();
     }
   }
+  updateDesktopSettingsUI();
+  updateMobileSettingsUI();
+  syncSplatCropHelperVisibility();
 }
 function setRendererMode(mode, source = 'timeline') {
   if (mode !== 'particles' && mode !== 'spark') return;
   if (state.settings.renderer === mode) return;
+  if (mode === 'particles' && state.splatEraser?.active) {
+    setSplatEraserActive(false, { silent: true });
+  }
   state.settings.renderer = mode;
   updateRendererUI();
   if (source === 'timeline' || source === 'composite') return;
@@ -1894,6 +4156,36 @@ function getRendererAtTime(time, initialRenderer, timeline = []) {
 
 function applyRendererTimelineAtTime(time, initialRenderer, timeline = []) {
   setRendererMode(getRendererAtTime(time, initialRenderer, timeline), 'timeline');
+}
+
+const SPARK_EXPORT_PREWARM_FRAMES = 6;
+
+function shouldPrewarmSparkAtTime(
+  time,
+  initialRenderer,
+  timeline = [],
+  fps = EXPORT_FPS
+) {
+  if (getRendererAtTime(time, initialRenderer, timeline) === 'spark') return false;
+  const prewarmDuration = SPARK_EXPORT_PREWARM_FRAMES / Math.max(1, fps);
+  return timeline.some(event => (
+    event.renderer === 'spark'
+    && event.time > time + 0.0001
+    && event.time - time <= prewarmDuration + 0.0001
+  ));
+}
+
+function setSparkPrewarmActive(active) {
+  const nextActive = Boolean(active);
+  if (state.sparkPrewarmActive === nextActive) return;
+  state.sparkPrewarmActive = nextActive;
+  if (nextActive) {
+    // Re-apply the latest crop matrix before Spark becomes visible. Crop
+    // center/size remain model-edit data and never mutate camera-path state.
+    updateSplatCropFromSettings();
+  }
+  state.rendererVisibility.spark = null;
+  syncModelRendererVisibility();
 }
 
 function recordPreviewRendererSwitch(renderer) {
@@ -1941,6 +4233,7 @@ function toggleCameraMode() {
     showToast('Please load a model first', 'warning');
     return;
   }
+  if (state.splatEraser?.active) setSplatEraserActive(false, { silent: true });
   
   state.cameraModeActive = !state.cameraModeActive;
   dom.btnCameraMode.classList.toggle('active', state.cameraModeActive);
@@ -1952,6 +4245,7 @@ function toggleCameraMode() {
     dom.settingsPanel.classList.add('hidden');
     dom.btnSettings.classList.remove('active');
     document.body.classList.remove('settings-panel-active');
+    syncSplatCropHelperVisibility();
     
     // Pause auto-rotation immediately
     if (state.particleSystem) {
@@ -1983,17 +4277,29 @@ function openCameraPathPanel() {
   restoreRememberedCameraPathFirstFrame();
 }
 const MOBILE_MAX_KEYFRAMES = 10;
+const CUSTOM_KEYFRAME_SEGMENT_DURATION = 2.0;
 
 function getKeyframeLimit() {
   return IS_PHONE_DEVICE ? MOBILE_MAX_KEYFRAMES : Infinity;
 }
 
 function invalidateCustomCameraPath() {
+  state.cameraKeyframeTimes = null;
   state.cameraSphericalPoints = null;
-  state.cameraSphericalTangents = null;
-  state.cameraLockedTarget = null;
-  state.cameraTimingCurve = null;
-  state.cameraTimingLength = 0;
+  state.cameraSphericalVelocities = null;
+  state.cameraFilteredTargets = null;
+  state.cameraTargetVelocities = null;
+  state.cameraProjectionValues = null;
+  state.cameraProjectionVelocities = null;
+  state.cameraQuaternions = null;
+  state.cameraQuaternionControls = null;
+  state.cameraModelQuaternions = null;
+  state.cameraModelQuaternionControls = null;
+  state.cameraPositionCurve = null;
+  state.cameraTargetCurve = null;
+  state.cameraMotionProgress = null;
+  state.cameraMotionDistances = null;
+  state.cameraMotionTotal = 0;
 }
 
 function addKeyframe() {
@@ -2106,147 +4412,626 @@ function removeKeyframe(index) {
   showToast('Keyframe removed', 'info');
 }
 
-function createMonotoneTangents(values) {
+function createMonotoneTimeDerivatives(values, times) {
   const pointCount = values.length;
-  const tangents = new Array(pointCount).fill(0);
-  if (pointCount < 2) return tangents;
+  const derivatives = new Array(pointCount).fill(0);
+  if (pointCount < 3) return derivatives;
 
+  const intervals = new Array(pointCount - 1);
   const slopes = new Array(pointCount - 1);
-  for (let i = 0; i < pointCount - 1; i++) slopes[i] = values[i + 1] - values[i];
-  tangents[0] = slopes[0];
-  tangents[pointCount - 1] = slopes[pointCount - 2];
-  for (let i = 1; i < pointCount - 1; i++) {
-    tangents[i] = (slopes[i - 1] + slopes[i]) * 0.5;
+  for (let index = 0; index < pointCount - 1; index++) {
+    intervals[index] = Math.max(1e-6, times[index + 1] - times[index]);
+    slopes[index] = (values[index + 1] - values[index]) / intervals[index];
   }
 
-  // Fritsch-Carlson limiting keeps every scalar segment inside its endpoint
-  // range. This prevents theta from overshooting into an unintended full turn.
-  for (let i = 0; i < slopes.length; i++) {
-    const slope = slopes[i];
-    if (Math.abs(slope) < 1e-8) {
-      tangents[i] = 0;
-      tangents[i + 1] = 0;
+  // PCHIP-style interior velocities prevent overshoot. The first and last
+  // derivatives intentionally stay at zero, producing one global ease-in and
+  // ease-out instead of stopping at every keyframe.
+  for (let index = 1; index < pointCount - 1; index++) {
+    const previousSlope = slopes[index - 1];
+    const nextSlope = slopes[index];
+    if (Math.abs(previousSlope) <= 1e-9 || Math.abs(nextSlope) <= 1e-9 || previousSlope * nextSlope <= 0) {
+      derivatives[index] = 0;
       continue;
     }
-    let startRatio = tangents[i] / slope;
-    let endRatio = tangents[i + 1] / slope;
-    if (startRatio < 0) {
-      tangents[i] = 0;
-      startRatio = 0;
-    }
-    if (endRatio < 0) {
-      tangents[i + 1] = 0;
-      endRatio = 0;
-    }
-    const ratioLength = Math.hypot(startRatio, endRatio);
-    if (ratioLength > 3) {
-      const scale = 3 / ratioLength;
-      tangents[i] = scale * startRatio * slope;
-      tangents[i + 1] = scale * endRatio * slope;
-    }
+    const previousInterval = intervals[index - 1];
+    const nextInterval = intervals[index];
+    const previousWeight = 2 * nextInterval + previousInterval;
+    const nextWeight = nextInterval + 2 * previousInterval;
+    derivatives[index] = (previousWeight + nextWeight)
+      / (previousWeight / previousSlope + nextWeight / nextSlope);
   }
-  return tangents;
+  return derivatives;
 }
 
-function createSphericalTangents(points) {
-  const radiusTangents = createMonotoneTangents(points.map(point => point.x));
-  const thetaTangents = createMonotoneTangents(points.map(point => point.y));
-  const phiTangents = createMonotoneTangents(points.map(point => point.z));
+function createVectorTimeDerivatives(points, times) {
+  const xDerivatives = createMonotoneTimeDerivatives(points.map(point => point.x), times);
+  const yDerivatives = createMonotoneTimeDerivatives(points.map(point => point.y), times);
+  const zDerivatives = createMonotoneTimeDerivatives(points.map(point => point.z), times);
   return points.map((_, index) => new THREE.Vector3(
-    radiusTangents[index],
-    thetaTangents[index],
-    phiTangents[index]
+    xDerivatives[index],
+    yDerivatives[index],
+    zDerivatives[index]
   ));
 }
 
-function interpolateSphericalPoint(progress) {
-  const points = state.cameraSphericalPoints;
-  const tangents = state.cameraSphericalTangents;
-  if (!points?.length || !tangents?.length) return null;
-  const segmentCount = points.length - 1;
-  const scaledProgress = THREE.MathUtils.clamp(progress, 0, 1) * segmentCount;
-  const segmentIndex = Math.min(Math.floor(scaledProgress), segmentCount - 1);
-  const amount = progress >= 1 ? 1 : scaledProgress - segmentIndex;
+const cameraTimelineSample = { segmentIndex: 0, amount: 0, duration: 1 };
+
+function getCameraTimelineSegment(progress) {
+  const times = state.cameraKeyframeTimes;
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (!times?.length || times.length < 2) {
+    cameraTimelineSample.segmentIndex = 0;
+    cameraTimelineSample.amount = clampedProgress;
+    cameraTimelineSample.duration = 1;
+    return cameraTimelineSample;
+  }
+
+  let low = 0;
+  let high = times.length - 2;
+  while (low < high) {
+    const middle = Math.floor((low + high) * 0.5);
+    if (clampedProgress > times[middle + 1]) low = middle + 1;
+    else high = middle;
+  }
+  const segmentIndex = low;
+  const duration = Math.max(1e-6, times[segmentIndex + 1] - times[segmentIndex]);
+  cameraTimelineSample.segmentIndex = segmentIndex;
+  cameraTimelineSample.amount = clampedProgress >= 1
+    ? 1
+    : THREE.MathUtils.clamp((clampedProgress - times[segmentIndex]) / duration, 0, 1);
+  cameraTimelineSample.duration = duration;
+  return cameraTimelineSample;
+}
+
+function interpolateQuinticScalar(values, derivatives, segmentIndex, amount, duration) {
   const amount2 = amount * amount;
   const amount3 = amount2 * amount;
-  const h00 = 2 * amount3 - 3 * amount2 + 1;
-  const h10 = amount3 - 2 * amount2 + amount;
-  const h01 = -2 * amount3 + 3 * amount2;
-  const h11 = amount3 - amount2;
-  return new THREE.Vector3(
-    h00 * points[segmentIndex].x + h10 * tangents[segmentIndex].x
-      + h01 * points[segmentIndex + 1].x + h11 * tangents[segmentIndex + 1].x,
-    h00 * points[segmentIndex].y + h10 * tangents[segmentIndex].y
-      + h01 * points[segmentIndex + 1].y + h11 * tangents[segmentIndex + 1].y,
-    h00 * points[segmentIndex].z + h10 * tangents[segmentIndex].z
-      + h01 * points[segmentIndex + 1].z + h11 * tangents[segmentIndex + 1].z
+  const amount4 = amount3 * amount;
+  const amount5 = amount4 * amount;
+  const position0 = 1 - 10 * amount3 + 15 * amount4 - 6 * amount5;
+  const velocity0 = amount - 6 * amount3 + 8 * amount4 - 3 * amount5;
+  const position1 = 10 * amount3 - 15 * amount4 + 6 * amount5;
+  const velocity1 = -4 * amount3 + 7 * amount4 - 3 * amount5;
+  return position0 * values[segmentIndex]
+    + velocity0 * duration * derivatives[segmentIndex]
+    + position1 * values[segmentIndex + 1]
+    + velocity1 * duration * derivatives[segmentIndex + 1];
+}
+
+function interpolateQuinticVector(points, derivatives, segmentIndex, amount, duration, output = new THREE.Vector3()) {
+  const amount2 = amount * amount;
+  const amount3 = amount2 * amount;
+  const amount4 = amount3 * amount;
+  const amount5 = amount4 * amount;
+  const position0 = 1 - 10 * amount3 + 15 * amount4 - 6 * amount5;
+  const velocity0 = amount - 6 * amount3 + 8 * amount4 - 3 * amount5;
+  const position1 = 10 * amount3 - 15 * amount4 + 6 * amount5;
+  const velocity1 = -4 * amount3 + 7 * amount4 - 3 * amount5;
+  return output
+    .copy(points[segmentIndex]).multiplyScalar(position0)
+    .addScaledVector(derivatives[segmentIndex], velocity0 * duration)
+    .addScaledVector(points[segmentIndex + 1], position1)
+    .addScaledVector(derivatives[segmentIndex + 1], velocity1 * duration);
+}
+
+function sphericalPointToCameraPosition(sphereCoords, target, output = new THREE.Vector3()) {
+  const spherical = new THREE.Spherical(
+    Math.max(1e-5, sphereCoords.x),
+    THREE.MathUtils.clamp(sphereCoords.z, 1e-4, Math.PI - 1e-4),
+    sphereCoords.y
   );
+  return output.setFromSpherical(spherical).add(target);
+}
+
+const CAMERA_TARGET_FILTER_PIXELS = 14;
+const CAMERA_TIMELINE_BASELINE_RATIO = 0.08;
+
+function buildFilteredCameraTargets() {
+  const viewportHeight = Math.max(
+    1,
+    state.renderer?.domElement?.getBoundingClientRect?.().height || window.innerHeight || 1
+  );
+  const filteredTargets = [state.keyframes[0].target.clone()];
+
+  for (let index = 1; index < state.keyframes.length; index++) {
+    const frame = state.keyframes[index];
+    const previousFrame = state.keyframes[index - 1];
+    const savedDirection = frame.target.clone().sub(frame.position);
+    const previousDirection = previousFrame.target.clone().sub(frame.position);
+    if (savedDirection.lengthSq() < 1e-12 || previousDirection.lengthSq() < 1e-12) {
+      filteredTargets.push(frame.target.clone());
+      continue;
+    }
+
+    savedDirection.normalize();
+    previousDirection.normalize();
+    const angle = savedDirection.angleTo(previousDirection);
+    const fovRadians = THREE.MathUtils.degToRad(
+      Number.isFinite(frame.fov) ? frame.fov : (state.camera?.fov || 60)
+    );
+    const focalPixels = viewportHeight / (2 * Math.tan(Math.max(0.01, fovRadians) * 0.5));
+    const screenShift = 2 * Math.tan(angle * 0.5) * focalPixels;
+
+    filteredTargets.push(
+      screenShift <= CAMERA_TARGET_FILTER_PIXELS
+        ? filteredTargets[index - 1].clone()
+        : frame.target.clone()
+    );
+  }
+  return filteredTargets;
+}
+
+function getFrameProjectionScale(frame) {
+  const fov = Number.isFinite(frame?.fov) ? frame.fov : 60;
+  const zoom = Number.isFinite(frame?.zoom) ? frame.zoom : 1;
+  return Math.max(1e-6, zoom / Math.tan(THREE.MathUtils.degToRad(fov) * 0.5));
+}
+
+function getQuaternionAngularDistance(startQuaternion, endQuaternion) {
+  if (!startQuaternion || !endQuaternion) return 0;
+  const dot = THREE.MathUtils.clamp(Math.abs(startQuaternion.dot(endQuaternion)), 0, 1);
+  return 2 * Math.acos(dot);
+}
+
+function buildDynamicCameraTimeline(filteredTargets, cameraQuaternions, modelQuaternions) {
+  const segmentMotions = [];
+  for (let index = 0; index < state.keyframes.length - 1; index++) {
+    const startFrame = state.keyframes[index];
+    const endFrame = state.keyframes[index + 1];
+    const startTarget = filteredTargets[index];
+    const endTarget = filteredTargets[index + 1];
+    const startRadius = startFrame.position.distanceTo(startTarget);
+    const endRadius = endFrame.position.distanceTo(endTarget);
+    const averageRadius = Math.max(1e-4, (startRadius + endRadius) * 0.5);
+    const positionMotion = startFrame.position.distanceTo(endFrame.position);
+    const targetMotion = startTarget.distanceTo(endTarget) * 0.6;
+    const cameraRotationMotion = averageRadius
+      * getQuaternionAngularDistance(cameraQuaternions[index], cameraQuaternions[index + 1])
+      * 0.75;
+    const modelRotationMotion = averageRadius
+      * getQuaternionAngularDistance(modelQuaternions[index], modelQuaternions[index + 1])
+      * 0.35;
+    const projectionMotion = averageRadius
+      * Math.abs(Math.log(getFrameProjectionScale(endFrame) / getFrameProjectionScale(startFrame)))
+      * 0.5;
+    segmentMotions.push(Math.max(1e-6, Math.hypot(
+      positionMotion,
+      targetMotion,
+      cameraRotationMotion,
+      modelRotationMotion,
+      projectionMotion
+    )));
+  }
+
+  const averageMotion = segmentMotions.reduce((sum, motion) => sum + motion, 0)
+    / Math.max(1, segmentMotions.length);
+  const baselineMotion = Math.max(1e-6, averageMotion * CAMERA_TIMELINE_BASELINE_RATIO);
+  const weightedMotions = segmentMotions.map(motion => motion + baselineMotion);
+  const totalMotion = weightedMotions.reduce((sum, motion) => sum + motion, 0);
+  const times = [0];
+  let elapsedMotion = 0;
+  for (const motion of weightedMotions) {
+    elapsedMotion += motion;
+    times.push(elapsedMotion / totalMotion);
+  }
+  times[times.length - 1] = 1;
+  return times;
+}
+
+function cloneContinuousCameraQuaternions(property) {
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const quaternions = state.keyframes.map(frame => {
+    const savedQuaternion = frame[property];
+    if (savedQuaternion) return savedQuaternion.clone().normalize();
+    if (property === 'modelQuaternion') {
+      return new THREE.Quaternion().setFromAxisAngle(yAxis, frame.modelRotationY || 0);
+    }
+    return new THREE.Quaternion();
+  });
+  for (let index = 1; index < quaternions.length; index++) {
+    if (quaternions[index - 1].dot(quaternions[index]) < 0) {
+      const quaternion = quaternions[index];
+      quaternion.set(-quaternion.x, -quaternion.y, -quaternion.z, -quaternion.w);
+    }
+  }
+  return quaternions;
+}
+
+function quaternionLogVector(quaternion, output = new THREE.Vector3()) {
+  const halfAngle = Math.acos(THREE.MathUtils.clamp(quaternion.w, -1, 1));
+  const sinHalfAngle = Math.sin(halfAngle);
+  if (Math.abs(sinHalfAngle) <= 1e-8) {
+    return output.set(quaternion.x, quaternion.y, quaternion.z);
+  }
+  return output.set(quaternion.x, quaternion.y, quaternion.z)
+    .multiplyScalar(halfAngle / sinHalfAngle);
+}
+
+function quaternionExpVector(vector, output = new THREE.Quaternion()) {
+  const halfAngle = vector.length();
+  if (halfAngle <= 1e-8) {
+    return output.set(vector.x, vector.y, vector.z, 1).normalize();
+  }
+  const scale = Math.sin(halfAngle) / halfAngle;
+  return output.set(
+    vector.x * scale,
+    vector.y * scale,
+    vector.z * scale,
+    Math.cos(halfAngle)
+  ).normalize();
+}
+
+function createSquadControls(quaternions) {
+  const controls = quaternions.map(quaternion => quaternion.clone());
+  const previousRelative = new THREE.Quaternion();
+  const nextRelative = new THREE.Quaternion();
+  const previousLog = new THREE.Vector3();
+  const nextLog = new THREE.Vector3();
+  const exponent = new THREE.Quaternion();
+
+  for (let index = 1; index < quaternions.length - 1; index++) {
+    const inverseCurrent = quaternions[index].clone().invert();
+    previousRelative.copy(inverseCurrent).multiply(quaternions[index - 1]);
+    nextRelative.copy(inverseCurrent).multiply(quaternions[index + 1]);
+    quaternionLogVector(previousRelative, previousLog);
+    quaternionLogVector(nextRelative, nextLog);
+    previousLog.add(nextLog).multiplyScalar(-0.25);
+    quaternionExpVector(previousLog, exponent);
+    controls[index].copy(quaternions[index]).multiply(exponent).normalize();
+    if (controls[index].dot(quaternions[index]) < 0) {
+      const control = controls[index];
+      control.set(-control.x, -control.y, -control.z, -control.w);
+    }
+  }
+  return controls;
+}
+
+const cameraSquadStart = new THREE.Quaternion();
+const cameraSquadControl = new THREE.Quaternion();
+const cameraSplineSphere = new THREE.Vector3();
+const cameraSplineTarget = new THREE.Vector3();
+const cameraSplinePosition = new THREE.Vector3();
+const cameraSplineQuaternion = new THREE.Quaternion();
+const cameraSplineModelQuaternion = new THREE.Quaternion();
+const cameraMotionPreviousPosition = new THREE.Vector3();
+const cameraMotionCurrentPosition = new THREE.Vector3();
+const cameraMotionPreviousTarget = new THREE.Vector3();
+const cameraMotionCurrentTarget = new THREE.Vector3();
+const cameraMotionPreviousQuaternion = new THREE.Quaternion();
+const cameraMotionCurrentQuaternion = new THREE.Quaternion();
+const cameraMotionPreviousModelQuaternion = new THREE.Quaternion();
+const cameraMotionCurrentModelQuaternion = new THREE.Quaternion();
+
+function interpolateSquad(quaternions, controls, segmentIndex, amount, output = new THREE.Quaternion()) {
+  cameraSquadStart.copy(quaternions[segmentIndex]).slerp(quaternions[segmentIndex + 1], amount);
+  cameraSquadControl.copy(controls[segmentIndex]).slerp(controls[segmentIndex + 1], amount);
+  return output.copy(cameraSquadStart)
+    .slerp(cameraSquadControl, 2 * amount * (1 - amount))
+    .normalize();
+}
+
+function easeCameraPathStart(value) {
+  const value2 = value * value;
+  const value3 = value2 * value;
+  const value4 = value3 * value;
+  const value5 = value4 * value;
+  return 3 * value5 - 8 * value4 + 6 * value3;
+}
+
+const CAMERA_ENDPOINT_EASE_PORTION = 0.12;
+const CAMERA_MOTION_SAMPLES_PER_SEGMENT = 192;
+
+function getGlobalCameraTimeProgress(progress) {
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (clampedProgress < CAMERA_ENDPOINT_EASE_PORTION) {
+    const localProgress = clampedProgress / CAMERA_ENDPOINT_EASE_PORTION;
+    return CAMERA_ENDPOINT_EASE_PORTION * easeCameraPathStart(localProgress);
+  }
+  if (clampedProgress > 1 - CAMERA_ENDPOINT_EASE_PORTION) {
+    const localProgress = (1 - clampedProgress) / CAMERA_ENDPOINT_EASE_PORTION;
+    return 1 - CAMERA_ENDPOINT_EASE_PORTION * easeCameraPathStart(localProgress);
+  }
+  return clampedProgress;
+}
+
+function sampleCameraSpline(
+  progress,
+  positionOutput,
+  targetOutput,
+  cameraQuaternionOutput,
+  modelQuaternionOutput
+) {
+  const { segmentIndex, amount, duration } = getCameraTimelineSegment(progress);
+  const sphereCoords = interpolateQuinticVector(
+    state.cameraSphericalPoints,
+    state.cameraSphericalVelocities,
+    segmentIndex,
+    amount,
+    duration,
+    cameraSplineSphere
+  );
+  interpolateQuinticVector(
+    state.cameraFilteredTargets,
+    state.cameraTargetVelocities,
+    segmentIndex,
+    amount,
+    duration,
+    targetOutput
+  );
+  sphericalPointToCameraPosition(sphereCoords, targetOutput, positionOutput);
+  interpolateSquad(
+    state.cameraQuaternions,
+    state.cameraQuaternionControls,
+    segmentIndex,
+    amount,
+    cameraQuaternionOutput
+  );
+  interpolateSquad(
+    state.cameraModelQuaternions,
+    state.cameraModelQuaternionControls,
+    segmentIndex,
+    amount,
+    modelQuaternionOutput
+  );
+  return cameraTimelineSample;
+}
+
+function sampleCameraProjectionScale(progress) {
+  const { segmentIndex, amount, duration } = getCameraTimelineSegment(progress);
+  const fov = interpolateQuinticScalar(
+    state.cameraProjectionValues.fov,
+    state.cameraProjectionVelocities.fov,
+    segmentIndex,
+    amount,
+    duration
+  );
+  const zoom = interpolateQuinticScalar(
+    state.cameraProjectionValues.zoom,
+    state.cameraProjectionVelocities.zoom,
+    segmentIndex,
+    amount,
+    duration
+  );
+  return Math.max(1e-6, zoom / Math.tan(THREE.MathUtils.degToRad(fov) * 0.5));
+}
+
+const cameraCurveSample = { segmentIndex: 0, amount: 0 };
+
+function sampleCurrentCameraCurve(
+  progress,
+  positionOutput,
+  targetOutput,
+  cameraQuaternionOutput,
+  modelQuaternionOutput
+) {
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  const segmentCount = state.keyframes.length - 1;
+  const rawSegment = clampedProgress * segmentCount;
+  const segmentIndex = clampedProgress >= 1
+    ? segmentCount - 1
+    : Math.min(segmentCount - 1, Math.floor(rawSegment));
+  const amount = clampedProgress >= 1 ? 1 : rawSegment - segmentIndex;
+
+  state.cameraPositionCurve.getPoint(clampedProgress, positionOutput);
+  state.cameraTargetCurve.getPoint(clampedProgress, targetOutput);
+  interpolateSquad(
+    state.cameraQuaternions,
+    state.cameraQuaternionControls,
+    segmentIndex,
+    amount,
+    cameraQuaternionOutput
+  );
+  interpolateSquad(
+    state.cameraModelQuaternions,
+    state.cameraModelQuaternionControls,
+    segmentIndex,
+    amount,
+    modelQuaternionOutput
+  );
+  cameraCurveSample.segmentIndex = segmentIndex;
+  cameraCurveSample.amount = amount;
+  return cameraCurveSample;
+}
+
+function buildCameraMotionTable() {
+  const segmentCount = Math.max(1, state.keyframes.length - 1);
+  const sampleCount = Math.min(
+    32768,
+    Math.max(512, segmentCount * CAMERA_MOTION_SAMPLES_PER_SEGMENT)
+  );
+  const progressSamples = new Float32Array(sampleCount + 1);
+  const cumulativeDistances = new Float64Array(sampleCount + 1);
+  const positionSteps = new Float64Array(sampleCount + 1);
+  const perceptualSteps = new Float64Array(sampleCount + 1);
+
+  sampleCurrentCameraCurve(
+    0,
+    cameraMotionPreviousPosition,
+    cameraMotionPreviousTarget,
+    cameraMotionPreviousQuaternion,
+    cameraMotionPreviousModelQuaternion
+  );
+  let totalPosition = 0;
+  let rawPerceptualTotal = 0;
+
+  for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
+    const progress = sampleIndex / sampleCount;
+    sampleCurrentCameraCurve(
+      progress,
+      cameraMotionCurrentPosition,
+      cameraMotionCurrentTarget,
+      cameraMotionCurrentQuaternion,
+      cameraMotionCurrentModelQuaternion
+    );
+    const radius = Math.max(
+      1e-4,
+      cameraMotionCurrentPosition.distanceTo(cameraMotionCurrentTarget)
+    );
+    const positionMotion = cameraMotionCurrentPosition.distanceTo(cameraMotionPreviousPosition);
+    const targetMotion = cameraMotionCurrentTarget.distanceTo(cameraMotionPreviousTarget) * 0.12;
+    const cameraRotationMotion = radius
+      * getQuaternionAngularDistance(cameraMotionPreviousQuaternion, cameraMotionCurrentQuaternion)
+      * 0.28;
+    const modelRotationMotion = radius
+      * getQuaternionAngularDistance(cameraMotionPreviousModelQuaternion, cameraMotionCurrentModelQuaternion)
+      * 0.06;
+    const perceptualMotion = Math.hypot(
+      positionMotion,
+      targetMotion,
+      cameraRotationMotion,
+      modelRotationMotion
+    );
+    progressSamples[sampleIndex] = progress;
+    positionSteps[sampleIndex] = positionMotion;
+    perceptualSteps[sampleIndex] = perceptualMotion;
+    totalPosition += positionMotion;
+    rawPerceptualTotal += perceptualMotion;
+    cameraMotionPreviousPosition.copy(cameraMotionCurrentPosition);
+    cameraMotionPreviousTarget.copy(cameraMotionCurrentTarget);
+    cameraMotionPreviousQuaternion.copy(cameraMotionCurrentQuaternion);
+    cameraMotionPreviousModelQuaternion.copy(cameraMotionCurrentModelQuaternion);
+  }
+
+  // Smooth the local motion rate across keyframe boundaries. Translation stays
+  // the dominant lower bound, while rotation/target changes receive a limited
+  // amount of extra time instead of producing an abrupt perceptual speed jump.
+  const averagePositionStep = totalPosition / sampleCount;
+  const averagePerceptualStep = rawPerceptualTotal / sampleCount;
+  const paceBaseline = Math.max(averagePositionStep, averagePerceptualStep * 0.35, 1e-8);
+  const smoothingRadius = Math.max(8, Math.round(sampleCount / Math.max(16, segmentCount * 16)));
+  let totalMotion = 0;
+  for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
+    let weightedMotion = 0;
+    let totalWeight = 0;
+    for (let offset = -smoothingRadius; offset <= smoothingRadius; offset++) {
+      const sourceIndex = THREE.MathUtils.clamp(sampleIndex + offset, 1, sampleCount);
+      const weight = smoothingRadius + 1 - Math.abs(offset);
+      weightedMotion += perceptualSteps[sourceIndex] * weight;
+      totalWeight += weight;
+    }
+    const smoothedMotion = weightedMotion / totalWeight;
+    const pacedMotion = THREE.MathUtils.clamp(
+      smoothedMotion,
+      positionSteps[sampleIndex],
+      Math.max(positionSteps[sampleIndex], paceBaseline * 1.75)
+    );
+    totalMotion += Math.max(pacedMotion, 1e-10);
+    cumulativeDistances[sampleIndex] = totalMotion;
+  }
+
+  state.cameraMotionProgress = progressSamples;
+  state.cameraMotionDistances = cumulativeDistances;
+  state.cameraMotionTotal = totalMotion;
+}
+
+function getCameraProgressAtMotion(progress) {
+  const progressSamples = state.cameraMotionProgress;
+  const cumulativeDistances = state.cameraMotionDistances;
+  const totalMotion = state.cameraMotionTotal;
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  if (!progressSamples?.length || !cumulativeDistances?.length || totalMotion <= 1e-8) {
+    return clampedProgress;
+  }
+  if (clampedProgress <= 0) return 0;
+  if (clampedProgress >= 1) return 1;
+
+  const targetDistance = clampedProgress * totalMotion;
+  let low = 1;
+  let high = cumulativeDistances.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) * 0.5);
+    if (cumulativeDistances[middle] < targetDistance) low = middle + 1;
+    else high = middle;
+  }
+  const endIndex = low;
+  const startIndex = endIndex - 1;
+  const startDistance = cumulativeDistances[startIndex];
+  const distanceSpan = cumulativeDistances[endIndex] - startDistance;
+  if (distanceSpan <= 1e-10) return progressSamples[endIndex];
+  const amount = (targetDistance - startDistance) / distanceSpan;
+  return THREE.MathUtils.lerp(progressSamples[startIndex], progressSamples[endIndex], amount);
 }
 
 function initCameraCurves() {
   if (state.keyframes.length < 2) return false;
-  const sphericalPoints = [];
-  const lockedTarget = state.keyframes[0].target.clone();
-  const cameraOffsets = [];
-  let lastTheta = 0;
-  state.keyframes.forEach((kf, idx) => {
-    const offset = new THREE.Vector3().copy(kf.position).sub(kf.target);
-    cameraOffsets.push(offset.clone());
-    const spherical = new THREE.Spherical().setFromVector3(offset);
-    
-    if (idx === 0) {
-      lastTheta = spherical.theta;
-    } else {
-      // Unwrap theta to avoid 360-degree reversing spins
-      const diff = spherical.theta - lastTheta;
-      const unwrappedDiff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      spherical.theta = lastTheta + unwrappedDiff;
-      lastTheta = spherical.theta;
-    }
-    
-    // Store spherical coordinates (radius, theta, phi) in a Vector3 for spline pathing
-    sphericalPoints.push(new THREE.Vector3(spherical.radius, spherical.theta, spherical.phi));
+  const positions = state.keyframes.map(frame => frame.position.clone());
+  const filteredTargets = buildFilteredCameraTargets();
+  const cameraQuaternions = cloneContinuousCameraQuaternions('quaternion');
+  const modelQuaternions = cloneContinuousCameraQuaternions('modelQuaternion');
 
-  });
-  state.cameraSphericalPoints = sphericalPoints;
-  state.cameraSphericalTangents = createSphericalTangents(sphericalPoints);
-  state.cameraLockedTarget = lockedTarget;
+  // A centripetal Catmull-Rom curve avoids the zero derivatives introduced by
+  // component-wise monotone interpolation at ordinary direction changes.
+  state.cameraPositionCurve = new THREE.CatmullRomCurve3(positions, false, 'centripetal');
+  state.cameraTargetCurve = new THREE.CatmullRomCurve3(filteredTargets, false, 'centripetal');
+  state.cameraPositionCurve.arcLengthDivisions = Math.min(
+    16384,
+    Math.max(512, (state.keyframes.length - 1) * 256)
+  );
+  state.cameraPositionCurve.updateArcLengths();
+  state.cameraFilteredTargets = filteredTargets;
+  state.cameraQuaternions = cameraQuaternions;
+  state.cameraQuaternionControls = createSquadControls(cameraQuaternions);
+  state.cameraModelQuaternions = modelQuaternions;
+  state.cameraModelQuaternionControls = createSquadControls(modelQuaternions);
+  buildCameraMotionTable();
 
-  // This curve is only a shared clock. Arc-length mapping over the stabilized
-  // camera positions removes the apparent slowdown around Catmull-Rom control
-  // points while keeping orbit and target interpolation on the same timeline.
-  const stabilizedCameraPositions = cameraOffsets.map(offset => (
-    lockedTarget.clone().add(offset)
-  ));
-  state.cameraTimingCurve = new THREE.CatmullRomCurve3(stabilizedCameraPositions);
-  state.cameraTimingCurve.curveType = 'centripetal';
-  state.cameraTimingLength = state.cameraTimingCurve.getLength();
-  
   return true;
 }
 function interpolateCamera(pct) {
-  if (!state.cameraSphericalPoints || !state.cameraSphericalTangents || !state.cameraLockedTarget || !state.cameraTimingCurve) return;
+  if (
+    !state.cameraPositionCurve
+    || !state.cameraTargetCurve
+    || !state.cameraQuaternions
+    || !state.cameraQuaternionControls
+    || !state.cameraModelQuaternions
+    || !state.cameraModelQuaternionControls
+    || !state.cameraMotionProgress
+    || !state.cameraMotionDistances
+  ) return;
 
-  // Map output time to one arc-length-normalized camera clock. The focus target
-  // stays locked, while the no-overshoot spherical curve advances smoothly.
-  const clampedPct = THREE.MathUtils.clamp(pct, 0, 1);
-  const curveTime = state.cameraTimingLength > 0.000001
-    ? state.cameraTimingCurve.getUtoTmapping(clampedPct)
-    : clampedPct;
-  const sphereCoords = interpolateSphericalPoint(curveTime);
-  const newTarget = state.cameraLockedTarget;
-  
-  const spherical = new THREE.Spherical();
-  spherical.radius = sphereCoords.x;
-  spherical.theta = sphereCoords.y;
-  spherical.phi = sphereCoords.z;
-  
-  const offset = new THREE.Vector3().setFromSpherical(spherical);
-  const newPos = new THREE.Vector3().copy(newTarget).add(offset);
-  
-  state.camera.position.copy(newPos);
-  state.camera.lookAt(newTarget);
-  state.controls.target.copy(newTarget);
+  // Convert elapsed time through the smoothed perceptual-motion table, then use
+  // one raw curve parameter for position, target, orientation and projection.
+  // Every saved viewpoint stays synchronized while keyframe speed changes blend.
+  const distanceProgress = getGlobalCameraTimeProgress(pct);
+  const curveProgress = getCameraProgressAtMotion(distanceProgress);
+  const { segmentIndex, amount } = sampleCurrentCameraCurve(
+    curveProgress,
+    cameraSplinePosition,
+    cameraSplineTarget,
+    cameraSplineQuaternion,
+    cameraSplineModelQuaternion
+  );
+  const startFrame = state.keyframes[segmentIndex];
+  const endFrame = state.keyframes[segmentIndex + 1];
+
+  state.camera.position.copy(cameraSplinePosition);
+  state.controls.target.copy(cameraSplineTarget);
+  if (startFrame.quaternion && endFrame.quaternion) {
+    state.camera.quaternion.copy(cameraSplineQuaternion);
+  } else {
+    state.camera.lookAt(cameraSplineTarget);
+  }
+
+  if (startFrame.up && endFrame.up) {
+    state.camera.up.lerpVectors(startFrame.up, endFrame.up, amount).normalize();
+  }
+  let projectionChanged = false;
+  for (const property of ['fov', 'zoom', 'near', 'far']) {
+    if (!Number.isFinite(startFrame[property]) || !Number.isFinite(endFrame[property])) continue;
+    const nextValue = THREE.MathUtils.lerp(startFrame[property], endFrame[property], amount);
+    if (Math.abs(state.camera[property] - nextValue) > 1e-7) {
+      state.camera[property] = nextValue;
+      projectionChanged = true;
+    }
+  }
+  if (projectionChanged) state.camera.updateProjectionMatrix();
+
+  const modelPivots = [state.particleSystem?.pivot, state.splatPivot];
+  for (const pivot of modelPivots) {
+    if (!pivot) continue;
+    pivot.quaternion.copy(cameraSplineModelQuaternion);
+  }
 }
 
 /**
@@ -2254,17 +5039,18 @@ function interpolateCamera(pct) {
  * relative to user's real-time focus target.
  */
 function getPresetFlightDuration(presetName) {
-  return presetName === 'verticalLoop' ? 16.0 : 14.0;
+  return presetName === 'verticalLoop' || presetName === 'spaceOutwardOrbit' ? 16.0 : 14.0;
 }
 
 function applyPresetFlight(presetName, t) {
   if (!state.isModelLoaded) return;
   
   // 1. Focus point (user's real-time line-of-sight target)
-  const focusPoint = state.controls.target;
-  
   // 2. Fetch starting spherical viewpoint coordinates to ensure no fixed model zoom
   const startSph = state.settings.flightStartSpherical || { radius: 1.0, phi: Math.PI / 2, theta: 0 };
+  const focusPoint = startSph.target?.isVector3
+    ? startSph.target
+    : state.controls.target;
   const r0 = startSph.radius;
   const phi0 = startSph.phi;
   const theta0 = startSph.theta;
@@ -2275,6 +5061,9 @@ function applyPresetFlight(presetName, t) {
   let p = phi0;
   let th = theta0 + phiVal; // default azimuthal rotation around target
   let cameraRoll = 0;
+  let cameraPosOverride = null;
+  let lookTarget = focusPoint;
+  let lookOutward = false;
   
   // Reset camera FOV to original before computing
   state.camera.fov = state.settings.originalFov;
@@ -2409,6 +5198,56 @@ function applyPresetFlight(presetName, t) {
       cameraRoll = 2 * Math.PI * eased;
       break;
     }
+
+    case 'spaceDepthPush': {
+      // Translate the camera and its look target together along the current
+      // line of sight. The unchanged camera-to-target distance creates a true
+      // walk-in feeling for spatial scenes. With the interstellar effect, keep
+      // looking at the fixed model center and stop short for a planet approach.
+      const eased = t * t * (3.0 - 2.0 * t);
+      const startOffset = new THREE.Vector3().setFromSpherical(
+        new THREE.Spherical(r0, phi0, theta0)
+      );
+      const startCamera = new THREE.Vector3().copy(focusPoint).add(startOffset);
+      const forward = new THREE.Vector3().subVectors(focusPoint, startCamera).normalize();
+      const nebulaPlanetApproach = state.settings.particleEffectEnabled
+        && Math.round(Number(state.settings.scatterEffect) || 0) === 20;
+      const travel = r0 * (nebulaPlanetApproach ? 0.68 : 1.15) * eased;
+      cameraPosOverride = startCamera.addScaledVector(forward, travel);
+      lookTarget = nebulaPlanetApproach
+        ? focusPoint
+        : new THREE.Vector3().copy(focusPoint).addScaledVector(forward, travel);
+      break;
+    }
+
+    case 'spaceLateralSweep': {
+      // Truck sideways without changing radius, yaw, or pitch. Moving the
+      // target by the same amount prevents this path from becoming an orbit.
+      const eased = t * t * (3.0 - 2.0 * t);
+      const startOffset = new THREE.Vector3().setFromSpherical(
+        new THREE.Spherical(r0, phi0, theta0)
+      );
+      const startCamera = new THREE.Vector3().copy(focusPoint).add(startOffset);
+      const forward = new THREE.Vector3().subVectors(focusPoint, startCamera).normalize();
+      const right = new THREE.Vector3().crossVectors(forward, state.camera.up).normalize();
+      if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+      const travel = r0 * 1.4 * eased;
+      cameraPosOverride = startCamera.addScaledVector(right, travel);
+      lookTarget = new THREE.Vector3().copy(focusPoint).addScaledVector(right, travel);
+      break;
+    }
+
+    case 'spaceOutwardOrbit':
+      // Orbit around the scene center while looking radially away from it,
+      // revealing the surrounding room/space instead of circling one subject.
+      // Starting on the opposite, inner side preserves the user's initial view
+      // direction while placing the camera where outward-facing room surfaces
+      // are more likely to remain visible.
+      r = r0 * 0.42;
+      p = Math.PI - phi0;
+      th = theta0 + Math.PI + phiVal;
+      lookOutward = true;
+      break;
       
     default:
       return;
@@ -2419,11 +5258,19 @@ function applyPresetFlight(presetName, t) {
   targetSpherical.makeSafe(); // clamp polar angle to prevent camera flipping at poles
   
   const offsetVector = new THREE.Vector3().setFromSpherical(targetSpherical);
-  const cameraPos = new THREE.Vector3().copy(focusPoint).add(offsetVector);
+  const cameraPos = cameraPosOverride
+    ? cameraPosOverride
+    : new THREE.Vector3().copy(focusPoint).add(offsetVector);
+
+  if (lookOutward) {
+    const outward = new THREE.Vector3().subVectors(cameraPos, focusPoint).normalize();
+    lookTarget = new THREE.Vector3().copy(cameraPos).addScaledVector(outward, Math.max(r0, 0.5));
+  }
   
   state.camera.position.copy(cameraPos);
-  state.camera.lookAt(focusPoint);
+  state.camera.lookAt(lookTarget);
   if (cameraRoll !== 0) state.camera.rotateZ(cameraRoll);
+  state.controls.target.copy(lookTarget);
   
   // 5. Dynamic Min/Max camera space near/far clipping boundaries (optimized to avoid redundant projection matrix re-computations)
   const d = cameraPos.distanceTo(focusPoint);
@@ -2532,8 +5379,21 @@ function restoreRememberedCameraPathFirstFrame() {
 }
 
 function setPreviewControlsActive(active) {
+  const wasActive = document.body.classList.contains('preview-mode-active');
+  if (active && !wasActive && state.controls) {
+    state.previewZoomWasEnabled = state.controls.enableZoom;
+  }
   document.body.classList.toggle('preview-mode-active', active);
+  if (state.controls) {
+    state.controls.enableZoom = active ? false : state.previewZoomWasEnabled;
+  }
   updateRemyPositionDeferred();
+}
+
+function isFlightZoomLocked() {
+  return state.previewActive
+    || state.previewCompleted
+    || document.body.classList.contains('preview-mode-active');
 }
 
 function setRecordingControlsActive(active) {
@@ -2544,14 +5404,17 @@ function setRecordingControlsActive(active) {
 function beginFlightGather() {
   state.lastFlightGatherPercent = -1;
   state.manualControl = Boolean(state.particleSystem && state.settings.particleEffectEnabled);
+  state.particleSystem?.captureStarScaleAnchor(state.camera, state.controls?.target);
   updateFlightGatherProgress(0);
 }
 
 function updateFlightGatherProgress(time) {
   if (!state.particleSystem) return;
-  if (state.lastFlightGatherPercent === 0 && time >= EXPORT_GATHER_DURATION) return;
+  const gatherDuration = getActiveGatherDuration();
+  state.particleSystem.setStarFlightTiming(gatherDuration, SPATIAL_EFFECT_GATHER_DURATION);
+  if (state.lastFlightGatherPercent === 0 && time >= gatherDuration) return;
   const progress = state.settings.particleEffectEnabled
-    ? Math.max(0, 1 - time / EXPORT_GATHER_DURATION)
+    ? Math.max(0, 1 - time / gatherDuration)
     : 0;
   state.particleSystem.setProgressImmediate(progress);
   const progressPercent = Math.round(progress * 100);
@@ -2570,12 +5433,16 @@ function cancelGatherAnimation() {
   }
   state.lastFlightGatherPercent = -1;
   state.manualControl = false;
+  state.particleSystem?.setStarFlightTiming(
+    SPATIAL_EFFECT_GATHER_DURATION,
+    SPATIAL_EFFECT_GATHER_DURATION
+  );
 }
 
 function getCurrentFlightDuration() {
   return state.settings.presetFlight !== 'none'
     ? getPresetFlightDuration(state.settings.presetFlight)
-    : Math.max(0, (state.keyframes.length - 1) * 2.0);
+    : Math.max(0, (state.keyframes.length - 1) * CUSTOM_KEYFRAME_SEGMENT_DURATION);
 }
 
 function applyCurrentFlightProgress(progress) {
@@ -2613,7 +5480,7 @@ function finishPreviewCycle() {
   showToast(t('flight-preview-finished'), 'success');
 }
 
-function stopPreviewFlight({ reopenPanel = true, keepTimeline = true } = {}) {
+function stopPreviewFlight({ reopenPanel = true, keepTimeline = true, restoreStart = true } = {}) {
   state.previewActive = false;
   state.previewCompleted = false;
   setPreviewControlsActive(false);
@@ -2628,16 +5495,23 @@ function stopPreviewFlight({ reopenPanel = true, keepTimeline = true } = {}) {
     state.presetAnimation.kill();
     state.presetAnimation = null;
   }
-  
-  // Restore original FOV & clipping planes
-  if (state.settings.originalFov) {
-    state.camera.fov = state.settings.originalFov;
+
+  // A stopped or completed preview must not become the next preview's start.
+  // Restore the exact saved camera, target and model pose before reopening the
+  // path panel. This applies equally to preset and custom camera paths.
+  if (restoreStart && state.previewStart) {
+    restorePreviewCameraStart();
+  } else {
+    // Fallback for legacy states that predate previewStart capture.
+    if (state.settings.originalFov) {
+      state.camera.fov = state.settings.originalFov;
+    }
+    state.camera.near = 0.1;
+    state.camera.far = 1000;
+    state.camera.updateProjectionMatrix();
+    state.controls.update();
   }
-  state.camera.near = 0.1;
-  state.camera.far = 1000;
-  state.camera.updateProjectionMatrix();
-  
-  state.controls.update();
+
   dom.btnPreviewPath.textContent = t('btn-preview-path');
   updatePreviewStopButton();
   if (reopenPanel) openCameraPathPanel();
@@ -2671,7 +5545,8 @@ function startPreviewFlight() {
     state.settings.flightStartSpherical = {
       radius: spherical.radius,
       phi: spherical.phi,
-      theta: spherical.theta
+      theta: spherical.theta,
+      target: state.controls.target.clone(),
     };
     
     if (state.presetAnimation) {
@@ -2729,7 +5604,7 @@ function updateRotationControls() {
 
   [dom.btnToggleRotation, dom.btnMobileToggleRotation].forEach((button) => {
     if (!button) return;
-    button.classList.toggle('active', state.rotationPaused);
+    button.classList.toggle('active', button === dom.btnToggleRotation && state.rotationPaused);
     button.setAttribute('aria-pressed', String(state.rotationPaused));
     button.title = title;
     const text = button.querySelector('.btn-text');
@@ -2783,6 +5658,7 @@ function restoreRendererAfterExport(width, height, pixelRatio) {
   if (state.particleSystem) {
     state.particleSystem.setViewportSize(width, height);
     state.particleSystem.setPointSize(state.settings.pointSize);
+    state.particleSystem.setExportColorCompensation(false);
   }
   state.controls.enabled = true;
   state.controls.update();
@@ -2868,12 +5744,24 @@ function stopExportRecording() {
 const EXPORT_FPS = 60;
 const EXPORT_VIDEO_BITRATE = 15_000_000;
 const EXPORT_GATHER_DURATION = 2.5;
+const SPATIAL_EFFECT_GATHER_DURATION = 4.75;
 const COMPOSITION_POLL_INTERVAL_MS = 50;
 const COMPOSITION_MODULE_TIMEOUT_MS = 12_000;
 const COMPOSITION_START_TIMEOUT_MS = 15_000;
 const COMPOSITION_FRAME_TIMEOUT_MS = 15_000;
 const COMPOSITION_FINALIZE_TIMEOUT_MS = 30_000;
 const COMPOSITION_CANCEL_TIMEOUT_MS = 600;
+
+function getActiveGatherDuration() {
+  const effectId = Math.round(Number(state.settings.scatterEffect) || 0);
+  const isActiveFlight = state.previewActive || state.recordingActive || state.compositingActive;
+  if (effectId === 20 && state.settings.presetFlight === 'spaceDepthPush' && isActiveFlight) {
+    return getPresetFlightDuration('spaceDepthPush');
+  }
+  return effectId === 20
+    ? SPATIAL_EFFECT_GATHER_DURATION
+    : EXPORT_GATHER_DURATION;
+}
 
 function supportsWebCodecsComposition() {
   return typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined';
@@ -3037,12 +5925,17 @@ function configureExportCanvas(session) {
       session.exportWidth / previewBufferWidth,
       session.exportHeight / previewBufferHeight
     );
-    state.particleSystem.setPointSize(state.settings.pointSize * exportScale);
+    state.particleSystem.setPointSize(
+      state.settings.pointSize * exportScale,
+      state.settings.pointSize
+    );
+    state.particleSystem.setExportColorCompensation(true);
   }
 }
 
 function resetExportPlayback(session) {
   cancelGatherAnimation();
+  setSparkPrewarmActive(false);
   state.recordTime = 0;
   state.virtualElapsedTime = 0;
   state.camera.position.copy(session.startCamera.position);
@@ -3055,10 +5948,18 @@ function resetExportPlayback(session) {
   const initialParticleProgress = state.settings.particleEffectEnabled ? 1 : 0;
   state.particleSystem?.setProgressImmediate(initialParticleProgress);
   applyCurrentFlightProgress(0);
+  state.particleSystem?.captureStarScaleAnchor(state.camera, state.controls?.target);
+  syncSplatStarEffectTransform();
   state.renderer.render(state.scene, state.camera);
 }
 
 function renderExportFrame(session, timelineTime, flightProgress) {
+  setSparkPrewarmActive(shouldPrewarmSparkAtTime(
+    timelineTime,
+    session.initialRenderer,
+    session.rendererTimeline,
+    session.fps
+  ));
   applyRendererTimelineAtTime(
     timelineTime,
     session.initialRenderer,
@@ -3082,13 +5983,15 @@ function renderExportFrame(session, timelineTime, flightProgress) {
 
   if (state.particleSystem) {
     state.particleSystem.autoRotate = false;
+    const gatherDuration = getActiveGatherDuration();
+    state.particleSystem.setStarFlightTiming(gatherDuration, SPATIAL_EFFECT_GATHER_DURATION);
     const gatherProgress = state.settings.particleEffectEnabled
-      ? Math.max(0, 1 - timelineTime / EXPORT_GATHER_DURATION)
+      ? Math.max(0, 1 - timelineTime / gatherDuration)
       : 0;
     state.particleSystem.setProgressImmediate(gatherProgress);
     state.particleSystem.setTransitionDirection(transitionDirection);
     state.particleSystem.setSplatInterpolation(state.splatInterpolation);
-    state.particleSystem.update(1 / session.fps, timelineTime);
+    state.particleSystem.update(1 / session.fps, timelineTime, state.camera);
     if (!state.compositingActive) {
       dom.progressSlider.value = Math.round(gatherProgress * 100);
       dom.progressValue.textContent = `${Math.round(gatherProgress * 100)}%`;
@@ -3098,14 +6001,19 @@ function renderExportFrame(session, timelineTime, flightProgress) {
   if (state.splatPivot && state.particleSystem?.pivot) {
     state.splatPivot.rotation.y = state.particleSystem.pivot.rotation.y;
   }
+  syncSplatStarEffectTransform();
   return Boolean(
-    state.splatMesh?.visible
-    && (state.splatMesh.opacity ?? 0) > RENDERER_VISIBILITY_EPSILON
+    state.sparkPrewarmActive
+    || (
+      state.splatMesh?.visible
+      && (state.splatMesh.opacity ?? 0) > RENDERER_VISIBILITY_EPSILON
+    )
   );
 }
 
 function restoreAfterExport(session) {
   cancelGatherAnimation();
+  setSparkPrewarmActive(false);
   state.recordingActive = false;
   state.exportPreparing = false;
   state.exportInitialRenderer = null;
@@ -3128,6 +6036,7 @@ function restoreAfterExport(session) {
     state.particleSystem.setSplatInterpolation(session.restoreInterpolation);
     state.particleSystem.setProgressImmediate(session.restoreParticleProgress);
   }
+  syncSplatStarEffectTransform();
   state.settings.originalFov = session.restoreOriginalFov;
   state.settings.flightStartSpherical = session.restoreFlightStartSpherical;
   restoreRendererAfterExport(session.originalWidth, session.originalHeight, session.pixelRatio);
@@ -3194,7 +6103,8 @@ async function compositeVideoWithWebCodecs(session) {
     Output,
     BufferTarget,
     Mp4OutputFormat,
-    CanvasSource,
+    VideoSample,
+    VideoSampleSource,
   } = mediabunny;
   throwIfCompositionCancelled();
   updateLoadingProgress(
@@ -3207,7 +6117,7 @@ async function compositeVideoWithWebCodecs(session) {
     target,
   });
   state.activeWebCodecsOutput = output;
-  const videoSource = new CanvasSource(state.renderer.domElement, {
+  const videoSource = new VideoSampleSource({
     codec: 'avc',
     bitrate: session.bitrate,
   });
@@ -3223,8 +6133,13 @@ async function compositeVideoWithWebCodecs(session) {
     updateLoadingProgress(0.02, `${t('compositing-video')} · 0%`);
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfCompositionCancelled();
-      const flightProgress = totalFrames === 1 ? 1 : frameIndex / (totalFrames - 1);
-      const timelineTime = flightProgress * session.duration;
+      // Keep two-second keyframe boundaries on exact exported frame numbers.
+      // Reserve the final encoded frame for the exact last viewpoint instead
+      // of stretching every intermediate timestamp across totalFrames - 1.
+      const timelineTime = totalFrames === 1 || frameIndex === totalFrames - 1
+        ? session.duration
+        : Math.min(frameIndex / session.fps, session.duration);
+      const flightProgress = session.duration > 0 ? timelineTime / session.duration : 1;
       const needsSparkSettlePass = renderExportFrame(session, timelineTime, flightProgress);
       if (needsSparkSettlePass) {
         // The first pass submits the new camera state to Spark's sorting worker.
@@ -3239,15 +6154,32 @@ async function compositeVideoWithWebCodecs(session) {
         'Export frame rendering'
       );
       throwIfCompositionCancelled();
-      // Always render immediately before CanvasSource reads the drawing buffer.
+      // Always render immediately before taking the encoded frame snapshot.
       // Particle-only frames use this single pass; Spark frames use it as the
       // settled second pass after the worker has updated splat ordering.
       state.renderer.render(state.scene, state.camera);
-      await waitForCompositionTask(
-        videoSource.add(frameIndex / session.fps, 1 / session.fps),
-        COMPOSITION_FRAME_TIMEOUT_MS,
-        'Export frame encoding'
-      );
+      // Canvas pixels are sRGB/full-range. Marking that explicitly prevents
+      // platform-dependent canvas color-space inference before AVC converts
+      // the frame to its standard Rec.709 video representation.
+      const videoSample = new VideoSample(state.renderer.domElement, {
+        timestamp: frameIndex / session.fps,
+        duration: 1 / session.fps,
+        colorSpace: {
+          primaries: 'bt709',
+          transfer: 'iec61966-2-1',
+          matrix: 'rgb',
+          fullRange: true,
+        },
+      });
+      try {
+        await waitForCompositionTask(
+          videoSource.add(videoSample),
+          COMPOSITION_FRAME_TIMEOUT_MS,
+          'Export frame encoding'
+        );
+      } finally {
+        videoSample.close();
+      }
       throwIfCompositionCancelled();
 
       const progress = (frameIndex + 1) / totalFrames;
@@ -3402,6 +6334,7 @@ async function exportPathVideo({ fromPreview = false } = {}) {
       radius: spherical.radius,
       phi: spherical.phi,
       theta: spherical.theta,
+      target: state.controls.target.clone(),
     };
   }
 
@@ -3510,6 +6443,21 @@ function setupEventListeners() {
     state.selectedKeyframeIndex = null;
     updateSelectedKeyframeUI();
   });
+
+  const renderCanvas = state.renderer?.domElement;
+  renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
+  renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
+  renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
+  renderCanvas?.addEventListener('pointerleave', () => {
+    hideSplatEraserBrushCursor();
+    if (!state.splatCropDrag && !state.splatEraser?.active && renderCanvas) renderCanvas.style.cursor = '';
+  });
+  window.addEventListener('pointermove', moveSplatEraserStroke, { capture: true, passive: false });
+  window.addEventListener('pointerup', endSplatEraserStroke, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endSplatEraserStroke, { capture: true, passive: false });
+  window.addEventListener('pointermove', moveSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointerup', endSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endSplatCropDrag, { capture: true, passive: false });
 
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
@@ -3732,7 +6680,7 @@ function setupEventListeners() {
   document.addEventListener('drop', (e) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
-    if (file && /\.(?:ply|splat)$/i.test(file.name)) {
+    if (file && /\.(?:ply|splat|sog)$/i.test(file.name)) {
       loadFromFile(file);
     } else if (file) {
       showToast(t('drop-ply-only'), 'error');
@@ -3742,7 +6690,7 @@ function setupEventListeners() {
   dom.urlInput.addEventListener('paste', (e) => {
     setTimeout(() => {
       const text = dom.urlInput.value.trim();
-      if (text.includes('remy3d') || text.includes('kiriengine')) {
+      if (text.includes('remy3d') || text.includes('kiriengine') || text.includes('insta360.com')) {
         // Auto-load after paste with brief delay
         setTimeout(loadFromUrl, 500);
       }
@@ -3752,7 +6700,18 @@ function setupEventListeners() {
   dom.btnSettings.addEventListener('click', () => {
     dom.settingsPanel.classList.toggle('hidden');
     dom.btnSettings.classList.toggle('active');
-    document.body.classList.toggle('settings-panel-active', !dom.settingsPanel.classList.contains('hidden'));
+    const settingsOpen = !dom.settingsPanel.classList.contains('hidden');
+    document.body.classList.toggle('settings-panel-active', settingsOpen);
+    if (settingsOpen && isMobileViewport()) setMobileSettingsLevel('root');
+    if (settingsOpen && state.isModelLoaded) {
+      state.rotationPaused = true;
+      if (state.particleSystem) state.particleSystem.autoRotate = false;
+      updateRotationControls();
+    }
+    syncSplatCropHelperVisibility();
+    if (dom.settingsPanel.classList.contains('hidden') && state.splatEraser?.active) {
+      setSplatEraserActive(false, { silent: true });
+    }
     
     // Auto-hide camera path panel if settings are opened
     if (state.cameraModeActive) {
@@ -3761,6 +6720,14 @@ function setupEventListeners() {
   });
   dom.btnToggleRotation?.addEventListener('click', toggleModelRotation);
   dom.btnMobileToggleRotation?.addEventListener('click', toggleModelRotation);
+  dom.btnDesktopParticleSettings?.addEventListener('click', () => {
+    setRendererMode('particles', 'settings');
+    updateDesktopSettingsUI();
+  });
+  dom.btnDesktopSplatSettings?.addEventListener('click', () => {
+    setRendererMode('spark', 'settings');
+    updateDesktopSettingsUI();
+  });
   // Camera Path mode event listeners
   dom.btnCameraMode.addEventListener('click', toggleCameraMode);
   dom.btnAddKeyframe.addEventListener('click', addKeyframe);
@@ -3783,24 +6750,31 @@ function setupEventListeners() {
   dom.btnCancelComposition.addEventListener('click', requestStopComposition);
   dom.btnExportVideo.addEventListener('click', exportPathVideo);
 
-  document.querySelectorAll('.mobile-setting-tag').forEach((tag) => {
+  dom.btnMobileParticleSettings?.addEventListener('click', () => {
+    setMobileSettingsMode('particles');
+  });
+  dom.btnMobileSplatSettings?.addEventListener('click', () => {
+    setMobileSettingsMode('spark');
+  });
+  dom.btnMobileSplatCropPanel?.addEventListener('click', () => {
+    setMobileSplatTool('crop');
+  });
+  dom.btnMobileSplatEraserPanel?.addEventListener('click', () => {
+    setMobileSplatTool('eraser');
+  });
+  dom.btnMobileSettingsReset?.addEventListener('click', resetMobileSettingsParameter);
+  dom.btnMobileSettingsConfirm?.addEventListener('click', confirmMobileSettings);
+
+  document.querySelectorAll('.mobile-particle-setting-tag').forEach((tag) => {
     tag.addEventListener('click', () => {
-      document.querySelectorAll('.mobile-setting-tag').forEach(item => item.classList.remove('active'));
+      document.querySelectorAll('.mobile-particle-setting-tag').forEach(item => item.classList.remove('active'));
       document.querySelectorAll('.mobile-parameter').forEach(item => item.classList.remove('mobile-active'));
       tag.classList.add('active');
       document.getElementById(tag.dataset.settingTarget)?.classList.add('mobile-active');
+      syncSplatCropHelperVisibility();
     });
   });
 
-  document.querySelectorAll('.mobile-parameter input[type="range"]').forEach((slider) => {
-    const showSettings = () => dom.settingsPanel.classList.remove('adjusting-settings');
-    slider.addEventListener('pointerdown', () => dom.settingsPanel.classList.add('adjusting-settings'));
-    slider.addEventListener('input', () => dom.settingsPanel.classList.add('adjusting-settings'));
-    slider.addEventListener('pointerup', showSettings);
-    slider.addEventListener('pointercancel', showSettings);
-    slider.addEventListener('change', showSettings);
-  });
-  
   // Preset flight selection listener
   if (dom.selectPresetFlight) {
     dom.selectPresetFlight.addEventListener('change', (e) => {
@@ -3858,16 +6832,7 @@ function setupEventListeners() {
       // Rotate SplatMesh and correct its position translation vector to match
       if (state.splatMesh) {
         state.splatMesh.rotation.x = rotationX;
-        
-        const scale = state.modelScale;
-        const center = state.modelCenter;
-        if (center) {
-          if (rotationX === 0) {
-            state.splatMesh.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
-          } else {
-            state.splatMesh.position.set(-center.x * scale, center.y * scale, center.z * scale);
-          }
-        }
+        syncSplatStarEffectTransform();
       }
       
       showToast(state.xFlipped ? 'Model inverted vertically' : 'Model orientation restored', 'success');
@@ -3952,16 +6917,12 @@ function setupEventListeners() {
         }
       }
       if (state.splatMesh) {
-        state.splatMesh.scale.setScalar(state.modelScale * scale);
+        syncSplatStarEffectTransform();
       }
     }
   });
   
-  // Both desktop scatter-effect menus share one state and preview action.
   const applyScatterEffectSelection = (value) => {
-    for (const effectSelect of [dom.settingScatterEffect, dom.cameraScatterEffect]) {
-      if (effectSelect && effectSelect.value !== value) effectSelect.value = value;
-    }
     state.cancelScatterAnimation?.();
     if (value === 'none') {
       state.settings.particleEffectEnabled = false;
@@ -3983,55 +6944,130 @@ function setupEventListeners() {
       playFullDemoScatterAnimation();
     }
   };
-  dom.settingScatterEffect.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
   dom.cameraScatterEffect?.addEventListener('change', (e) => applyScatterEffectSelection(e.target.value));
-  // Crop factor range slider - continuous input for display, change event for reload
+  // Particle crop is a GPU uniform update, so slider movement previews live.
   if (dom.settingCropFactor) {
+    const applyParticleCropFactor = (value) => {
+      const factor = THREE.MathUtils.clamp(parseFloat(value), 0.5, 3.0);
+      state.settings.cropFactor = factor;
+      dom.settingCropFactorVal.textContent = `${factor.toFixed(2)}x`;
+      state.particleSystem?.setCropFactor(factor);
+    };
     dom.settingCropFactor.addEventListener('input', (e) => {
-      const factor = parseFloat(e.target.value);
-      dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
+      applyParticleCropFactor(e.target.value);
     });
-    
-    dom.settingCropFactor.addEventListener('change', async (e) => {
-      const factor = parseFloat(e.target.value);
-      if (factor >= 3.0) {
-        state.settings.cropOutliers = false;
-        state.settings.cropFactor = 3.0;
-      } else {
-        state.settings.cropOutliers = true;
-        state.settings.cropFactor = factor;
-      }
-      
-      // Update displayed value to represent the stored value
-      dom.settingCropFactorVal.textContent = factor >= 3.0 ? (state.lang === 'zh' ? '不缩放' : 'Off') : factor.toFixed(2) + 'x';
-      
-      // Immediately reload model with the new crop settings
-      if (state.lastLoadedBuffer) {
-        showLoading('Reloading...');
-        setTimeout(async () => {
-          try {
-            await processBuffer(state.lastLoadedBuffer, state.lastLoadedName);
-          } catch (err) {
-            hideLoading();
-            showToast(`Error: ${err.message}`, 'error');
-          }
-        }, 50);
-      }
+    dom.settingCropFactor.addEventListener('change', (e) => {
+      const factor = THREE.MathUtils.clamp(parseFloat(e.target.value), 0.5, 3.0);
+      applyParticleCropFactor(factor);
     });
   }
+
+  dom.btnParticleCropToggle?.addEventListener('click', () => {
+    state.settings.cropOutliers = !state.settings.cropOutliers;
+    updateCropToggleUI(dom.btnParticleCropToggle, state.settings.cropOutliers, 'particle');
+    state.particleSystem?.setCropEnabled(state.settings.cropOutliers);
+  });
+
+  dom.btnSplatCropToggle?.addEventListener('click', () => {
+    state.settings.splatCropEnabled = !state.settings.splatCropEnabled;
+    if (!isMobileViewport() && state.settings.splatCropEnabled) {
+      state.settings.splatCropShape = 'ellipsoid';
+    }
+    updateCropToggleUI(dom.btnSplatCropToggle, state.settings.splatCropEnabled, 'splat');
+    updateSplatCropShapeUI();
+    updateSplatCropFromSettings();
+  });
+
+  for (const button of [dom.btnSplatCropShapeEllipsoid, dom.btnSplatCropShapeBox]) {
+    button?.addEventListener('click', () => {
+      if (!isMobileViewport() && !state.settings.splatCropEnabled) return;
+      if (isMobileViewport() && !state.settings.splatCropEnabled) {
+        state.settings.splatCropEnabled = true;
+        updateCropToggleUI(dom.btnSplatCropToggle, true, 'splat');
+      }
+      applySplatCropShape(button.dataset.cropShape);
+    });
+  }
+  dom.btnMobileSplatCropNone?.addEventListener('click', () => {
+    if (!isMobileViewport()) return;
+    state.settings.splatCropEnabled = false;
+    updateCropToggleUI(dom.btnSplatCropToggle, false, 'splat');
+    updateSplatCropShapeUI();
+    updateSplatCropFromSettings();
+  });
+  dom.btnSplatEraser?.addEventListener('click', () => {
+    setSplatEraserActive(!state.splatEraser?.active);
+  });
+  dom.btnSplatEraserPaint?.addEventListener('click', () => {
+    if (isMobileViewport()) {
+      if (!state.splatEraser?.active) setSplatEraserActive(true);
+    } else {
+      setSplatEraserActive(!state.splatEraser?.active);
+    }
+  });
+  dom.btnSplatEraserConfirm?.addEventListener('click', confirmSplatEraserSelection);
+  dom.btnSplatEraserUndo?.addEventListener('click', undoSplatEraser);
+  dom.settingSplatEraserSize?.addEventListener('input', (event) => {
+    setSplatEraserBrushPercent(event.target.value);
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.splatEraser?.active) {
+      setSplatEraserActive(false);
+    } else if (
+      state.splatEraser?.active
+      && !state.splatEraser.touchLayout
+      && (event.code === 'BracketLeft' || event.code === 'BracketRight')
+    ) {
+      const target = event.target;
+      const isTyping = target instanceof HTMLElement && (
+        target.isContentEditable
+        || target.matches('textarea, select, input:not([type="range"])')
+      );
+      if (!isTyping) {
+        const step = parseFloat(dom.settingSplatEraserSize?.step) || 1;
+        const current = parseFloat(dom.settingSplatEraserSize?.value)
+          || state.splatEraser.brushScale * 100;
+        setSplatEraserBrushPercent(
+          current + (event.code === 'BracketLeft' ? -step : step)
+        );
+        event.preventDefault();
+      }
+    } else if (event.key === 'Alt' && state.splatEraser?.active && !state.splatEraser.touchLayout) {
+      state.splatEraser.cursorNavigation = true;
+      syncSplatEraserBrushCursor();
+      if (!state.splatEraser.drawing && state.renderer?.domElement) {
+        state.renderer.domElement.style.cursor = 'grab';
+      }
+    }
+  });
+  window.addEventListener('keyup', (event) => {
+    if (event.key === 'Alt' && state.splatEraser?.active && !state.splatEraser.touchLayout && !state.splatEraser.drawing) {
+      state.splatEraser.cursorNavigation = false;
+      syncSplatEraserBrushCursor();
+      if (state.renderer?.domElement) state.renderer.domElement.style.cursor = 'none';
+    }
+  });
   
-  // Prevent webpage zoom/scroll during flight preview
+  // Keep the preview surface pixel-stable: OrbitControls zoom, trackpad wheel,
+  // browser pinch zoom and Safari gesture zoom all stay locked until preview
+  // mode is explicitly closed.
   window.addEventListener('wheel', (e) => {
-    if (state.previewActive || state.recordingActive) {
+    if (isFlightZoomLocked() || state.recordingActive) {
       e.preventDefault();
     }
   }, { passive: false });
   
   window.addEventListener('touchmove', (e) => {
-    if ((state.previewActive || state.recordingActive) && e.touches.length > 1) {
+    if ((isFlightZoomLocked() || state.recordingActive) && e.touches.length > 1) {
       e.preventDefault();
     }
   }, { passive: false });
+
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach((eventName) => {
+    window.addEventListener(eventName, (e) => {
+      if (isFlightZoomLocked() || state.recordingActive) e.preventDefault();
+    }, { passive: false });
+  });
 }
 // ============================================================
 // Initialize App
@@ -4039,7 +7075,6 @@ function setupEventListeners() {
 function init() {
   applyTabletDesktopLayout();
   cacheDom();
-  initializeScatterEffectControls();
   syncResponsiveControlLayout();
   applyTranslations(state.lang);
   updateKeyframeUI();

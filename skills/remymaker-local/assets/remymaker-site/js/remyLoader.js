@@ -1,5 +1,5 @@
 /**
- * Remy3D & Kiri Engine loader.
+ * Remy3D, Kiri Engine & Insta360 loader.
  *
  * Only the CORS-blocked share-page resolution uses the lightweight /resolve
  * Pages Function. Model binaries and cameras.json are downloaded directly
@@ -41,8 +41,8 @@ export async function extractPLYFromUrl(shareUrl, { forceRefresh = false } = {})
   }
 
   const result = await response.json();
-  if (!result.plyUrl && !result.splatUrl) {
-    throw new Error('No supported PLY or Splat model was found in this share link.');
+  if (!result.plyUrl && !result.splatUrl && !result.sogUrl) {
+    throw new Error('No supported SOG, PLY, or Splat model was found in this share link.');
   }
 
   if (result.camerasUrl) {
@@ -61,12 +61,20 @@ export async function extractPLYFromUrl(shareUrl, { forceRefresh = false } = {})
 }
 
 /**
- * Download a PLY/Splat file directly from the source CDN.
+ * Download a SOG/PLY/Splat file directly from the source CDN.
  */
 export async function downloadPLY(url, onProgress) {
   const cleanUrl = url.replace(/\\u002F/g, '/');
-  const isSplat = cleanUrl.toLowerCase().includes('.splat');
-  console.log(`Downloading ${isSplat ? 'Splat' : 'PLY'} directly from CDN`);
+  const pathname = new URL(cleanUrl).pathname.toLowerCase();
+  const format = pathname.endsWith('.sog')
+    ? 'SOG'
+    : pathname.endsWith('.splat')
+      ? 'Splat'
+      : pathname.endsWith('.ply')
+        ? 'PLY'
+        : null;
+  if (!format) throw new Error('Unsupported model format. Expected SOG, PLY, or Splat.');
+  console.log(`Downloading ${format} directly from CDN`);
   const controller = new AbortController();
   let idleTimeoutId = null;
   const refreshIdleTimeout = () => {
@@ -115,9 +123,13 @@ export async function downloadPLY(url, onProgress) {
       offset += chunk.byteLength;
     }
 
-    if (!isSplat) {
+    if (format === 'PLY') {
       const header = new TextDecoder().decode(combined.subarray(0, 3));
       if (header !== 'ply') throw new Error('Downloaded file is not a valid PLY file.');
+    } else if (format === 'SOG') {
+      if (combined[0] !== 0x50 || combined[1] !== 0x4b) {
+        throw new Error('Downloaded file is not a valid SOG archive.');
+      }
     }
 
     onProgress?.(1);

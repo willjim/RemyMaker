@@ -360,14 +360,14 @@
       <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-open"></use></svg> 1. 快速入门：加载 3D 模型</h2>
       <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-open"></use></svg> 1. Quick Start: Loading 3D Models</h2>
       
-      <p class="lang-zh">系统支持从网络分享链接直接解析并展示 3D 照片模型：</p>
-      <p class="lang-en">The system supports directly fetching and rendering 3DGS (Gaussian Splatting) and regular 3D point cloud models from online share URLs:</p>
+      <p class="lang-zh">系统支持从 Remy3D、Kiri Engine 与 Insta360 分享链接解析并展示 3D 照片模型：</p>
+      <p class="lang-en">The system supports fetching and rendering 3DGS models from Remy3D, Kiri Engine, and Insta360 share URLs:</p>
       
       <ol class="lang-zh">
-        <li><strong>通过分享链接加载</strong>：在首页中央的输入框（或者在模型加载后的顶部菜单栏）粘贴 Remy3D 或 Kiri Engine 分享地址，然后点击「<strong>加载</strong>」按钮。系统会自动解析并加载模型。</li>
+        <li><strong>通过分享链接加载</strong>：在首页中央的输入框（或者在模型加载后的顶部菜单栏）粘贴 Remy3D、Kiri Engine 或 Insta360 分享地址，然后点击「<strong>加载</strong>」按钮。系统会自动解析并加载 PLY、Splat 或 SOG 模型。</li>
       </ol>
       <ol class="lang-en">
-        <li><strong>Load via Share Link</strong>: Paste a Remy3D or Kiri Engine share URL (e.g., <code>https://remy3d.com/share/...</code>) in the centered AI input box (or in the top toolbar after loading), then click the <strong>Load</strong> button. The system automatically fetches, parses, and loads the model.</li>
+        <li><strong>Load via Share Link</strong>: Paste a Remy3D, Kiri Engine, or Insta360 share URL in the centered input box (or in the top toolbar after loading), then click the <strong>Load</strong> button. The system automatically fetches, parses, and loads PLY, Splat, or SOG model data.</li>
       </ol>
     </div>
 
@@ -382,7 +382,7 @@
         <li><strong>场景缩放</strong>：滚动 <strong>鼠标中键滚轮</strong>。系统支持极小距离缩放，可将视角拉得极近来观测模型微小细节。</li>
         <li><strong>渲染模式切换</strong>：
           <ul>
-            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D 实景</span>：照片级写实的高保真 3D 高斯着色画面。</li>
+            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D 实景</span>：照片级写实的高保真 3D 高斯着色画面。新导入模型默认关闭背景裁剪；可在「渲染设置 → 3DGS 设置」中开启并调整裁剪范围与形状，后续切换菜单时会保留设置。</li>
             <li><span class="badge badge-cloud"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-atom"></use></svg>粒子模式</span>：展现充满未来科技感的荧光圆点粒子状态。</li>
           </ul>
         </li>
@@ -394,7 +394,7 @@
         <li><strong>Initial Auto-Fit Zoom</strong>: When a model loads, regardless of the background filter radius, the default camera will <strong>accurately align and fit to a 1x radius distance of the model's centroid</strong>, placing the subject directly in the center at close range.</li>
         <li><strong>Toggle Render Mode & Clipping Rules</strong>:
           <ul>
-            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D Reality Mode</span>: Photorealistic high-fidelity 3D Gaussian Splatting rendering. <strong>Under this mode, the system automatically keeps 100% of the raw background environment (no cropping)</strong> and extends the camera's far clip plane to prevent distant scenes from being cut off.</li>
+            <li><span class="badge badge-spark"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>3D Reality Mode</span>: Photorealistic high-fidelity 3D Gaussian Splatting rendering. Background cropping is off for each newly imported model. Open <strong>Rendering Settings → 3DGS Settings</strong> to enable it and adjust its bounds or shape; the setting is then preserved while navigating between menus.</li>
             <li><span class="badge badge-cloud"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-atom"></use></svg>Point Cloud Mode</span>: Renders glowing holographic-style floating point cloud particles. <strong>Under this mode, the background is automatically filtered to a clean 2.5x model radius</strong> to exclude messy environmental noise points.</li>
           </ul>
         </li>
@@ -403,19 +403,19 @@
 
     <!-- 3. 运镜录制 / Camera Path Recording -->
     <div class="card">
-      <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. 电影级运镜录制与 15 套内置闭环运镜预设</h2>
-      <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. Cinematic Flight Path Recording & 15 Built-in Presets</h2>
+      <h2 class="lang-zh"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. 电影级运镜录制与 19 套内置运镜预设</h2>
+      <h2 class="lang-en"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 3. Cinematic Flight Path Recording & 19 Built-in Presets</h2>
       
       <p class="lang-zh">点击顶部的 <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-video"></use></svg>镜头运镜</strong> 开启运镜控制台，制作属于您的电影级运镜视频：</p>
       <p class="lang-en">Click the <strong><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-video"></use></svg>Camera Path</strong> button at the top to open the flight path console and record your own aerial tracking videos:</p>
       
       <div class="tip-box lang-zh" style="background: rgba(123, 44, 191, 0.03); border-left: 4px solid var(--secondary-color);">
-        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>新增：15 套复合型闭环运镜</h3>
-        <p>我们内置了 15 套高级运镜预设（包含希区柯克滑动变焦、8 字形无限循环、螺旋上升收缩、钟摆等）。这些预设轨迹<strong>完全基于您当前的缩放大小与仰角</strong>动态计算，且运行期间支持鼠标右键拖拽实时平移运镜轴心。</p>
+        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>新增：19 套复合型运镜</h3>
+        <p>我们内置了 19 套高级运镜预设（包含希区柯克滑动变焦、8 字形无限循环、空间纵深进入、横向平移扫景与朝外环绕等）。这些预设轨迹<strong>完全基于您当前的缩放大小与仰角</strong>动态计算。</p>
       </div>
       <div class="tip-box lang-en" style="background: rgba(123, 44, 191, 0.03); border-left: 4px solid var(--secondary-color);">
-        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>New: 15 Built-in GSAP Closed Loop Flight Paths</h3>
-        <p>We have integrated 15 advanced camera flight presets (e.g., Hitchcock Dolly Zoom, Figure-8 loop, spiral ascending, pendulum). These trajectories are dynamically calculated <strong>based on your current Zoom level and Pitch angle</strong>, and support real-time panning of the tracking center with the right mouse button.</p>
+        <h3 style="color: var(--secondary-color);"><svg class="ui-icon inline-icon" aria-hidden="true"><use href="#icon-rocket"></use></svg>New: 19 Built-in Camera Paths</h3>
+        <p>We have integrated 19 advanced camera presets, including Hitchcock Dolly Zoom, Figure-8 loops, spatial depth entry, lateral scene sweeps, and outward-facing spatial orbits. These trajectories are dynamically calculated <strong>from the current zoom and pitch</strong>.</p>
       </div>
 
       <ol class="lang-zh">
