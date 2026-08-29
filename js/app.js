@@ -2444,7 +2444,7 @@ const translations = {
     'remy-intro-content': '照片视频很美好，但 3D 影像更显珍贵。Remy 是一款 3D 空间记录 App，让美好记忆场景可以保存并沉浸式体验。本网页使用 Vibe Coding 制作，你可以导入 Remy 已生成的 3D 影像，体验自定义运镜、发光粒子特效、手势控制等玩法，让 3D 影像变成更好玩的数字载体，祝你玩的开心！',
     // Welcome Hint & Loading
     'welcome-title': 'Remy 自定义特效运镜工具',
-    'welcome-desc': '在下方输入框中粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a>、<a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 或 <a href="https://app.insta360.com/3dspace" target="_blank" rel="noopener" class="desc-link">Insta360</a> 分享链接，即可开始您的 3D 粒子和 3DGS 实景体验。',
+    'welcome-desc': '在下方输入框粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>、<a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 或 Insta360 分享链接<br>即可开始您的粒子艺术和 3DGS 体验',
     'landing-url-placeholder': '粘贴 Remy3D、Kiri 或 Insta360 分享链接，无链接直接点击加载体验',
     'loading-init': '加载中...',
     'loading-downloading': '正在获取 3DGS 数据，请稍候...',
@@ -2626,7 +2626,7 @@ const translations = {
     'remy-intro-content': 'Photos and videos are beautiful, but 3D imagery is even more precious. Remy is a 3D spatial capture App that preserves cherished memories for immersive replay. Built using Vibe Coding, this web app lets you import your Remy 3D captures to experiment with custom camera paths, glowing particle effects, and hand gestures. Let\'s make 3D captures a more playful digital medium. Have fun!',
     // Welcome Hint & Loading
     'welcome-title': 'Remy Custom Effects & Camera Tool',
-    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy3D</a>, <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a>, or <a href="https://app.insta360.com/3dspace" target="_blank" rel="noopener" class="desc-link">Insta360</a> share URL below to explore Particle Mode and 3D Reality.',
+    'welcome-desc': 'Paste a <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>, <a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a>, or Insta360 share link in the box below.<br>Start your particle art and 3DGS experience.',
     'landing-url-placeholder': 'Paste a Remy3D, Kiri, or Insta360 share link, or load without one to try the demo',
     'loading-init': 'Loading...',
     'loading-downloading': 'Downloading 3DGS data, please wait...',
