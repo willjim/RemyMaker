@@ -821,7 +821,7 @@ export class ParticleSystem {
         uTime: { value: 0.0 },
         uPointSize: { value: 0.5 },
         uLogicalPointSize: { value: 0.5 },
-        uParticleBrightness: { value: 0.7 },
+        uParticleBrightness: { value: 0.77 },
         uParticleSoftness: { value: 0.7 },
         uParticleOpacity: { value: 1.0 },
         uExportColorCompensation: { value: 0.0 },
