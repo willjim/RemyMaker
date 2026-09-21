@@ -172,7 +172,7 @@ const state = {
     minOpacity: 0.50,
     pointSize: 0.20,         // default point size for soft additive-glow particles
     pointDensity: 1.00,      // default point cloud density (100%)
-    particleBrightness: 0.70, // default particle brightness multiplier
+    particleBrightness: 0.77, // 10% brighter than the previous 0.70 default
     particleSoftness: 0.70,   // default softness multiplier
     particleOpacity: 1.00,    // default particle opacity multiplier
     splatScale: 1.0,
@@ -2179,7 +2179,7 @@ function resetMobileSettingsParameter() {
     const activeTarget = document.querySelector('.mobile-particle-setting-tag.active')?.dataset.settingTarget;
     const sliderDefaults = {
       'setting-size-item': [dom.settingPointSize, 0.20],
-      'setting-brightness-item': [dom.settingParticleBrightness, 0.70],
+      'setting-brightness-item': [dom.settingParticleBrightness, 0.77],
       'setting-density-item': [dom.settingPointDensity, 1.00],
     };
     if (activeTarget === 'setting-crop-item') {
@@ -3152,7 +3152,7 @@ async function loadFromUrl() {
         try {
           const buffer = await downloadPLY(tryUrl, (p) => {
             updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
-          });
+          }, fileFormat);
           return { buffer, fileFormat };
         } catch (error) {
           lastDownloadError = error;
