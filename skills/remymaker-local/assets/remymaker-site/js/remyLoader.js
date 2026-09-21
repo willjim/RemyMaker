@@ -63,16 +63,26 @@ export async function extractPLYFromUrl(shareUrl, { forceRefresh = false } = {})
 /**
  * Download a SOG/PLY/Splat file directly from the source CDN.
  */
-export async function downloadPLY(url, onProgress) {
+export async function downloadPLY(url, onProgress, resolvedFormat = null) {
   const cleanUrl = url.replace(/\\u002F/g, '/');
   const pathname = new URL(cleanUrl).pathname.toLowerCase();
-  const format = pathname.endsWith('.sog')
+  const normalizedResolvedFormat = typeof resolvedFormat === 'string'
+    ? resolvedFormat.trim().toLowerCase()
+    : '';
+  const explicitFormat = normalizedResolvedFormat === 'sog'
+    ? 'SOG'
+    : normalizedResolvedFormat === 'splat'
+      ? 'Splat'
+      : normalizedResolvedFormat === 'ply'
+        ? 'PLY'
+        : null;
+  const format = explicitFormat || (pathname.endsWith('.sog')
     ? 'SOG'
     : pathname.endsWith('.splat')
       ? 'Splat'
       : pathname.endsWith('.ply')
         ? 'PLY'
-        : null;
+        : null);
   if (!format) throw new Error('Unsupported model format. Expected SOG, PLY, or Splat.');
   console.log(`Downloading ${format} directly from CDN`);
   const controller = new AbortController();
