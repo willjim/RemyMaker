@@ -3333,9 +3333,11 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
   }
   // Clean up previous loaded model
   disposeModel();
-  // Insta360 captures use the opposite vertical model orientation from the
-  // existing Remy/Kiri pipeline. Apply it only for this fresh import source.
-  if (options.flipVertical === true) state.xFlipped = false;
+  // SOG archives use the opposite vertical orientation from the legacy
+  // PLY/Splat pipeline. Apply the correction by the detected payload format
+  // so resolved URLs and local SOG uploads behave consistently. Keep the
+  // explicit source flag for non-SOG captures that also require correction.
+  if (fileFormat === 'sog' || options.flipVertical === true) state.xFlipped = false;
   // 1. Ensure Spark 2.0 Engine is dynamically loaded on demand (prevents slow page loading)
   if (!state.sparkRenderer) {
     updateLoadingProgress(0.72, 'Loading rendering engine...');
