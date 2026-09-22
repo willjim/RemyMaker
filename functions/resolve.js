@@ -6,6 +6,7 @@
 const ALLOWED_SHARE_HOSTS = new Set([
   'www.remy3d.cn',
   'remy3d.cn',
+  'test.remy3d.cn',
   'www.kiriengine.app',
   'kiriengine.app',
   'www.kiriengine.com',
@@ -38,6 +39,7 @@ export async function onRequestGet({ request }) {
 
   const isKiri = shareUrl.hostname.includes('kiri');
   const isInsta360 = shareUrl.hostname === 'app.insta360.com';
+  const isRemyTest = shareUrl.hostname === 'test.remy3d.cn';
   const validPath = isInsta360
     ? shareUrl.pathname.startsWith('/3dspace/detail/')
     : isKiri
@@ -50,7 +52,9 @@ export async function onRequestGet({ request }) {
       ? 'https://app.insta360.com/'
       : isKiri
         ? 'https://www.kiriengine.app/'
-        : 'https://www.remy3d.cn/';
+        : isRemyTest
+          ? 'https://test.remy3d.cn/'
+          : 'https://www.remy3d.cn/';
     const upstreamUrl = new URL(shareUrl);
     upstreamUrl.searchParams.set('_remymaker_refresh', Date.now().toString());
     const upstream = await fetch(upstreamUrl.toString(), {

@@ -15,6 +15,7 @@ from pathlib import Path
 ALLOWED_HOSTS = {
     "www.remy3d.cn",
     "remy3d.cn",
+    "test.remy3d.cn",
     "www.kiriengine.app",
     "kiriengine.app",
     "www.kiriengine.com",
@@ -146,6 +147,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             is_kiri = "kiri" in parsed.hostname
             is_insta360 = parsed.hostname == "app.insta360.com"
+            is_remy_test = parsed.hostname == "test.remy3d.cn"
             if is_insta360:
                 valid_path = parsed.path.startswith("/3dspace/detail/")
             elif is_kiri:
@@ -159,6 +161,8 @@ class Handler(SimpleHTTPRequestHandler):
                 referer = "https://app.insta360.com/"
             elif is_kiri:
                 referer = "https://www.kiriengine.app/"
+            elif is_remy_test:
+                referer = "https://test.remy3d.cn/"
             else:
                 referer = "https://www.remy3d.cn/"
             request = urllib.request.Request(
