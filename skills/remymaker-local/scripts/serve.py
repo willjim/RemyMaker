@@ -29,7 +29,13 @@ def parse_share_page(html, is_kiri):
     if not match:
         raise ValueError("Page does not contain Nuxt model data")
     data = json.loads(match.group(1))
-    result = {"splatUrl": None, "plyUrl": None, "pcdUrl": None, "camerasUrl": None}
+    result = {
+        "sogUrl": None,
+        "splatUrl": None,
+        "plyUrl": None,
+        "pcdUrl": None,
+        "camerasUrl": None,
+    }
     unsupported_mesh = None
     for value in data:
         if not isinstance(value, str):
@@ -37,6 +43,8 @@ def parse_share_page(html, is_kiri):
         value = value.replace(r"\u002F", "/")
         if not value.startswith("https://"):
             continue
+        if ".sog" in value.lower():
+            result["sogUrl"] = value
         if ".splat" in value:
             result["splatUrl"] = value
         if "cameras.json" in value:
@@ -48,10 +56,10 @@ def parse_share_page(html, is_kiri):
                 result["pcdUrl"] = value
             elif not result["plyUrl"] or "3DGS.ply" in value or "/output/" in value:
                 result["plyUrl"] = value
-    if not result["splatUrl"] and not result["plyUrl"]:
+    if not result["sogUrl"] and not result["splatUrl"] and not result["plyUrl"]:
         if is_kiri and unsupported_mesh:
             raise ValueError("This Kiri share is a Mesh model, not 3DGS")
-        raise ValueError("No supported Splat or PLY asset found")
+        raise ValueError("No supported SOG, Splat, or PLY asset found")
     result["name"] = find_name(data, "Kiri Model" if is_kiri else "Remy Model")
     return result
 

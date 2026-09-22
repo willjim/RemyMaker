@@ -132,6 +132,7 @@ function parseSharePage(html, isKiri) {
   if (!match) throw new Error('Page does not contain Nuxt model data');
 
   const data = JSON.parse(match[1]);
+  let sogUrl = null;
   let plyUrl = null;
   let pcdUrl = null;
   let splatUrl = null;
@@ -142,6 +143,7 @@ function parseSharePage(html, isKiri) {
     if (typeof value !== 'string') continue;
     const normalized = value.replace(/\\u002F/g, '/');
     if (!normalized.startsWith('https://')) continue;
+    if (normalized.toLowerCase().includes('.sog')) sogUrl = normalized;
     if (normalized.includes('.splat')) splatUrl = normalized;
     if (normalized.includes('cameras.json')) camerasUrl = normalized;
     if (normalized.includes('.glb')) unsupportedMeshUrl = normalized;
@@ -151,13 +153,14 @@ function parseSharePage(html, isKiri) {
     }
   }
 
-  if (!splatUrl && !plyUrl) {
+  if (!sogUrl && !splatUrl && !plyUrl) {
     if (isKiri && unsupportedMeshUrl) throw new Error('This Kiri share is a Mesh model, not 3DGS');
-    throw new Error('No supported Splat or PLY asset found');
+    throw new Error('No supported SOG, Splat, or PLY asset found');
   }
 
   return {
     name: findModelName(data, isKiri ? 'Kiri Model' : 'Remy Model'),
+    sogUrl,
     splatUrl,
     plyUrl,
     pcdUrl,
