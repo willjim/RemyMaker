@@ -83,6 +83,7 @@ const state = {
   controls: null,
   clock: null,
   desktopNavigation: {
+    enabled: false,
     pressed: new Set(),
     velocity: new THREE.Vector3(),
     forward: new THREE.Vector3(),
@@ -2022,6 +2023,7 @@ function cacheDom() {
     recordingIndicator: document.getElementById('recording-indicator'),
     btnExportVideo: document.getElementById('btn-export-video'),
     btnFlipX: document.getElementById('btn-flip-x'),
+    btnWalkMode: document.getElementById('btn-walk-mode'),
     btnPlayScatter: document.getElementById('btn-play-scatter'),
     btnLang: document.getElementById('btn-lang'),
     btnHome: document.getElementById('btn-home'),
@@ -2449,6 +2451,10 @@ const translations = {
     'stat-label-fps': '当前帧率',
     'progress-label-scatter': '粒子消散 / 聚合进度',
     'btn-flip-vertical': '垂直翻转模型',
+    'btn-walk-mode-enable': '开启行走模式（WASD 移动、鼠标视角、Space 跳跃）',
+    'btn-walk-mode-disable': '关闭行走模式',
+    'walk-mode-enabled': '行走模式已开启：WASD 移动，鼠标拖动视角，Space 跳跃',
+    'walk-mode-disabled': '行走模式已关闭',
     // Webcam & Gesture
     'webcam-live': '本地离线识别',
     'gesture-init': '正在初始化 AI 模型...',
@@ -2631,6 +2637,10 @@ const translations = {
     'stat-label-fps': 'FPS',
     'progress-label-scatter': 'Scatter / Gather',
     'btn-flip-vertical': 'Flip Vertically',
+    'btn-walk-mode-enable': 'Enable walk mode (WASD, mouse look, Space to jump)',
+    'btn-walk-mode-disable': 'Disable walk mode',
+    'walk-mode-enabled': 'Walk mode enabled: WASD to move, drag to look, Space to jump',
+    'walk-mode-disabled': 'Walk mode disabled',
     // Webcam & Gesture
     'webcam-live': 'Local Offline Tracking',
     'gesture-init': 'Initializing AI...',
@@ -2980,11 +2990,12 @@ function applyTranslations(lang) {
   if (dom.progressControl) {
     const labelSpan = dom.progressControl.querySelector('.progress-label span:first-child');
     if (labelSpan) labelSpan.textContent = dict['progress-label-scatter'];
-    if (dom.btnFlipX) {
-      const txt = dom.btnFlipX.querySelector('.btn-text');
-      if (txt) txt.textContent = dict['btn-flip-vertical'];
-    }
   }
+  if (dom.btnFlipX) {
+    dom.btnFlipX.title = dict['btn-flip-vertical'];
+    dom.btnFlipX.setAttribute('aria-label', dict['btn-flip-vertical']);
+  }
+  updateDesktopWalkModeUI();
 
   // Welcome Hint
   if (dom.welcomeHint) {
@@ -3256,7 +3267,9 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  state.desktopNavigation.enabled = false;
   resetDesktopNavigation();
+  updateDesktopWalkModeUI();
   disposeSplatEraser();
   disposeSplatCrop();
   if (state.splatPivot) {
@@ -3855,6 +3868,7 @@ function canUseDesktopNavigation() {
   const settingsOpen = Boolean(dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden'));
   return !IS_PHONE_DEVICE
     && !IS_TABLET_DEVICE
+    && state.desktopNavigation.enabled
     && state.isModelLoaded
     && Boolean(state.controls?.enabled || state.desktopNavigation.mouseLookActive)
     && !settingsOpen
@@ -3900,6 +3914,33 @@ function resetDesktopNavigation({ settleJump = true } = {}) {
   navigation.velocity.set(0, 0, 0);
   stopDesktopMouseLook();
   if (settleJump) settleDesktopNavigationJump();
+}
+
+function updateDesktopWalkModeUI() {
+  if (!dom.btnWalkMode) return;
+  const enabled = state.desktopNavigation.enabled;
+  const label = t(enabled ? 'btn-walk-mode-disable' : 'btn-walk-mode-enable');
+  dom.btnWalkMode.classList.toggle('active', enabled);
+  dom.btnWalkMode.setAttribute('aria-pressed', String(enabled));
+  dom.btnWalkMode.setAttribute('aria-label', label);
+  dom.btnWalkMode.title = label;
+}
+
+function toggleDesktopWalkMode() {
+  if (!state.isModelLoaded) {
+    showToast(t('load-model-first'), 'warning');
+    return;
+  }
+  const enabled = !state.desktopNavigation.enabled;
+  state.desktopNavigation.enabled = enabled;
+  resetDesktopNavigation();
+  if (enabled && !state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+  updateDesktopWalkModeUI();
+  showToast(t(enabled ? 'walk-mode-enabled' : 'walk-mode-disabled'), 'info', 3200);
 }
 
 function updateDesktopNavigation(delta) {
@@ -7077,6 +7118,7 @@ function setupEventListeners() {
       showToast(state.xFlipped ? 'Model inverted vertically' : 'Model orientation restored', 'success');
     });
   }
+  dom.btnWalkMode?.addEventListener('click', toggleDesktopWalkMode);
   // Language switcher handler
   if (dom.btnLang) {
     dom.btnLang.addEventListener('click', () => {
