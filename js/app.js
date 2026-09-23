@@ -2453,9 +2453,9 @@ const translations = {
     'stat-label-fps': '当前帧率',
     'progress-label-scatter': '粒子消散 / 聚合进度',
     'btn-flip-vertical': '垂直翻转模型',
-    'btn-walk-mode-enable': '开启行走模式（左键点击自由视角、右键拖动环绕、WASD 移动、Space 跳跃）',
+    'btn-walk-mode-enable': '开启行走模式（左键点击自由视角、右键拖动平移、WASD 移动、Space 跳跃）',
     'btn-walk-mode-disable': '关闭行走模式',
-    'walk-mode-enabled': '左键点击进入 360° 自由视角，Esc 退出；右键拖动环绕观察点',
+    'walk-mode-enabled': '左键点击进入 360° 自由视角，Esc 退出；右键拖动平移视角',
     'walk-mode-disabled': '行走模式已关闭',
     // Webcam & Gesture
     'webcam-live': '本地离线识别',
@@ -2639,9 +2639,9 @@ const translations = {
     'stat-label-fps': 'FPS',
     'progress-label-scatter': 'Scatter / Gather',
     'btn-flip-vertical': 'Flip Vertically',
-    'btn-walk-mode-enable': 'Enable walk mode (left click to look, right drag to orbit, WASD, Space)',
+    'btn-walk-mode-enable': 'Enable walk mode (left click to look, right drag to pan, WASD, Space)',
     'btn-walk-mode-disable': 'Disable walk mode',
-    'walk-mode-enabled': 'Left click for 360° free look, Esc to exit; right drag to orbit the focal point',
+    'walk-mode-enabled': 'Left click for 360° free look, Esc to exit; right drag to pan',
     'walk-mode-disabled': 'Walk mode disabled',
     // Webcam & Gesture
     'webcam-live': 'Local Offline Tracking',
@@ -3940,7 +3940,7 @@ function toggleDesktopWalkMode() {
   const enabled = !state.desktopNavigation.enabled;
   state.desktopNavigation.enabled = enabled;
   resetDesktopNavigation();
-  state.controls.mouseButtons.RIGHT = enabled ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  state.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
   if (enabled && !state.rotationPaused) {
     state.rotationPaused = true;
     if (state.particleSystem) state.particleSystem.autoRotate = false;
