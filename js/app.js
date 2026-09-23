@@ -7,7 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=6.3';
 import { GestureControl } from './gestureControl.js?v=1.1';
-import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.2';
+import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.3';
 import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
