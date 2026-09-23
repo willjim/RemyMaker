@@ -99,6 +99,8 @@ const state = {
     mouseLookPointerId: null,
     mouseLookLastX: 0,
     mouseLookLastY: 0,
+    pointerLockPending: false,
+    leftButtonDown: false,
     controlsWereEnabled: true,
   },
   particleSystem: null,
@@ -2451,9 +2453,9 @@ const translations = {
     'stat-label-fps': '当前帧率',
     'progress-label-scatter': '粒子消散 / 聚合进度',
     'btn-flip-vertical': '垂直翻转模型',
-    'btn-walk-mode-enable': '开启行走模式（WASD 移动、鼠标拖动自由视角、Space 跳跃）',
+    'btn-walk-mode-enable': '开启行走模式（左键点击自由视角、右键拖动环绕、WASD 移动、Space 跳跃）',
     'btn-walk-mode-disable': '关闭行走模式',
-    'walk-mode-enabled': '行走模式已开启：WASD 移动，鼠标拖动可 360° 转动视角，Space 跳跃',
+    'walk-mode-enabled': '左键点击进入 360° 自由视角，Esc 退出；右键拖动环绕观察点',
     'walk-mode-disabled': '行走模式已关闭',
     // Webcam & Gesture
     'webcam-live': '本地离线识别',
@@ -2637,9 +2639,9 @@ const translations = {
     'stat-label-fps': 'FPS',
     'progress-label-scatter': 'Scatter / Gather',
     'btn-flip-vertical': 'Flip Vertically',
-    'btn-walk-mode-enable': 'Enable walk mode (WASD, drag for free look, Space to jump)',
+    'btn-walk-mode-enable': 'Enable walk mode (left click to look, right drag to orbit, WASD, Space)',
     'btn-walk-mode-disable': 'Disable walk mode',
-    'walk-mode-enabled': 'Walk mode enabled: WASD to move, drag for 360° free look, Space to jump',
+    'walk-mode-enabled': 'Left click for 360° free look, Esc to exit; right drag to orbit the focal point',
     'walk-mode-disabled': 'Walk mode disabled',
     // Webcam & Gesture
     'webcam-live': 'Local Offline Tracking',
@@ -3269,6 +3271,7 @@ async function loadFromFile(file) {
 function disposeModel() {
   state.desktopNavigation.enabled = false;
   resetDesktopNavigation();
+  if (state.controls) state.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
   updateDesktopWalkModeUI();
   disposeSplatEraser();
   disposeSplatCrop();
@@ -3899,11 +3902,14 @@ function stopDesktopMouseLook(event = null) {
   if (event && event.pointerId !== navigation.mouseLookPointerId) return;
 
   const canvas = state.renderer?.domElement;
+  if (document.pointerLockElement === canvas) document.exitPointerLock?.();
   if (canvas?.hasPointerCapture?.(navigation.mouseLookPointerId)) {
     canvas.releasePointerCapture(navigation.mouseLookPointerId);
   }
   navigation.mouseLookActive = false;
   navigation.mouseLookPointerId = null;
+  navigation.pointerLockPending = false;
+  navigation.leftButtonDown = false;
   if (state.controls) state.controls.enabled = navigation.controlsWereEnabled;
   if (canvas && !state.splatEraser?.active && !state.splatCropDrag) canvas.style.cursor = '';
 }
@@ -3934,6 +3940,7 @@ function toggleDesktopWalkMode() {
   const enabled = !state.desktopNavigation.enabled;
   state.desktopNavigation.enabled = enabled;
   resetDesktopNavigation();
+  state.controls.mouseButtons.RIGHT = enabled ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
   if (enabled && !state.rotationPaused) {
     state.rotationPaused = true;
     if (state.particleSystem) state.particleSystem.autoRotate = false;
@@ -4023,16 +4030,40 @@ function handleDesktopNavigationKeyUp(event) {
 }
 
 function beginDesktopMouseLook(event) {
-  if ((event.button !== 0 && event.button !== 2) || !canUseDesktopNavigation()) return;
+  if (!canUseDesktopNavigation()) return;
+  if (event.button === 2 && state.desktopNavigation.mouseLookActive) {
+    stopDesktopMouseLook();
+    return;
+  }
+  if (event.button !== 0) return;
+  if (state.desktopNavigation.mouseLookActive) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
   const navigation = state.desktopNavigation;
   navigation.mouseLookActive = true;
   navigation.mouseLookPointerId = event.pointerId;
   navigation.mouseLookLastX = event.clientX;
   navigation.mouseLookLastY = event.clientY;
+  navigation.leftButtonDown = true;
   navigation.controlsWereEnabled = state.controls.enabled;
   state.controls.enabled = false;
-  state.renderer.domElement.setPointerCapture?.(event.pointerId);
-  state.renderer.domElement.style.cursor = 'grabbing';
+  const canvas = state.renderer.domElement;
+  canvas.style.cursor = 'none';
+  // A click starts unrestricted first-person mouse look. Browsers that reject
+  // pointer lock still support the previous hold-and-drag interaction.
+  try {
+    if (canvas.requestPointerLock) {
+      navigation.pointerLockPending = true;
+      canvas.requestPointerLock()?.catch?.(() => {
+        navigation.pointerLockPending = false;
+        if (!navigation.leftButtonDown) stopDesktopMouseLook();
+      });
+    }
+  } catch (_) {
+    navigation.pointerLockPending = false;
+  }
 
   if (!state.rotationPaused) {
     state.rotationPaused = true;
@@ -4072,6 +4103,9 @@ function moveDesktopMouseLook(event) {
 function endDesktopMouseLook(event) {
   if (!state.desktopNavigation.mouseLookActive) return;
   if (event.pointerId !== state.desktopNavigation.mouseLookPointerId) return;
+  state.desktopNavigation.leftButtonDown = false;
+  if (state.desktopNavigation.pointerLockPending
+    || document.pointerLockElement === state.renderer?.domElement) return;
   event.preventDefault();
   event.stopPropagation();
   stopDesktopMouseLook(event);
@@ -6713,6 +6747,18 @@ function setupEventListeners() {
   renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
   renderCanvas?.addEventListener('contextmenu', (event) => {
     if (state.desktopNavigation.mouseLookActive || canUseDesktopNavigation()) event.preventDefault();
+  });
+  document.addEventListener('pointerlockchange', () => {
+    state.desktopNavigation.pointerLockPending = false;
+    if (document.pointerLockElement === renderCanvas) {
+      if (!state.desktopNavigation.mouseLookActive) document.exitPointerLock?.();
+    } else {
+      stopDesktopMouseLook();
+    }
+  });
+  document.addEventListener('pointerlockerror', () => {
+    state.desktopNavigation.pointerLockPending = false;
+    if (!state.desktopNavigation.leftButtonDown) stopDesktopMouseLook();
   });
   renderCanvas?.addEventListener('pointerleave', () => {
     hideSplatEraserBrushCursor();
