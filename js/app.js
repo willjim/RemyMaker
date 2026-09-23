@@ -2451,9 +2451,9 @@ const translations = {
     'stat-label-fps': '当前帧率',
     'progress-label-scatter': '粒子消散 / 聚合进度',
     'btn-flip-vertical': '垂直翻转模型',
-    'btn-walk-mode-enable': '开启行走模式（WASD 移动、鼠标视角、Space 跳跃）',
+    'btn-walk-mode-enable': '开启行走模式（WASD 移动、鼠标拖动自由视角、Space 跳跃）',
     'btn-walk-mode-disable': '关闭行走模式',
-    'walk-mode-enabled': '行走模式已开启：WASD 移动，鼠标拖动视角，Space 跳跃',
+    'walk-mode-enabled': '行走模式已开启：WASD 移动，鼠标拖动可 360° 转动视角，Space 跳跃',
     'walk-mode-disabled': '行走模式已关闭',
     // Webcam & Gesture
     'webcam-live': '本地离线识别',
@@ -2637,9 +2637,9 @@ const translations = {
     'stat-label-fps': 'FPS',
     'progress-label-scatter': 'Scatter / Gather',
     'btn-flip-vertical': 'Flip Vertically',
-    'btn-walk-mode-enable': 'Enable walk mode (WASD, mouse look, Space to jump)',
+    'btn-walk-mode-enable': 'Enable walk mode (WASD, drag for free look, Space to jump)',
     'btn-walk-mode-disable': 'Disable walk mode',
-    'walk-mode-enabled': 'Walk mode enabled: WASD to move, drag to look, Space to jump',
+    'walk-mode-enabled': 'Walk mode enabled: WASD to move, drag for 360° free look, Space to jump',
     'walk-mode-disabled': 'Walk mode disabled',
     // Webcam & Gesture
     'webcam-live': 'Local Offline Tracking',
@@ -4023,7 +4023,7 @@ function handleDesktopNavigationKeyUp(event) {
 }
 
 function beginDesktopMouseLook(event) {
-  if (event.button !== 2 || !canUseDesktopNavigation()) return;
+  if ((event.button !== 0 && event.button !== 2) || !canUseDesktopNavigation()) return;
   const navigation = state.desktopNavigation;
   navigation.mouseLookActive = true;
   navigation.mouseLookPointerId = event.pointerId;
@@ -4040,7 +4040,7 @@ function beginDesktopMouseLook(event) {
     updateRotationControls();
   }
   event.preventDefault();
-  event.stopPropagation();
+  event.stopImmediatePropagation();
 }
 
 function moveDesktopMouseLook(event) {
