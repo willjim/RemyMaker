@@ -13,6 +13,11 @@ import { LandingBackground } from './landingBackground.js';
 
 const MAX_INTERACTIVE_PIXEL_RATIO = 1.5;
 const RENDERER_VISIBILITY_EPSILON = 0.002;
+const DESKTOP_NAVIGATION_MOVE_SPEED = 0.55;
+const DESKTOP_NAVIGATION_ACCELERATION = 12;
+const DESKTOP_NAVIGATION_JUMP_SPEED = 0.72;
+const DESKTOP_NAVIGATION_GRAVITY = 2.15;
+const DESKTOP_NAVIGATION_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
 
 function getInitialLanguage() {
   try {
@@ -77,6 +82,24 @@ const state = {
   renderer: null,
   controls: null,
   clock: null,
+  desktopNavigation: {
+    pressed: new Set(),
+    velocity: new THREE.Vector3(),
+    forward: new THREE.Vector3(),
+    right: new THREE.Vector3(),
+    desiredVelocity: new THREE.Vector3(),
+    translation: new THREE.Vector3(),
+    lookDirection: new THREE.Vector3(),
+    lookSpherical: new THREE.Spherical(),
+    jumpVelocity: 0,
+    jumpOffset: 0,
+    jumping: false,
+    mouseLookActive: false,
+    mouseLookPointerId: null,
+    mouseLookLastX: 0,
+    mouseLookLastY: 0,
+    controlsWereEnabled: true,
+  },
   particleSystem: null,
   landingBg: null,
   cameraParallax: { x: 0, y: 0 },
@@ -2037,6 +2060,8 @@ function initThreeJS() {
   state.controls.dampingFactor = 0.05;
   state.controls.enablePan = true;
   state.controls.enableZoom = true;
+  state.controls.enableRotate = true;
+  state.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
   state.controls.minDistance = 0.1; // Allows zooming in extremely close
   state.controls.maxDistance = 20;
   state.controls.target.set(0, 0, 0);
@@ -3231,6 +3256,7 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  resetDesktopNavigation();
   disposeSplatEraser();
   disposeSplatCrop();
   if (state.splatPivot) {
@@ -3818,6 +3844,198 @@ function pauseRegularAnimationLoop() {
   }
 }
 
+function isEditableKeyboardTarget(target) {
+  return target instanceof HTMLElement && (
+    target.isContentEditable
+    || target.matches('input, textarea, select')
+  );
+}
+
+function canUseDesktopNavigation() {
+  const settingsOpen = Boolean(dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden'));
+  return !IS_PHONE_DEVICE
+    && !IS_TABLET_DEVICE
+    && state.isModelLoaded
+    && Boolean(state.controls?.enabled || state.desktopNavigation.mouseLookActive)
+    && !settingsOpen
+    && !state.cameraModeActive
+    && !state.previewActive
+    && !state.previewCompleted
+    && !state.recordingActive
+    && !state.exportPreparing
+    && !state.compositingActive
+    && !state.splatCropDrag
+    && !state.splatEraser?.active;
+}
+
+function settleDesktopNavigationJump() {
+  const navigation = state.desktopNavigation;
+  if (navigation.jumpOffset && state.camera && state.controls) {
+    state.camera.position.y -= navigation.jumpOffset;
+    state.controls.target.y -= navigation.jumpOffset;
+  }
+  navigation.jumpVelocity = 0;
+  navigation.jumpOffset = 0;
+  navigation.jumping = false;
+}
+
+function stopDesktopMouseLook(event = null) {
+  const navigation = state.desktopNavigation;
+  if (!navigation.mouseLookActive) return;
+  if (event && event.pointerId !== navigation.mouseLookPointerId) return;
+
+  const canvas = state.renderer?.domElement;
+  if (canvas?.hasPointerCapture?.(navigation.mouseLookPointerId)) {
+    canvas.releasePointerCapture(navigation.mouseLookPointerId);
+  }
+  navigation.mouseLookActive = false;
+  navigation.mouseLookPointerId = null;
+  if (state.controls) state.controls.enabled = navigation.controlsWereEnabled;
+  if (canvas && !state.splatEraser?.active && !state.splatCropDrag) canvas.style.cursor = '';
+}
+
+function resetDesktopNavigation({ settleJump = true } = {}) {
+  const navigation = state.desktopNavigation;
+  navigation.pressed.clear();
+  navigation.velocity.set(0, 0, 0);
+  stopDesktopMouseLook();
+  if (settleJump) settleDesktopNavigationJump();
+}
+
+function updateDesktopNavigation(delta) {
+  const navigation = state.desktopNavigation;
+  if (!canUseDesktopNavigation()) {
+    resetDesktopNavigation();
+    return;
+  }
+
+  const frameDelta = Math.min(Math.max(delta, 0), 0.05);
+  const forward = navigation.forward;
+  state.camera.getWorldDirection(forward);
+  forward.y = 0;
+  if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1);
+  forward.normalize();
+  const right = navigation.right.copy(forward).cross(state.camera.up).normalize();
+  const desiredVelocity = navigation.desiredVelocity.set(0, 0, 0);
+
+  if (navigation.pressed.has('KeyW')) desiredVelocity.add(forward);
+  if (navigation.pressed.has('KeyS')) desiredVelocity.sub(forward);
+  if (navigation.pressed.has('KeyD')) desiredVelocity.add(right);
+  if (navigation.pressed.has('KeyA')) desiredVelocity.sub(right);
+  if (desiredVelocity.lengthSq() > 0) {
+    desiredVelocity.normalize().multiplyScalar(DESKTOP_NAVIGATION_MOVE_SPEED);
+  }
+
+  const velocityBlend = 1 - Math.exp(-DESKTOP_NAVIGATION_ACCELERATION * frameDelta);
+  navigation.velocity.lerp(desiredVelocity, velocityBlend);
+  if (desiredVelocity.lengthSq() === 0 && navigation.velocity.lengthSq() < 1e-7) {
+    navigation.velocity.set(0, 0, 0);
+  }
+
+  const translation = navigation.translation.copy(navigation.velocity).multiplyScalar(frameDelta);
+  if (translation.lengthSq() > 0) {
+    state.camera.position.add(translation);
+    state.controls.target.add(translation);
+  }
+
+  if (navigation.jumping) {
+    navigation.jumpVelocity -= DESKTOP_NAVIGATION_GRAVITY * frameDelta;
+    const nextOffset = navigation.jumpOffset + navigation.jumpVelocity * frameDelta;
+    const clampedOffset = Math.max(0, nextOffset);
+    const jumpTranslation = clampedOffset - navigation.jumpOffset;
+    state.camera.position.y += jumpTranslation;
+    state.controls.target.y += jumpTranslation;
+    navigation.jumpOffset = clampedOffset;
+    if (nextOffset <= 0 && navigation.jumpVelocity < 0) {
+      navigation.jumpVelocity = 0;
+      navigation.jumping = false;
+    }
+  }
+}
+
+function handleDesktopNavigationKeyDown(event) {
+  if (event.repeat || isEditableKeyboardTarget(event.target)) return;
+  const isMoveKey = DESKTOP_NAVIGATION_CODES.has(event.code);
+  const isJumpKey = event.code === 'Space';
+  const focusedActionControl = isJumpKey
+    && event.target instanceof HTMLElement
+    && event.target.matches('button, a[href]');
+  if ((!isMoveKey && !isJumpKey) || focusedActionControl || !canUseDesktopNavigation()) return;
+
+  if (!state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+
+  if (isMoveKey) state.desktopNavigation.pressed.add(event.code);
+  if (isJumpKey && !state.desktopNavigation.jumping) {
+    state.desktopNavigation.jumping = true;
+    state.desktopNavigation.jumpVelocity = DESKTOP_NAVIGATION_JUMP_SPEED;
+  }
+  event.preventDefault();
+}
+
+function handleDesktopNavigationKeyUp(event) {
+  if (!DESKTOP_NAVIGATION_CODES.has(event.code)) return;
+  state.desktopNavigation.pressed.delete(event.code);
+}
+
+function beginDesktopMouseLook(event) {
+  if (event.button !== 2 || !canUseDesktopNavigation()) return;
+  const navigation = state.desktopNavigation;
+  navigation.mouseLookActive = true;
+  navigation.mouseLookPointerId = event.pointerId;
+  navigation.mouseLookLastX = event.clientX;
+  navigation.mouseLookLastY = event.clientY;
+  navigation.controlsWereEnabled = state.controls.enabled;
+  state.controls.enabled = false;
+  state.renderer.domElement.setPointerCapture?.(event.pointerId);
+  state.renderer.domElement.style.cursor = 'grabbing';
+
+  if (!state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function moveDesktopMouseLook(event) {
+  const navigation = state.desktopNavigation;
+  if (!navigation.mouseLookActive || event.pointerId !== navigation.mouseLookPointerId) return;
+  const deltaX = Number.isFinite(event.movementX)
+    ? event.movementX
+    : event.clientX - navigation.mouseLookLastX;
+  const deltaY = Number.isFinite(event.movementY)
+    ? event.movementY
+    : event.clientY - navigation.mouseLookLastY;
+  navigation.mouseLookLastX = event.clientX;
+  navigation.mouseLookLastY = event.clientY;
+
+  const direction = navigation.lookDirection
+    .copy(state.controls.target)
+    .sub(state.camera.position);
+  const lookDistance = Math.max(direction.length(), 0.05);
+  const spherical = navigation.lookSpherical.setFromVector3(direction);
+  spherical.theta -= deltaX * 0.003;
+  spherical.phi = THREE.MathUtils.clamp(spherical.phi + deltaY * 0.003, 0.02, Math.PI - 0.02);
+  direction.setFromSpherical(spherical).setLength(lookDistance);
+  state.controls.target.copy(state.camera.position).add(direction);
+  state.camera.lookAt(state.controls.target);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function endDesktopMouseLook(event) {
+  if (!state.desktopNavigation.mouseLookActive) return;
+  if (event.pointerId !== state.desktopNavigation.mouseLookPointerId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopDesktopMouseLook(event);
+}
+
 function resumeRegularAnimationLoop() {
   if (!state.compositingActive) return;
   state.compositingActive = false;
@@ -3833,6 +4051,7 @@ function animate() {
   state.animationFrameId = requestAnimationFrame(animate);
   const delta = state.clock.getDelta();
   const elapsed = state.clock.getElapsedTime();
+  updateDesktopNavigation(delta);
   // Pace capture at 60 FPS. When a slower device misses a frame, advance the
   // animation clock by the real elapsed time instead of stretching the clip or
   // rounding partial delays up to whole frames (which can end an orbit early).
@@ -6449,10 +6668,19 @@ function setupEventListeners() {
   const renderCanvas = state.renderer?.domElement;
   renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
   renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
+  renderCanvas?.addEventListener('pointerdown', beginDesktopMouseLook, { capture: true });
   renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
+  renderCanvas?.addEventListener('contextmenu', (event) => {
+    if (state.desktopNavigation.mouseLookActive || canUseDesktopNavigation()) event.preventDefault();
+  });
   renderCanvas?.addEventListener('pointerleave', () => {
     hideSplatEraserBrushCursor();
-    if (!state.splatCropDrag && !state.splatEraser?.active && renderCanvas) renderCanvas.style.cursor = '';
+    if (
+      !state.splatCropDrag
+      && !state.splatEraser?.active
+      && !state.desktopNavigation.mouseLookActive
+      && renderCanvas
+    ) renderCanvas.style.cursor = '';
   });
   window.addEventListener('pointermove', moveSplatEraserStroke, { capture: true, passive: false });
   window.addEventListener('pointerup', endSplatEraserStroke, { capture: true, passive: false });
@@ -6460,6 +6688,15 @@ function setupEventListeners() {
   window.addEventListener('pointermove', moveSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointerup', endSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointercancel', endSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointermove', moveDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('pointerup', endDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('keydown', handleDesktopNavigationKeyDown);
+  window.addEventListener('keyup', handleDesktopNavigationKeyUp);
+  window.addEventListener('blur', () => resetDesktopNavigation());
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) resetDesktopNavigation();
+  });
 
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
