@@ -3177,8 +3177,8 @@ async function loadFromUrl() {
   }
   showLoading('Extracting model URL...');
   try {
-    let lastDownloadError = null;
-    const downloadResolvedModel = async (resolvedModel) => {
+    let lastLoadError = null;
+    const loadResolvedModel = async (resolvedModel) => {
       const urlsToTry = [
         ['sog', resolvedModel.sogUrl],
         ['splat', resolvedModel.splatUrl],
@@ -3191,13 +3191,17 @@ async function loadFromUrl() {
           const buffer = await downloadPLY(tryUrl, (p) => {
             updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
           }, fileFormat);
-          return { buffer, fileFormat };
+          await processBuffer(buffer, resolvedModel.name, true, {
+            fileFormat,
+            flipVertical: resolvedModel.source === 'insta360',
+          });
+          return true;
         } catch (error) {
-          lastDownloadError = error;
-          console.warn(`Failed to download ${tryUrl.substring(0, 60)}:`, error.message);
+          lastLoadError = error;
+          console.warn(`Failed to load ${fileFormat} model from ${tryUrl.substring(0, 60)}:`, error);
         }
       }
-      return null;
+      return false;
     };
 
     // Step 1: Resolve supported model assets from the share page.
@@ -3209,27 +3213,22 @@ async function loadFromUrl() {
     }
     // Step 2: Download the file (prefer compact SOG when available).
     updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-    let download = await downloadResolvedModel(result);
+    let loaded = await loadResolvedModel(result);
 
-    // A Remy share page may be cached with an expired signed model URL.
-    // Re-resolve once before reporting a download failure.
-    if (!download) {
+    // A share page may contain expired signed URLs or a damaged preferred
+    // asset. Re-resolve once only after all available formats fail to load.
+    if (!loaded) {
       updateLoadingProgress(0.1, 'Parsing share page...');
       result = await extractPLYFromUrl(url, { forceRefresh: true });
       state.initialCameraPosition = result.initialCameraPosition || null;
       updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-      download = await downloadResolvedModel(result);
+      loaded = await loadResolvedModel(result);
     }
 
-    if (!download) {
-      const reason = lastDownloadError?.message ? ` (${lastDownloadError.message})` : '';
+    if (!loaded) {
+      const reason = lastLoadError?.message ? ` (${lastLoadError.message})` : '';
       throw new Error(`Could not load model data from this share link.${reason}`);
     }
-    // Step 3: Parse and create particles
-    await processBuffer(download.buffer, result.name, true, {
-      fileFormat: download.fileFormat,
-      flipVertical: result.source === 'insta360',
-    });
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);
@@ -3408,8 +3407,7 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
       state.sparkPainterApi = { RgbaArray, readRgbaArray, dyno };
     } catch (err) {
       console.error('Failed to load rendering engine dynamically:', err);
-      showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
-      return;
+      throw err;
     }
   }
   // Always add Spark renderer to scene
@@ -3496,10 +3494,7 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
     }
   } catch (err) {
     decodedSogMesh?.dispose?.();
-    hideLoading();
-    console.error(err);
-    showToast(`Failed to parse model data: ${err.message}`, 'error');
-    return;
+    throw err;
   }
   // 3. Create Particle System
   updateLoadingProgress(0.88, 'Creating Particle Cloud...');
@@ -3610,12 +3605,11 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
         },
       });
       state.splatMesh = currentSplatMesh;
+      await currentSplatMesh.initialized;
     }
   } catch (err) {
     decodedSogMesh?.dispose?.();
-    hideLoading();
-    console.error(err);
-    showToast(`Rendering engine load failed: ${err.message}`, 'error', 6000);
+    throw err;
   }
 }
 // ============================================================
@@ -3924,6 +3918,9 @@ function resetDesktopNavigation({ settleJump = true } = {}) {
 
 function updateDesktopWalkModeUI() {
   if (!dom.btnWalkMode) return;
+  const available = !IS_PHONE_DEVICE && !IS_TABLET_DEVICE;
+  dom.btnWalkMode.style.display = available ? '' : 'none';
+  dom.btnWalkMode.disabled = !available;
   const enabled = state.desktopNavigation.enabled;
   const label = t(enabled ? 'btn-walk-mode-disable' : 'btn-walk-mode-enable');
   dom.btnWalkMode.classList.toggle('active', enabled);
@@ -3933,6 +3930,7 @@ function updateDesktopWalkModeUI() {
 }
 
 function toggleDesktopWalkMode() {
+  if (IS_PHONE_DEVICE || IS_TABLET_DEVICE) return;
   if (!state.isModelLoaded) {
     showToast(t('load-model-first'), 'warning');
     return;
