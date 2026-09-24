@@ -15,10 +15,12 @@ from pathlib import Path
 ALLOWED_HOSTS = {
     "www.remy3d.cn",
     "remy3d.cn",
+    "test.remy3d.cn",
     "www.kiriengine.app",
     "kiriengine.app",
     "www.kiriengine.com",
     "kiriengine.com",
+    "app.insta360.com",
 }
 
 
@@ -27,7 +29,13 @@ def parse_share_page(html, is_kiri):
     if not match:
         raise ValueError("Page does not contain Nuxt model data")
     data = json.loads(match.group(1))
-    result = {"splatUrl": None, "plyUrl": None, "pcdUrl": None, "camerasUrl": None}
+    result = {
+        "sogUrl": None,
+        "splatUrl": None,
+        "plyUrl": None,
+        "pcdUrl": None,
+        "camerasUrl": None,
+    }
     unsupported_mesh = None
     for value in data:
         if not isinstance(value, str):
@@ -35,6 +43,8 @@ def parse_share_page(html, is_kiri):
         value = value.replace(r"\u002F", "/")
         if not value.startswith("https://"):
             continue
+        if ".sog" in value.lower():
+            result["sogUrl"] = value
         if ".splat" in value:
             result["splatUrl"] = value
         if "cameras.json" in value:
@@ -46,11 +56,65 @@ def parse_share_page(html, is_kiri):
                 result["pcdUrl"] = value
             elif not result["plyUrl"] or "3DGS.ply" in value or "/output/" in value:
                 result["plyUrl"] = value
-    if not result["splatUrl"] and not result["plyUrl"]:
+    if not result["sogUrl"] and not result["splatUrl"] and not result["plyUrl"]:
         if is_kiri and unsupported_mesh:
             raise ValueError("This Kiri share is a Mesh model, not 3DGS")
-        raise ValueError("No supported Splat or PLY asset found")
+        raise ValueError("No supported SOG, Splat, or PLY asset found")
     result["name"] = find_name(data, "Kiri Model" if is_kiri else "Remy Model")
+    return result
+
+
+def parse_insta360_share_page(html):
+    match = re.search(r'id=["\']__NEXT_DATA__["\'][^>]*>([\s\S]*?)</script>', html)
+    if not match:
+        raise ValueError("Page does not contain Insta360 model data")
+
+    next_data = json.loads(match.group(1))
+    if not isinstance(next_data, dict):
+        next_data = {}
+    props = next_data.get("props")
+    if not isinstance(props, dict):
+        props = {}
+    page_props = props.get("pageProps")
+    if not isinstance(page_props, dict):
+        page_props = {}
+    task_detail = page_props.get("taskDetail")
+    if not isinstance(task_detail, dict):
+        task_detail = {}
+    outputs = task_detail.get("outputs")
+    if not isinstance(outputs, list):
+        raise ValueError("Insta360 task does not contain model outputs")
+
+    result = {
+        "sogUrl": None,
+        "splatUrl": None,
+        "plyUrl": None,
+        "pcdUrl": None,
+        "camerasUrl": None,
+    }
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        url = output.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            continue
+        file_format = str(output.get("fileFormat", "")).lower()
+        output_type = str(output.get("type", "")).lower()
+        if output_type == "model" and file_format == "sog":
+            result["sogUrl"] = url
+        if output_type == "model" and file_format == "splat":
+            result["splatUrl"] = url
+        if output_type == "model" and file_format == "ply":
+            result["plyUrl"] = url
+        if file_format == "json" and re.search(r'cameras\.json(?:\?|$)', url, re.IGNORECASE):
+            result["camerasUrl"] = url
+
+    if not result["sogUrl"] and not result["splatUrl"] and not result["plyUrl"]:
+        raise ValueError("No supported SOG, Splat, or PLY asset found")
+
+    title = task_detail.get("title")
+    result["name"] = title.strip() if isinstance(title, str) and title.strip() else "Insta360 Model"
+    result["source"] = "insta360"
     return result
 
 
@@ -90,20 +154,39 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_text("Share host is not allowed", 403)
                 return
             is_kiri = "kiri" in parsed.hostname
-            if not (parsed.path.startswith("/share/") or (not is_kiri and parsed.path.startswith("/model/"))):
+            is_insta360 = parsed.hostname == "app.insta360.com"
+            is_remy_test = parsed.hostname == "test.remy3d.cn"
+            if is_insta360:
+                valid_path = parsed.path.startswith("/3dspace/detail/")
+            elif is_kiri:
+                valid_path = parsed.path.startswith("/share/")
+            else:
+                valid_path = parsed.path.startswith("/model/") or parsed.path.startswith("/share/")
+            if not valid_path:
                 self.send_text("Unsupported share URL path", 403)
                 return
+            if is_insta360:
+                referer = "https://app.insta360.com/"
+            elif is_kiri:
+                referer = "https://www.kiriengine.app/"
+            elif is_remy_test:
+                referer = "https://test.remy3d.cn/"
+            else:
+                referer = "https://www.remy3d.cn/"
             request = urllib.request.Request(
                 target,
                 headers={
                     "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://www.kiriengine.app/" if is_kiri else "https://www.remy3d.cn/",
+                    "Cache-Control": "no-cache, no-store, max-age=0",
+                    "Pragma": "no-cache",
+                    "Referer": referer,
                     "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/120 Safari/537.36",
                 },
             )
             with urllib.request.urlopen(request, timeout=30) as response:
                 html = response.read().decode("utf-8", errors="replace")
-            body = json.dumps(parse_share_page(html, is_kiri), ensure_ascii=False).encode("utf-8")
+            result = parse_insta360_share_page(html) if is_insta360 else parse_share_page(html, is_kiri)
+            body = json.dumps(result, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

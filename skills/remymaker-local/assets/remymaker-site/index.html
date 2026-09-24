@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.51">
+  <link rel="stylesheet" href="css/style.css?v=3.52">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -90,6 +90,16 @@
     <symbol id="icon-restore" viewBox="0 0 24 24">
       <path d="M4.05 11a8 8 0 1 1 2.05 5.35"/>
       <path d="M4 4v7h7"/>
+    </symbol>
+    <symbol id="icon-rotate-2" viewBox="0 0 24 24">
+      <path d="M15 4.55a8 8 0 0 0 -6 14.9m0 -3.45v3.5h-3.5"/>
+      <path d="M9 19.45a8 8 0 0 0 6 -14.9m0 3.45v-3.5h3.5"/>
+    </symbol>
+    <symbol id="icon-walk" viewBox="0 0 24 24">
+      <path d="M13 4m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"/>
+      <path d="M7 21l3 -4"/>
+      <path d="M16 21l-2 -4l-3 -3l1 -6"/>
+      <path d="M6 12l2 -3l4 -1l3 3l3 1"/>
     </symbol>
     <symbol id="icon-eraser" viewBox="0 0 24 24">
       <path d="M19 19h-11l-4 -4a2 2 0 0 1 0 -3l7 -7a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3l-6 6"/>
@@ -420,9 +430,9 @@
       <div id="setting-brightness-item" class="setting-item mobile-parameter">
         <div class="setting-row-val">
           <label for="setting-particle-brightness">Particle Brightness</label>
-          <span class="setting-val-display" id="setting-particle-brightness-val">0.70</span>
+          <span class="setting-val-display" id="setting-particle-brightness-val">0.77</span>
         </div>
-        <input type="range" id="setting-particle-brightness" min="0.10" max="2.00" step="0.05" value="0.70">
+        <input type="range" id="setting-particle-brightness" min="0.10" max="2.00" step="0.01" value="0.77">
       </div>
       <div id="setting-density-item" class="setting-item mobile-parameter">
         <div class="setting-row-val">
@@ -472,10 +482,14 @@
         <span class="stat-label">FPS</span>
         <span class="stat-value" id="stat-fps">0</span>
       </div>
-      <!-- Flip Vertically Button -->
-      <button id="btn-flip-x" class="btn btn-secondary" style="margin-top: 6px; font-size: 10px; padding: 4px 8px; justify-content: center; width: 100%;" title="Toggle model orientation (flip upside down)">
-        <span class="btn-text">Flip Vertically</span>
-      </button>
+      <div class="stats-action-row">
+        <button id="btn-flip-x" class="btn btn-secondary stats-icon-button" type="button" title="Toggle model orientation" aria-label="Toggle model orientation">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-rotate-2"></use></svg>
+        </button>
+        <button id="btn-walk-mode" class="btn btn-secondary stats-icon-button" type="button" title="Enable walk mode" aria-label="Enable walk mode" aria-pressed="false">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-walk"></use></svg>
+        </button>
+      </div>
       <button id="btn-toggle-rotation" class="btn btn-secondary rotation-toggle-btn" type="button" title="Pause model rotation">
         <span class="btn-text">Stop Rotation</span>
       </button>
@@ -622,6 +636,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=4.7"></script>
+  <script type="module" src="js/app.js?v=5.5"></script>
 </body>
 </html>

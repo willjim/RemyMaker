@@ -525,6 +525,27 @@ body.compositing-mode-active #canvas-container {
   min-width: 0;
 }
 
+.stats-action-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.stats-action-row .stats-icon-button {
+  flex: 1 1 0;
+  width: auto;
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 8px;
+}
+
+.stats-action-row .ui-icon {
+  width: 17px;
+  height: 17px;
+}
+
 .rotation-toggle-btn {
   width: 100%;
   margin-top: 4px;

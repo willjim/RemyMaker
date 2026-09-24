@@ -7,12 +7,17 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=6.3';
 import { GestureControl } from './gestureControl.js?v=1.1';
-import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.2';
+import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.3';
 import fixWebmDuration from 'fix-webm-duration';
 import { LandingBackground } from './landingBackground.js';
 
 const MAX_INTERACTIVE_PIXEL_RATIO = 1.5;
 const RENDERER_VISIBILITY_EPSILON = 0.002;
+const DESKTOP_NAVIGATION_MOVE_SPEED = 0.55;
+const DESKTOP_NAVIGATION_ACCELERATION = 12;
+const DESKTOP_NAVIGATION_JUMP_SPEED = 0.72;
+const DESKTOP_NAVIGATION_GRAVITY = 2.15;
+const DESKTOP_NAVIGATION_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
 
 function getInitialLanguage() {
   try {
@@ -77,6 +82,27 @@ const state = {
   renderer: null,
   controls: null,
   clock: null,
+  desktopNavigation: {
+    enabled: false,
+    pressed: new Set(),
+    velocity: new THREE.Vector3(),
+    forward: new THREE.Vector3(),
+    right: new THREE.Vector3(),
+    desiredVelocity: new THREE.Vector3(),
+    translation: new THREE.Vector3(),
+    lookDirection: new THREE.Vector3(),
+    lookSpherical: new THREE.Spherical(),
+    jumpVelocity: 0,
+    jumpOffset: 0,
+    jumping: false,
+    mouseLookActive: false,
+    mouseLookPointerId: null,
+    mouseLookLastX: 0,
+    mouseLookLastY: 0,
+    pointerLockPending: false,
+    leftButtonDown: false,
+    controlsWereEnabled: true,
+  },
   particleSystem: null,
   landingBg: null,
   cameraParallax: { x: 0, y: 0 },
@@ -172,7 +198,7 @@ const state = {
     minOpacity: 0.50,
     pointSize: 0.20,         // default point size for soft additive-glow particles
     pointDensity: 1.00,      // default point cloud density (100%)
-    particleBrightness: 0.70, // default particle brightness multiplier
+    particleBrightness: 0.77, // 10% brighter than the previous 0.70 default
     particleSoftness: 0.70,   // default softness multiplier
     particleOpacity: 1.00,    // default particle opacity multiplier
     splatScale: 1.0,
@@ -1999,6 +2025,7 @@ function cacheDom() {
     recordingIndicator: document.getElementById('recording-indicator'),
     btnExportVideo: document.getElementById('btn-export-video'),
     btnFlipX: document.getElementById('btn-flip-x'),
+    btnWalkMode: document.getElementById('btn-walk-mode'),
     btnPlayScatter: document.getElementById('btn-play-scatter'),
     btnLang: document.getElementById('btn-lang'),
     btnHome: document.getElementById('btn-home'),
@@ -2037,6 +2064,8 @@ function initThreeJS() {
   state.controls.dampingFactor = 0.05;
   state.controls.enablePan = true;
   state.controls.enableZoom = true;
+  state.controls.enableRotate = true;
+  state.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
   state.controls.minDistance = 0.1; // Allows zooming in extremely close
   state.controls.maxDistance = 20;
   state.controls.target.set(0, 0, 0);
@@ -2179,7 +2208,7 @@ function resetMobileSettingsParameter() {
     const activeTarget = document.querySelector('.mobile-particle-setting-tag.active')?.dataset.settingTarget;
     const sliderDefaults = {
       'setting-size-item': [dom.settingPointSize, 0.20],
-      'setting-brightness-item': [dom.settingParticleBrightness, 0.70],
+      'setting-brightness-item': [dom.settingParticleBrightness, 0.77],
       'setting-density-item': [dom.settingPointDensity, 1.00],
     };
     if (activeTarget === 'setting-crop-item') {
@@ -2424,6 +2453,10 @@ const translations = {
     'stat-label-fps': '当前帧率',
     'progress-label-scatter': '粒子消散 / 聚合进度',
     'btn-flip-vertical': '垂直翻转模型',
+    'btn-walk-mode-enable': '开启行走模式（左键点击自由视角、右键拖动平移、WASD 移动、Space 跳跃）',
+    'btn-walk-mode-disable': '关闭行走模式',
+    'walk-mode-enabled': '左键点击进入 360° 自由视角，Esc 退出；右键拖动平移视角',
+    'walk-mode-disabled': '行走模式已关闭',
     // Webcam & Gesture
     'webcam-live': '本地离线识别',
     'gesture-init': '正在初始化 AI 模型...',
@@ -2606,6 +2639,10 @@ const translations = {
     'stat-label-fps': 'FPS',
     'progress-label-scatter': 'Scatter / Gather',
     'btn-flip-vertical': 'Flip Vertically',
+    'btn-walk-mode-enable': 'Enable walk mode (left click to look, right drag to pan, WASD, Space)',
+    'btn-walk-mode-disable': 'Disable walk mode',
+    'walk-mode-enabled': 'Left click for 360° free look, Esc to exit; right drag to pan',
+    'walk-mode-disabled': 'Walk mode disabled',
     // Webcam & Gesture
     'webcam-live': 'Local Offline Tracking',
     'gesture-init': 'Initializing AI...',
@@ -2955,11 +2992,12 @@ function applyTranslations(lang) {
   if (dom.progressControl) {
     const labelSpan = dom.progressControl.querySelector('.progress-label span:first-child');
     if (labelSpan) labelSpan.textContent = dict['progress-label-scatter'];
-    if (dom.btnFlipX) {
-      const txt = dom.btnFlipX.querySelector('.btn-text');
-      if (txt) txt.textContent = dict['btn-flip-vertical'];
-    }
   }
+  if (dom.btnFlipX) {
+    dom.btnFlipX.title = dict['btn-flip-vertical'];
+    dom.btnFlipX.setAttribute('aria-label', dict['btn-flip-vertical']);
+  }
+  updateDesktopWalkModeUI();
 
   // Welcome Hint
   if (dom.welcomeHint) {
@@ -3139,8 +3177,8 @@ async function loadFromUrl() {
   }
   showLoading('Extracting model URL...');
   try {
-    let lastDownloadError = null;
-    const downloadResolvedModel = async (resolvedModel) => {
+    let lastLoadError = null;
+    const loadResolvedModel = async (resolvedModel) => {
       const urlsToTry = [
         ['sog', resolvedModel.sogUrl],
         ['splat', resolvedModel.splatUrl],
@@ -3152,14 +3190,18 @@ async function loadFromUrl() {
         try {
           const buffer = await downloadPLY(tryUrl, (p) => {
             updateLoadingProgress(0.2 + p * 0.5, `Downloading: ${Math.round(p * 100)}%`);
+          }, fileFormat);
+          await processBuffer(buffer, resolvedModel.name, true, {
+            fileFormat,
+            flipVertical: resolvedModel.source === 'insta360',
           });
-          return { buffer, fileFormat };
+          return true;
         } catch (error) {
-          lastDownloadError = error;
-          console.warn(`Failed to download ${tryUrl.substring(0, 60)}:`, error.message);
+          lastLoadError = error;
+          console.warn(`Failed to load ${fileFormat} model from ${tryUrl.substring(0, 60)}:`, error);
         }
       }
-      return null;
+      return false;
     };
 
     // Step 1: Resolve supported model assets from the share page.
@@ -3171,27 +3213,22 @@ async function loadFromUrl() {
     }
     // Step 2: Download the file (prefer compact SOG when available).
     updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-    let download = await downloadResolvedModel(result);
+    let loaded = await loadResolvedModel(result);
 
-    // A Remy share page may be cached with an expired signed model URL.
-    // Re-resolve once before reporting a download failure.
-    if (!download) {
+    // A share page may contain expired signed URLs or a damaged preferred
+    // asset. Re-resolve once only after all available formats fail to load.
+    if (!loaded) {
       updateLoadingProgress(0.1, 'Parsing share page...');
       result = await extractPLYFromUrl(url, { forceRefresh: true });
       state.initialCameraPosition = result.initialCameraPosition || null;
       updateLoadingProgress(0.2, `Downloading: ${result.name}...`);
-      download = await downloadResolvedModel(result);
+      loaded = await loadResolvedModel(result);
     }
 
-    if (!download) {
-      const reason = lastDownloadError?.message ? ` (${lastDownloadError.message})` : '';
+    if (!loaded) {
+      const reason = lastLoadError?.message ? ` (${lastLoadError.message})` : '';
       throw new Error(`Could not load model data from this share link.${reason}`);
     }
-    // Step 3: Parse and create particles
-    await processBuffer(download.buffer, result.name, true, {
-      fileFormat: download.fileFormat,
-      flipVertical: result.source === 'insta360',
-    });
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);
@@ -3231,6 +3268,10 @@ async function loadFromFile(file) {
  * Clean up existing 3D objects to prevent memory leaks.
  */
 function disposeModel() {
+  state.desktopNavigation.enabled = false;
+  resetDesktopNavigation();
+  if (state.controls) state.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+  updateDesktopWalkModeUI();
   disposeSplatEraser();
   disposeSplatCrop();
   if (state.splatPivot) {
@@ -3333,9 +3374,11 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
   }
   // Clean up previous loaded model
   disposeModel();
-  // Insta360 captures use the opposite vertical model orientation from the
-  // existing Remy/Kiri pipeline. Apply it only for this fresh import source.
-  if (options.flipVertical === true) state.xFlipped = false;
+  // SOG archives use the opposite vertical orientation from the legacy
+  // PLY/Splat pipeline. Apply the correction by the detected payload format
+  // so resolved URLs and local SOG uploads behave consistently. Keep the
+  // explicit source flag for non-SOG captures that also require correction.
+  if (fileFormat === 'sog' || options.flipVertical === true) state.xFlipped = false;
   // 1. Ensure Spark 2.0 Engine is dynamically loaded on demand (prevents slow page loading)
   if (!state.sparkRenderer) {
     updateLoadingProgress(0.72, 'Loading rendering engine...');
@@ -3364,8 +3407,7 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
       state.sparkPainterApi = { RgbaArray, readRgbaArray, dyno };
     } catch (err) {
       console.error('Failed to load rendering engine dynamically:', err);
-      showToast(`Failed to load rendering engine: ${err.message}`, 'error', 6000);
-      return;
+      throw err;
     }
   }
   // Always add Spark renderer to scene
@@ -3452,10 +3494,7 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
     }
   } catch (err) {
     decodedSogMesh?.dispose?.();
-    hideLoading();
-    console.error(err);
-    showToast(`Failed to parse model data: ${err.message}`, 'error');
-    return;
+    throw err;
   }
   // 3. Create Particle System
   updateLoadingProgress(0.88, 'Creating Particle Cloud...');
@@ -3566,12 +3605,11 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
         },
       });
       state.splatMesh = currentSplatMesh;
+      await currentSplatMesh.initialized;
     }
   } catch (err) {
     decodedSogMesh?.dispose?.();
-    hideLoading();
-    console.error(err);
-    showToast(`Rendering engine load failed: ${err.message}`, 'error', 6000);
+    throw err;
   }
 }
 // ============================================================
@@ -3816,6 +3854,261 @@ function pauseRegularAnimationLoop() {
   }
 }
 
+function isEditableKeyboardTarget(target) {
+  return target instanceof HTMLElement && (
+    target.isContentEditable
+    || target.matches('input, textarea, select')
+  );
+}
+
+function canUseDesktopNavigation() {
+  const settingsOpen = Boolean(dom.settingsPanel && !dom.settingsPanel.classList.contains('hidden'));
+  return !IS_PHONE_DEVICE
+    && !IS_TABLET_DEVICE
+    && state.desktopNavigation.enabled
+    && state.isModelLoaded
+    && Boolean(state.controls?.enabled || state.desktopNavigation.mouseLookActive)
+    && !settingsOpen
+    && !state.cameraModeActive
+    && !state.previewActive
+    && !state.previewCompleted
+    && !state.recordingActive
+    && !state.exportPreparing
+    && !state.compositingActive
+    && !state.splatCropDrag
+    && !state.splatEraser?.active;
+}
+
+function settleDesktopNavigationJump() {
+  const navigation = state.desktopNavigation;
+  if (navigation.jumpOffset && state.camera && state.controls) {
+    state.camera.position.y -= navigation.jumpOffset;
+    state.controls.target.y -= navigation.jumpOffset;
+  }
+  navigation.jumpVelocity = 0;
+  navigation.jumpOffset = 0;
+  navigation.jumping = false;
+}
+
+function stopDesktopMouseLook(event = null) {
+  const navigation = state.desktopNavigation;
+  if (!navigation.mouseLookActive) return;
+  if (event && event.pointerId !== navigation.mouseLookPointerId) return;
+
+  const canvas = state.renderer?.domElement;
+  if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+  if (canvas?.hasPointerCapture?.(navigation.mouseLookPointerId)) {
+    canvas.releasePointerCapture(navigation.mouseLookPointerId);
+  }
+  navigation.mouseLookActive = false;
+  navigation.mouseLookPointerId = null;
+  navigation.pointerLockPending = false;
+  navigation.leftButtonDown = false;
+  if (state.controls) state.controls.enabled = navigation.controlsWereEnabled;
+  if (canvas && !state.splatEraser?.active && !state.splatCropDrag) canvas.style.cursor = '';
+}
+
+function resetDesktopNavigation({ settleJump = true } = {}) {
+  const navigation = state.desktopNavigation;
+  navigation.pressed.clear();
+  navigation.velocity.set(0, 0, 0);
+  stopDesktopMouseLook();
+  if (settleJump) settleDesktopNavigationJump();
+}
+
+function updateDesktopWalkModeUI() {
+  if (!dom.btnWalkMode) return;
+  const available = !IS_PHONE_DEVICE && !IS_TABLET_DEVICE;
+  dom.btnWalkMode.style.display = available ? '' : 'none';
+  dom.btnWalkMode.disabled = !available;
+  const enabled = state.desktopNavigation.enabled;
+  const label = t(enabled ? 'btn-walk-mode-disable' : 'btn-walk-mode-enable');
+  dom.btnWalkMode.classList.toggle('active', enabled);
+  dom.btnWalkMode.setAttribute('aria-pressed', String(enabled));
+  dom.btnWalkMode.setAttribute('aria-label', label);
+  dom.btnWalkMode.title = label;
+}
+
+function toggleDesktopWalkMode() {
+  if (IS_PHONE_DEVICE || IS_TABLET_DEVICE) return;
+  if (!state.isModelLoaded) {
+    showToast(t('load-model-first'), 'warning');
+    return;
+  }
+  const enabled = !state.desktopNavigation.enabled;
+  state.desktopNavigation.enabled = enabled;
+  resetDesktopNavigation();
+  state.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+  if (enabled && !state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+  updateDesktopWalkModeUI();
+  showToast(t(enabled ? 'walk-mode-enabled' : 'walk-mode-disabled'), 'info', 3200);
+}
+
+function updateDesktopNavigation(delta) {
+  const navigation = state.desktopNavigation;
+  if (!canUseDesktopNavigation()) {
+    resetDesktopNavigation();
+    return;
+  }
+
+  const frameDelta = Math.min(Math.max(delta, 0), 0.05);
+  const forward = navigation.forward;
+  state.camera.getWorldDirection(forward);
+  forward.y = 0;
+  if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1);
+  forward.normalize();
+  const right = navigation.right.copy(forward).cross(state.camera.up).normalize();
+  const desiredVelocity = navigation.desiredVelocity.set(0, 0, 0);
+
+  if (navigation.pressed.has('KeyW')) desiredVelocity.add(forward);
+  if (navigation.pressed.has('KeyS')) desiredVelocity.sub(forward);
+  if (navigation.pressed.has('KeyD')) desiredVelocity.add(right);
+  if (navigation.pressed.has('KeyA')) desiredVelocity.sub(right);
+  if (desiredVelocity.lengthSq() > 0) {
+    desiredVelocity.normalize().multiplyScalar(DESKTOP_NAVIGATION_MOVE_SPEED);
+  }
+
+  const velocityBlend = 1 - Math.exp(-DESKTOP_NAVIGATION_ACCELERATION * frameDelta);
+  navigation.velocity.lerp(desiredVelocity, velocityBlend);
+  if (desiredVelocity.lengthSq() === 0 && navigation.velocity.lengthSq() < 1e-7) {
+    navigation.velocity.set(0, 0, 0);
+  }
+
+  const translation = navigation.translation.copy(navigation.velocity).multiplyScalar(frameDelta);
+  if (translation.lengthSq() > 0) {
+    state.camera.position.add(translation);
+    state.controls.target.add(translation);
+  }
+
+  if (navigation.jumping) {
+    navigation.jumpVelocity -= DESKTOP_NAVIGATION_GRAVITY * frameDelta;
+    const nextOffset = navigation.jumpOffset + navigation.jumpVelocity * frameDelta;
+    const clampedOffset = Math.max(0, nextOffset);
+    const jumpTranslation = clampedOffset - navigation.jumpOffset;
+    state.camera.position.y += jumpTranslation;
+    state.controls.target.y += jumpTranslation;
+    navigation.jumpOffset = clampedOffset;
+    if (nextOffset <= 0 && navigation.jumpVelocity < 0) {
+      navigation.jumpVelocity = 0;
+      navigation.jumping = false;
+    }
+  }
+}
+
+function handleDesktopNavigationKeyDown(event) {
+  if (event.repeat || isEditableKeyboardTarget(event.target)) return;
+  const isMoveKey = DESKTOP_NAVIGATION_CODES.has(event.code);
+  const isJumpKey = event.code === 'Space';
+  const focusedActionControl = isJumpKey
+    && event.target instanceof HTMLElement
+    && event.target.matches('button, a[href]');
+  if ((!isMoveKey && !isJumpKey) || focusedActionControl || !canUseDesktopNavigation()) return;
+
+  if (!state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+
+  if (isMoveKey) state.desktopNavigation.pressed.add(event.code);
+  if (isJumpKey && !state.desktopNavigation.jumping) {
+    state.desktopNavigation.jumping = true;
+    state.desktopNavigation.jumpVelocity = DESKTOP_NAVIGATION_JUMP_SPEED;
+  }
+  event.preventDefault();
+}
+
+function handleDesktopNavigationKeyUp(event) {
+  if (!DESKTOP_NAVIGATION_CODES.has(event.code)) return;
+  state.desktopNavigation.pressed.delete(event.code);
+}
+
+function beginDesktopMouseLook(event) {
+  if (!canUseDesktopNavigation()) return;
+  if (event.button === 2 && state.desktopNavigation.mouseLookActive) {
+    stopDesktopMouseLook();
+    return;
+  }
+  if (event.button !== 0) return;
+  if (state.desktopNavigation.mouseLookActive) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
+  const navigation = state.desktopNavigation;
+  navigation.mouseLookActive = true;
+  navigation.mouseLookPointerId = event.pointerId;
+  navigation.mouseLookLastX = event.clientX;
+  navigation.mouseLookLastY = event.clientY;
+  navigation.leftButtonDown = true;
+  navigation.controlsWereEnabled = state.controls.enabled;
+  state.controls.enabled = false;
+  const canvas = state.renderer.domElement;
+  canvas.style.cursor = 'none';
+  // A click starts unrestricted first-person mouse look. Browsers that reject
+  // pointer lock still support the previous hold-and-drag interaction.
+  try {
+    if (canvas.requestPointerLock) {
+      navigation.pointerLockPending = true;
+      canvas.requestPointerLock()?.catch?.(() => {
+        navigation.pointerLockPending = false;
+        if (!navigation.leftButtonDown) stopDesktopMouseLook();
+      });
+    }
+  } catch (_) {
+    navigation.pointerLockPending = false;
+  }
+
+  if (!state.rotationPaused) {
+    state.rotationPaused = true;
+    if (state.particleSystem) state.particleSystem.autoRotate = false;
+    updateRotationControls();
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function moveDesktopMouseLook(event) {
+  const navigation = state.desktopNavigation;
+  if (!navigation.mouseLookActive || event.pointerId !== navigation.mouseLookPointerId) return;
+  const deltaX = Number.isFinite(event.movementX)
+    ? event.movementX
+    : event.clientX - navigation.mouseLookLastX;
+  const deltaY = Number.isFinite(event.movementY)
+    ? event.movementY
+    : event.clientY - navigation.mouseLookLastY;
+  navigation.mouseLookLastX = event.clientX;
+  navigation.mouseLookLastY = event.clientY;
+
+  const direction = navigation.lookDirection
+    .copy(state.controls.target)
+    .sub(state.camera.position);
+  const lookDistance = Math.max(direction.length(), 0.05);
+  const spherical = navigation.lookSpherical.setFromVector3(direction);
+  spherical.theta -= deltaX * 0.003;
+  spherical.phi = THREE.MathUtils.clamp(spherical.phi + deltaY * 0.003, 0.02, Math.PI - 0.02);
+  direction.setFromSpherical(spherical).setLength(lookDistance);
+  state.controls.target.copy(state.camera.position).add(direction);
+  state.camera.lookAt(state.controls.target);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function endDesktopMouseLook(event) {
+  if (!state.desktopNavigation.mouseLookActive) return;
+  if (event.pointerId !== state.desktopNavigation.mouseLookPointerId) return;
+  state.desktopNavigation.leftButtonDown = false;
+  if (state.desktopNavigation.pointerLockPending
+    || document.pointerLockElement === state.renderer?.domElement) return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopDesktopMouseLook(event);
+}
+
 function resumeRegularAnimationLoop() {
   if (!state.compositingActive) return;
   state.compositingActive = false;
@@ -3831,6 +4124,7 @@ function animate() {
   state.animationFrameId = requestAnimationFrame(animate);
   const delta = state.clock.getDelta();
   const elapsed = state.clock.getElapsedTime();
+  updateDesktopNavigation(delta);
   // Pace capture at 60 FPS. When a slower device misses a frame, advance the
   // animation clock by the real elapsed time instead of stretching the clip or
   // rounding partial delays up to whole frames (which can end an orbit early).
@@ -6447,10 +6741,31 @@ function setupEventListeners() {
   const renderCanvas = state.renderer?.domElement;
   renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
   renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
+  renderCanvas?.addEventListener('pointerdown', beginDesktopMouseLook, { capture: true });
   renderCanvas?.addEventListener('pointermove', updateSplatCropHandleHover);
+  renderCanvas?.addEventListener('contextmenu', (event) => {
+    if (state.desktopNavigation.mouseLookActive || canUseDesktopNavigation()) event.preventDefault();
+  });
+  document.addEventListener('pointerlockchange', () => {
+    state.desktopNavigation.pointerLockPending = false;
+    if (document.pointerLockElement === renderCanvas) {
+      if (!state.desktopNavigation.mouseLookActive) document.exitPointerLock?.();
+    } else {
+      stopDesktopMouseLook();
+    }
+  });
+  document.addEventListener('pointerlockerror', () => {
+    state.desktopNavigation.pointerLockPending = false;
+    if (!state.desktopNavigation.leftButtonDown) stopDesktopMouseLook();
+  });
   renderCanvas?.addEventListener('pointerleave', () => {
     hideSplatEraserBrushCursor();
-    if (!state.splatCropDrag && !state.splatEraser?.active && renderCanvas) renderCanvas.style.cursor = '';
+    if (
+      !state.splatCropDrag
+      && !state.splatEraser?.active
+      && !state.desktopNavigation.mouseLookActive
+      && renderCanvas
+    ) renderCanvas.style.cursor = '';
   });
   window.addEventListener('pointermove', moveSplatEraserStroke, { capture: true, passive: false });
   window.addEventListener('pointerup', endSplatEraserStroke, { capture: true, passive: false });
@@ -6458,6 +6773,15 @@ function setupEventListeners() {
   window.addEventListener('pointermove', moveSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointerup', endSplatCropDrag, { capture: true, passive: false });
   window.addEventListener('pointercancel', endSplatCropDrag, { capture: true, passive: false });
+  window.addEventListener('pointermove', moveDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('pointerup', endDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('pointercancel', endDesktopMouseLook, { capture: true, passive: false });
+  window.addEventListener('keydown', handleDesktopNavigationKeyDown);
+  window.addEventListener('keyup', handleDesktopNavigationKeyUp);
+  window.addEventListener('blur', () => resetDesktopNavigation());
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) resetDesktopNavigation();
+  });
 
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
@@ -6838,6 +7162,7 @@ function setupEventListeners() {
       showToast(state.xFlipped ? 'Model inverted vertically' : 'Model orientation restored', 'success');
     });
   }
+  dom.btnWalkMode?.addEventListener('click', toggleDesktopWalkMode);
   // Language switcher handler
   if (dom.btnLang) {
     dom.btnLang.addEventListener('click', () => {

@@ -12,7 +12,7 @@ RemyMaker 是一款面向桌面端、平板与手机端的 3D 高斯泼贱特效
 
 - [Remy3D](https://www.remy3d.cn/) 分享链接
 - [Kiri Engine](https://www.kiriengine.app/) 3DGS 分享链接
-- [Insta360](https://app.insta360.com/3dspace) 3DGS 分享链接（SOG）
+- Insta360 3D 时光舱分享链接
 
 ## 功能亮点
 
