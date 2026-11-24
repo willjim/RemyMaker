@@ -18,6 +18,8 @@ const DESKTOP_NAVIGATION_ACCELERATION = 12;
 const DESKTOP_NAVIGATION_JUMP_SPEED = 0.72;
 const DESKTOP_NAVIGATION_GRAVITY = 2.15;
 const DESKTOP_NAVIGATION_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
+const REMY_HISTORY_STORAGE_KEY = 'remymaker-remy-history-v1';
+const MAX_REMY_HISTORY = 20;
 
 function getInitialLanguage() {
   try {
@@ -1927,6 +1929,8 @@ function cacheDom() {
     container: document.getElementById('canvas-container'),
     urlInput: document.getElementById('url-input'),
     btnLoad: document.getElementById('btn-load'),
+    toolbarHistoryToggle: document.getElementById('toolbar-history-toggle'),
+    toolbarHistoryMenu: document.getElementById('toolbar-history-menu'),
     btnUpload: document.getElementById('btn-upload'),
     fileInput: document.getElementById('file-input'),
     btnGesture: document.getElementById('btn-gesture'),
@@ -2003,6 +2007,8 @@ function cacheDom() {
     welcomeHint: document.getElementById('welcome-hint'),
     landingUrlInput: document.getElementById('landing-url-input'),
     landingBtnLoad: document.getElementById('landing-btn-load'),
+    landingHistoryToggle: document.getElementById('landing-history-toggle'),
+    landingHistoryMenu: document.getElementById('landing-history-menu'),
     toastContainer: document.getElementById('toast-container'),
     
     // Camera Path elements
@@ -2350,6 +2356,8 @@ const translations = {
     'url-placeholder': '粘贴 Remy3D、Kiri Engine 或 Insta360 分享链接...',
     'btn-load-title': '从链接加载模型',
     'btn-load-text': '加载',
+    'remy-history-title': '最近打开的 Remy 链接',
+    'remy-history-heading': '最近打开（最多 20 条）',
     'btn-upload-title': '上传本地 PLY、Splat 或 SOG 文件',
     'btn-upload-text': '上传模型',
     'btn-spark-title': '切换 3D 实景模式',
@@ -2536,6 +2544,8 @@ const translations = {
     'url-placeholder': 'Paste a Remy3D, Kiri Engine, or Insta360 share URL...',
     'btn-load-title': 'Load model from URL',
     'btn-load-text': 'Load',
+    'remy-history-title': 'Recently opened Remy links',
+    'remy-history-heading': 'Recently opened (up to 20)',
     'btn-upload-title': 'Upload local PLY, Splat, or SOG file',
     'btn-upload-text': 'Upload Model',
     'btn-spark-title': 'Toggle 3D Reality mode',
@@ -3012,6 +3022,7 @@ function applyTranslations(lang) {
     const landingBtnText = document.querySelector('#landing-btn-load .btn-text');
     if (landingBtnText) landingBtnText.textContent = dict['btn-load-text'];
   }
+  renderRemyHistory();
 
   // Webcam dot text
   if (dom.webcamDot && dom.webcamDot.nextSibling) {
@@ -3157,10 +3168,109 @@ function showToast(message, type = 'info', duration = 4000) {
 // ============================================================
 // Model Loading
 // ============================================================
+function normalizeRemyShareUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !['remy3d.cn', 'www.remy3d.cn', 'test.remy3d.cn'].includes(url.hostname)) return null;
+    if (!/^\/(?:model|share)\/[^/]+/.test(url.pathname)) return null;
+    return url.href;
+  } catch (_) {
+    return null;
+  }
+}
+
+function readRemyHistory() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(REMY_HISTORY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(stored)) return [];
+    const seen = new Set();
+    const entries = [];
+    for (const item of stored) {
+      const url = normalizeRemyShareUrl(item?.url);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      entries.push({ url, name: typeof item.name === 'string' ? item.name.slice(0, 100) : '' });
+      if (entries.length === MAX_REMY_HISTORY) break;
+    }
+    return entries;
+  } catch (_) {
+    // Storage may be unavailable in private browsing or restricted webviews.
+    return [];
+  }
+}
+
+function remyHistoryWidgets() {
+  return [
+    [dom.toolbarHistoryToggle, dom.toolbarHistoryMenu],
+    [dom.landingHistoryToggle, dom.landingHistoryMenu],
+  ];
+}
+
+function closeRemyHistoryMenus() {
+  for (const [toggle, menu] of remyHistoryWidgets()) {
+    if (menu) menu.hidden = true;
+    toggle?.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function renderRemyHistory() {
+  const entries = readRemyHistory();
+  for (const [toggle, menu] of remyHistoryWidgets()) {
+    if (!toggle || !menu) continue;
+    toggle.hidden = entries.length === 0;
+    toggle.title = translations[state.lang]['remy-history-title'];
+    toggle.setAttribute('aria-label', toggle.title);
+    if (!entries.length) {
+      menu.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      menu.replaceChildren();
+      continue;
+    }
+
+    const heading = document.createElement('div');
+    heading.className = 'link-history-heading';
+    heading.textContent = translations[state.lang]['remy-history-heading'];
+    const items = entries.map((entry) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'link-history-item';
+      button.title = entry.url;
+      const name = document.createElement('span');
+      name.className = 'link-history-name';
+      name.textContent = entry.name || 'Remy3D';
+      const link = document.createElement('span');
+      link.className = 'link-history-url';
+      link.textContent = entry.url;
+      button.append(name, link);
+      button.addEventListener('click', () => {
+        dom.urlInput.value = entry.url;
+        if (dom.landingUrlInput) dom.landingUrlInput.value = entry.url;
+        closeRemyHistoryMenus();
+        loadFromUrl();
+      });
+      return button;
+    });
+    menu.replaceChildren(heading, ...items);
+  }
+}
+
+function rememberRemyLink(url, name) {
+  const normalizedUrl = normalizeRemyShareUrl(url);
+  if (!normalizedUrl) return;
+  const entries = readRemyHistory().filter((entry) => entry.url !== normalizedUrl);
+  entries.unshift({ url: normalizedUrl, name: typeof name === 'string' ? name.slice(0, 100) : '' });
+  try {
+    localStorage.setItem(REMY_HISTORY_STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_REMY_HISTORY)));
+    renderRemyHistory();
+  } catch (_) {
+    // Loading a model must still work if local storage is blocked.
+  }
+}
+
 /**
  * Load model from a supported share URL.
  */
-async function loadFromUrl() {
+async function loadFromUrl({ rememberInHistory = true } = {}) {
   const url = dom.urlInput.value.trim();
   if (!url) {
     showToast('Please enter a Remy3D, Kiri Engine, or Insta360 share URL', 'error');
@@ -3229,6 +3339,7 @@ async function loadFromUrl() {
       const reason = lastLoadError?.message ? ` (${lastLoadError.message})` : '';
       throw new Error(`Could not load model data from this share link.${reason}`);
     }
+    if (rememberInHistory) rememberRemyLink(url, result.name);
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);
@@ -6785,12 +6896,29 @@ function setupEventListeners() {
 
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
+  for (const [toggle, menu] of remyHistoryWidgets()) {
+    toggle?.addEventListener('click', () => {
+      const shouldOpen = menu.hidden;
+      closeRemyHistoryMenus();
+      if (shouldOpen && !toggle.hidden) {
+        menu.hidden = false;
+        toggle.setAttribute('aria-expanded', 'true');
+      }
+    });
+  }
+  document.addEventListener('pointerdown', (event) => {
+    if (!event.target.closest('.link-history-toggle, .link-history-menu')) closeRemyHistoryMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeRemyHistoryMenus();
+  });
   dom.urlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') loadFromUrl();
   });
   // Load from Landing Input
   const loadFromLanding = () => {
     let url = dom.landingUrlInput.value.trim();
+    const isDemo = !url;
     if (!url) {
       // Default demo model
       url = 'https://www.remy3d.cn/model/72ca9c87bca54600bfd0fdd95fa96e38';
@@ -6798,7 +6926,7 @@ function setupEventListeners() {
       showToast(state.lang === 'zh' ? '加载示例图像……' : 'Loading demo model...', 'info', 3000);
     }
     dom.urlInput.value = url;
-    loadFromUrl();
+    loadFromUrl({ rememberInHistory: !isDemo });
   };
   dom.landingBtnLoad?.addEventListener('click', () => loadFromLanding());
   if (dom.landingUrlInput) {

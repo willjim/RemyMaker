@@ -237,7 +237,8 @@ body.compositing-mode-active #canvas-container {
 
 .url-input {
   width: 100%;
-  padding: 10px 16px;
+  box-sizing: border-box;
+  padding: 10px 44px 10px 16px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-md);
@@ -259,6 +260,100 @@ body.compositing-mode-active #canvas-container {
   border-color: rgba(0, 245, 212, 0.3);
   box-shadow: 0 0 0 3px rgba(0, 245, 212, 0.08);
 }
+
+.link-history-toggle[hidden],
+.link-history-menu[hidden] {
+  display: none !important;
+}
+
+.link-history-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.link-history-toggle:hover,
+.link-history-toggle[aria-expanded="true"] {
+  border-color: rgba(0, 245, 212, 0.55);
+  color: var(--accent-cyan);
+}
+
+.link-history-toggle .ui-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.url-input-wrapper > .link-history-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+}
+
+.link-history-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 25;
+  box-sizing: border-box;
+  max-height: min(320px, 42dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--border-glass-hover);
+  border-radius: 12px;
+  background: rgba(13, 13, 30, 0.98);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  text-align: left;
+}
+
+.link-history-heading {
+  padding: 6px 9px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.link-history-item {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.link-history-item:hover,
+.link-history-item:focus-visible {
+  outline: none;
+  background: rgba(0, 245, 212, 0.12);
+}
+
+.link-history-name,
+.link-history-url {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-history-name { font-size: 12px; }
+.link-history-url { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
 
 /* Buttons */
 .btn {
@@ -915,6 +1010,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 }
 
 .landing-input-box {
+  position: relative;
   display: flex;
   align-items: center;
   width: 100%;
@@ -952,7 +1048,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   color: rgba(255, 255, 255, 0.35);
 }
 
-.landing-input-box button {
+.landing-input-box > #landing-btn-load {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -963,6 +1059,10 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   font-size: 13px;
   height: auto;
   margin: 0;
+}
+
+.landing-input-box > .link-history-toggle {
+  flex: 0 0 34px;
 }
 
 /* ========================================
@@ -1376,7 +1476,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
     box-sizing: border-box;
   }
 
-  .landing-input-box button {
+  .landing-input-box > #landing-btn-load {
     flex: 0 0 auto;
     width: auto;
     min-width: 68px;
