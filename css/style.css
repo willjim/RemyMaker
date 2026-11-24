@@ -1119,6 +1119,356 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   .camera-path-panel:has(.flight-timing-panel[open]) { max-height: 65dvh; overflow-y: auto; }
 }
 
+/* Shared camera timeline */
+.camera-path-panel.flight-timeline-ready {
+  position: fixed;
+  top: auto;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: 50%;
+  width: min(880px, calc(100vw - 32px));
+  max-height: min(54dvh, calc(100dvh - 100px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 6px 12px;
+  padding: 10px 14px;
+  transform: translateX(-50%);
+}
+
+.camera-path-panel.flight-timeline-ready.hidden {
+  visibility: hidden;
+}
+
+.flight-timeline-ready > :is(.camera-panel-header, .flight-timeline, .camera-actions, .flight-timing-panel, .mobile-camera-options) {
+  grid-column: 1 / -1;
+}
+
+.flight-timeline-ready .camera-panel-header h3 {
+  margin: 0;
+  border: 0;
+  padding-bottom: 2px;
+}
+
+.flight-timeline-ready .camera-option-item {
+  min-width: 0;
+  margin: 0 !important;
+}
+
+.flight-timeline-ready .camera-option-item select {
+  min-width: 0;
+  height: 32px;
+  margin: 0 !important;
+}
+
+.flight-timeline-ready > :is(p, .keyframe-list),
+.flight-timeline-ready #btn-add-keyframe,
+.flight-timeline-ready .camera-actions > .camera-action-row:not(#custom-keyframe-actions),
+.flight-timeline-ready .flight-timing-panel [data-flight-total],
+.flight-timeline-ready .flight-timing-panel [data-flight-manual],
+.flight-timeline-ready .flight-keyframe-duration,
+.flight-timeline-ready .flight-timing-panel label:has(:is([data-flight-total], [data-flight-manual], [data-effect-start], [data-effect-duration], [data-effect-direction])),
+body.timeline-editor-playback #preview-controls {
+  display: none !important;
+}
+
+.flight-timeline-ready .camera-actions {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.flight-timeline-ready #custom-keyframe-actions {
+  justify-content: flex-start;
+}
+
+.flight-timeline-ready #custom-keyframe-actions #btn-clear-keyframes {
+  flex: 0 0 auto;
+}
+
+.flight-timeline-ready .flight-timing-panel {
+  margin: 0;
+}
+
+body.timeline-editor-playback .flight-timeline-ready > :is(.camera-actions, .flight-timing-panel, .mobile-camera-options, .camera-option-item),
+body.timeline-editor-playback .flight-timeline-ready .camera-header-preview,
+body.timeline-editor-playback .flight-timeline-ready .flight-keyframe-controls,
+body.timeline-editor-playback .flight-timeline-ready .flight-renderer-controls,
+body.timeline-editor-playback .flight-timeline-ready :is(.flight-event-inspector, .flight-particle-inspector),
+body.timeline-editor-playback .flight-timeline-ready [data-flight-field="duration"],
+body.timeline-editor-playback .flight-timeline-ready label:has(:is([data-flight-field="duration"], [data-flight-field="timing-mode"])),
+body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-control, .remy-intro-panel, .stats-panel) {
+  display: none !important;
+}
+
+.flight-timeline {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.flight-timeline [hidden] {
+  display: none !important;
+}
+
+.flight-timeline-disclosure {
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-glass-hover);
+  background: rgba(6, 6, 16, .32);
+}
+
+.flight-timeline summary {
+  width: fit-content;
+  padding: 3px 0;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.flight-timeline-controls,
+.flight-keyframe-inspector {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 7px;
+  margin-top: 6px;
+}
+
+.flight-keyframe-inspector {
+  margin-top: 0;
+}
+
+.flight-timeline-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.flight-timeline-controls :is(button, input, select) {
+  min-height: 29px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-glass-hover);
+  border-radius: 5px;
+  background: #1b1b32;
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.flight-timeline-controls input[type="number"] {
+  width: 62px;
+}
+
+.flight-timeline-controls button,
+.flight-timeline-controls select {
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.flight-timeline-controls button[data-flight-action="export"] {
+  color: var(--accent-cyan);
+}
+
+.flight-timeline button:disabled,
+.flight-timeline input:disabled,
+.flight-timeline select:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.flight-timeline :is(button, input, select, summary):focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 1px;
+}
+
+.flight-timeline-readout {
+  margin-left: auto;
+  color: var(--accent-cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.flight-timeline-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  margin-top: 6px;
+  border-radius: 5px;
+  padding: 3px 10px;
+  scrollbar-width: thin;
+  background: rgba(0, 0, 0, .22);
+}
+
+.flight-timeline-tracks {
+  --playhead: 0%;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  min-width: var(--track-width, 286px);
+}
+
+.flight-track-label {
+  position: sticky;
+  left: -10px;
+  z-index: 2;
+  align-self: stretch;
+  display: grid;
+  align-items: center;
+  background: #121221;
+  padding-left: 5px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.flight-track {
+  position: relative;
+  min-height: 32px;
+  margin-right: 12px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .045);
+}
+
+.flight-track:not(.flight-ruler)::after {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  left: var(--playhead);
+  width: 1px;
+  background: var(--accent-cyan);
+  opacity: .6;
+  pointer-events: none;
+  content: '';
+}
+
+.flight-ruler {
+  min-height: 36px;
+  background: transparent;
+}
+
+.flight-ticks {
+  position: relative;
+  height: 15px;
+  margin-top: 1px;
+  pointer-events: none;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.flight-ticks span {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.flight-ticks span:first-child { transform: none; }
+.flight-ticks span:last-child { transform: translateX(-100%); }
+
+.flight-seek {
+  display: block;
+  width: calc(100% + 12px);
+  height: 20px;
+  margin: 0 -6px;
+  padding: 0;
+  accent-color: var(--accent-cyan);
+  cursor: ew-resize;
+}
+
+.flight-marker {
+  position: absolute;
+  top: 2px;
+  left: var(--start);
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--border-glass-hover);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font: 600 11px 'Inter', sans-serif;
+  white-space: nowrap;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.flight-marker-keyframe {
+  min-width: 27px;
+  transform: translateX(-50%);
+  background: #264565;
+}
+
+.flight-marker:not(.flight-marker-keyframe) {
+  min-width: 24px;
+  width: var(--length);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.flight-marker-keyframe.at-start { transform: none; }
+.flight-marker.at-end { transform: translateX(-100%); }
+.flight-marker.fixed-marker { cursor: pointer; }
+.flight-marker-particle { background: #553773; }
+.flight-marker-event { background: #205854; }
+.flight-marker.overrun {
+  background-image: repeating-linear-gradient(135deg, transparent 0 5px, rgba(255, 255, 255, .16) 5px 7px);
+}
+.flight-marker[aria-pressed="true"] {
+  z-index: 2;
+  border-color: var(--accent-cyan);
+  color: white;
+}
+
+.flight-track-hint,
+.flight-timeline-warning {
+  padding: 4px 6px;
+  color: var(--text-secondary);
+}
+
+.flight-track-hint {
+  position: absolute;
+  inset: 4px auto auto 4px;
+  font-size: 11px;
+}
+
+.flight-timeline-warning {
+  color: #ffd490;
+  font-size: 11px;
+}
+
+.flight-event-inspector,
+.flight-particle-inspector {
+  padding: 4px 0;
+  border-top: 1px solid var(--border-glass);
+}
+
+@media (max-width: 600px), (pointer: coarse) {
+  .camera-path-panel.flight-timeline-ready {
+    top: auto !important;
+    right: 8px !important;
+    left: 8px !important;
+    bottom: calc(66px + env(safe-area-inset-bottom)) !important;
+    transform: none;
+    max-height: min(56dvh, calc(100dvh - 110px));
+    padding: 8px;
+  }
+  body.timeline-editor-playback .camera-path-panel.flight-timeline-ready {
+    bottom: max(8px, env(safe-area-inset-bottom)) !important;
+  }
+  .flight-timeline-ready .camera-panel-header {
+    margin: -8px -8px 0;
+    top: -8px;
+    padding: 8px;
+  }
+  .flight-timeline-ready .camera-start-hint { display: none; }
+  .flight-timeline { font-size: 11px; }
+  .flight-timeline-controls :is(button, input, select) { min-height: 34px; }
+  .flight-timeline-tracks { grid-template-columns: 53px minmax(0, 1fr); }
+  .flight-track:not(.flight-ruler) { min-height: 38px; }
+  .flight-marker { height: 34px; min-width: 32px; }
+}
+
 .toast-container {
   position: absolute;
   top: 96px;
