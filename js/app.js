@@ -150,6 +150,7 @@ const state = {
   rendererVisibility: { particles: null, spark: null },
   initialCameraPosition: null, // Initial camera position from cameras.json
   lastLoadedBuffer: null,   // cache raw buffer for fast re-parsing on settings change
+  demoParticleSettingsBackup: null,
   lastLoadedName: '',
   modelScale: 1.0,          // base uniform scale computed on load
   modelCenter: null,        // base center calculated on load
@@ -3218,7 +3219,9 @@ function readRemyHistory() {
       const url = normalizeRemyShareUrl(item?.url);
       if (!url || seen.has(url)) continue;
       seen.add(url);
-      entries.push({ url, name: typeof item.name === 'string' ? item.name.slice(0, 100) : '' });
+      const legacyName = /^(?:Remy|Kiri|Insta360) Model$/i.test(item.name || '') ? '' : item.name;
+      const pageTitle = item.pageTitle ?? legacyName;
+      entries.push({ url, pageTitle: typeof pageTitle === 'string' ? pageTitle.slice(0, 100) : '' });
       if (entries.length === MAX_REMY_HISTORY) break;
     }
     return entries;
@@ -3237,7 +3240,10 @@ function remyHistoryWidgets() {
 
 function closeRemyHistoryMenus() {
   for (const [toggle, menu] of remyHistoryWidgets()) {
-    if (menu) menu.hidden = true;
+    if (menu) {
+      if (menu.matches(':popover-open')) menu.hidePopover();
+      menu.hidden = true;
+    }
     toggle?.setAttribute('aria-expanded', 'false');
   }
 }
@@ -3266,11 +3272,12 @@ function renderRemyHistory() {
       button.title = entry.url;
       const name = document.createElement('span');
       name.className = 'link-history-name';
-      name.textContent = entry.name || 'Remy3D';
+      name.textContent = entry.pageTitle;
       const link = document.createElement('span');
       link.className = 'link-history-url';
       link.textContent = entry.url;
-      button.append(name, link);
+      if (entry.pageTitle) button.append(name);
+      button.append(link);
       button.addEventListener('click', () => {
         dom.urlInput.value = entry.url;
         if (dom.landingUrlInput) dom.landingUrlInput.value = entry.url;
@@ -3283,11 +3290,13 @@ function renderRemyHistory() {
   }
 }
 
-function rememberRemyLink(url, name) {
+function rememberRemyLink(url, pageTitle) {
   const normalizedUrl = normalizeRemyShareUrl(url);
   if (!normalizedUrl) return;
-  const entries = readRemyHistory().filter((entry) => entry.url !== normalizedUrl);
-  entries.unshift({ url: normalizedUrl, name: typeof name === 'string' ? name.slice(0, 100) : '' });
+  const history = readRemyHistory();
+  const entries = history.filter((entry) => entry.url !== normalizedUrl);
+  const title = typeof pageTitle === 'string' ? pageTitle.trim().slice(0, 100) : '';
+  entries.unshift({ url: normalizedUrl, pageTitle: title || history.find(entry => entry.url === normalizedUrl)?.pageTitle || '' });
   try {
     localStorage.setItem(REMY_HISTORY_STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_REMY_HISTORY)));
     renderRemyHistory();
@@ -3299,7 +3308,7 @@ function rememberRemyLink(url, name) {
 /**
  * Load model from a supported share URL.
  */
-async function loadFromUrl({ rememberInHistory = true } = {}) {
+async function loadFromUrl({ rememberInHistory = true, isDemo = false } = {}) {
   if (isTimelineBusy() || state.previewActive) return;
   const url = dom.urlInput.value.trim();
   if (!url) {
@@ -3334,6 +3343,7 @@ async function loadFromUrl({ rememberInHistory = true } = {}) {
           await processBuffer(buffer, resolvedModel.name, true, {
             fileFormat,
             flipVertical: resolvedModel.source === 'insta360',
+            isDemo,
           });
           return true;
         } catch (error) {
@@ -3369,7 +3379,7 @@ async function loadFromUrl({ rememberInHistory = true } = {}) {
       const reason = lastLoadError?.message ? ` (${lastLoadError.message})` : '';
       throw new Error(`Could not load model data from this share link.${reason}`);
     }
-    if (rememberInHistory) rememberRemyLink(url, result.name);
+    if (rememberInHistory) rememberRemyLink(url, result.pageTitle);
   } catch (error) {
     hideLoading();
     console.error('Load from URL failed:', error);
@@ -3485,6 +3495,28 @@ function createParticleDataFromSplatMesh(mesh, onProgress, options = {}) {
     opacities: opacities.slice(0, count),
     count,
   };
+}
+
+function applyModelParticleDefaults(isDemo) {
+  const { settings } = state;
+  const sliders = [
+    ['pointSize', dom.settingPointSize, dom.settingPointSizeVal],
+    ['particleBrightness', dom.settingParticleBrightness, dom.settingParticleBrightnessVal],
+  ];
+  if (isDemo) {
+    state.demoParticleSettingsBackup ??= {
+      pointSize: settings.pointSize,
+      particleBrightness: settings.particleBrightness,
+    };
+  } else if (!state.demoParticleSettingsBackup) {
+    return;
+  }
+  for (const [key, slider, display] of sliders) {
+    settings[key] = isDemo ? Number(slider.max) : state.demoParticleSettingsBackup[key];
+    slider.value = String(settings[key]);
+    display.textContent = settings[key].toFixed(2);
+  }
+  if (!isDemo) state.demoParticleSettingsBackup = null;
 }
 
 /**
@@ -3654,6 +3686,7 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
   // 3. Create Particle System
   updateLoadingProgress(0.88, 'Creating Particle Cloud...');
   const info = state.particleSystem.createFromData(data, state.scene);
+  applyModelParticleDefaults(options.isDemo === true);
   state.particleSystem.setViewportSize(window.innerWidth, window.innerHeight);
   state.particleSystem.setPointSize(state.settings.pointSize);
   state.particleSystem.setDensity(state.settings.pointDensity);
@@ -7318,11 +7351,28 @@ function setupEventListeners() {
   // Load from URL
   dom.btnLoad.addEventListener('click', loadFromUrl);
   for (const [toggle, menu] of remyHistoryWidgets()) {
+    if (!toggle || !menu) continue;
+    document.body.append(menu);
+    if (typeof menu.showPopover === 'function') menu.setAttribute('popover', 'manual');
     toggle?.addEventListener('click', () => {
       const shouldOpen = menu.hidden;
       closeRemyHistoryMenus();
       if (shouldOpen && !toggle.hidden) {
+        const anchor = toggle.parentElement.getBoundingClientRect();
+        const width = Math.min(anchor.width, window.innerWidth - 16);
+        const left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8));
+        const spaceBelow = window.innerHeight - anchor.bottom - 16;
+        const spaceAbove = anchor.top - 16;
+        const above = spaceBelow < 180 && spaceAbove > spaceBelow;
+        Object.assign(menu.style, {
+          left: `${left}px`,
+          width: `${width}px`,
+          top: above ? 'auto' : `${anchor.bottom + 8}px`,
+          bottom: above ? `${window.innerHeight - anchor.top + 8}px` : 'auto',
+          maxHeight: `min(320px, 42dvh, ${Math.max(0, above ? spaceAbove : spaceBelow)}px)`,
+        });
         menu.hidden = false;
+        menu.showPopover?.();
         toggle.setAttribute('aria-expanded', 'true');
       }
     });
@@ -7333,6 +7383,7 @@ function setupEventListeners() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') closeRemyHistoryMenus();
   });
+  window.addEventListener('resize', closeRemyHistoryMenus);
   dom.urlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') loadFromUrl();
   });
@@ -7343,11 +7394,10 @@ function setupEventListeners() {
     if (!url) {
       // Default demo model
       url = 'https://www.remy3d.cn/model/72ca9c87bca54600bfd0fdd95fa96e38';
-      dom.landingUrlInput.value = url;
       showToast(state.lang === 'zh' ? '加载示例图像……' : 'Loading demo model...', 'info', 3000);
     }
     dom.urlInput.value = url;
-    loadFromUrl({ rememberInHistory: !isDemo });
+    loadFromUrl({ rememberInHistory: !isDemo, isDemo });
   };
   dom.landingBtnLoad?.addEventListener('click', () => loadFromLanding());
   if (dom.landingUrlInput) {

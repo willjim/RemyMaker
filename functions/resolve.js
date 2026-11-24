@@ -76,12 +76,29 @@ export async function onRequestGet({ request }) {
     const result = isInsta360
       ? parseInsta360SharePage(html)
       : parseSharePage(html, isKiri);
-    return new Response(JSON.stringify(result), {
+    const pageTitle = extractPageTitle(html);
+    return new Response(JSON.stringify({ ...result, pageTitle }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' }
     });
   } catch (error) {
     return textResponse(`Unable to resolve share page: ${error.message}`, 502);
   }
+}
+
+export function extractPageTitle(html) {
+  // Ignore strings in inline scripts and commented-out markup.
+  const tags = /<!--[\s\S]*?-->|<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)\s*>|<title(?:\s[^>]*)?>([\s\S]*?)<\/title\s*>/gi;
+  let match;
+  while ((match = tags.exec(html)) && match[1] === undefined) { /* skip raw text and comments */ }
+  if (!match) return '';
+  const entities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' };
+  return match[1].replace(/&(#(?:x[\da-f]+|\d+)|[a-z]+);/gi, (original, entity) => {
+    if (entity[0] !== '#') return Object.hasOwn(entities, entity) ? entities[entity] : original;
+    const hex = entity[1].toLowerCase() === 'x';
+    const codePoint = parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
+    return codePoint > 0 && codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ? String.fromCodePoint(codePoint) : '\ufffd';
+  }).replace(/\s+/g, ' ').trim().slice(0, 100);
 }
 
 function parseInsta360SharePage(html) {

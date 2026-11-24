@@ -8,6 +8,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,6 +23,32 @@ ALLOWED_HOSTS = {
     "kiriengine.com",
     "app.insta360.com",
 }
+
+class PageTitleParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.reading = False
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title" and not self.found:
+            self.reading = True
+
+    def handle_data(self, data):
+        if self.reading:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "title" and self.reading:
+            self.reading = False
+            self.found = True
+
+
+def extract_page_title(html):
+    parser = PageTitleParser()
+    parser.feed(html)
+    return " ".join("".join(parser.parts).split())[:100]
 
 
 def parse_share_page(html, is_kiri):
@@ -186,6 +213,7 @@ class Handler(SimpleHTTPRequestHandler):
             with urllib.request.urlopen(request, timeout=30) as response:
                 html = response.read().decode("utf-8", errors="replace")
             result = parse_insta360_share_page(html) if is_insta360 else parse_share_page(html, is_kiri)
+            result["pageTitle"] = extract_page_title(html)
             body = json.dumps(result, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

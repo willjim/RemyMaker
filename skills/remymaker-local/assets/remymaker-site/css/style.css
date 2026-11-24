@@ -273,9 +273,8 @@ body.compositing-mode-active #canvas-container {
   width: 34px;
   height: 34px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  border: 0;
+  background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
@@ -284,8 +283,13 @@ body.compositing-mode-active #canvas-container {
 .link-history-toggle:hover,
 .link-history-toggle:focus-visible,
 .link-history-toggle[aria-expanded="true"] {
-  border-color: rgba(0, 245, 212, 0.55);
   color: var(--accent-cyan);
+}
+
+.link-history-toggle:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -3px;
+  border-radius: 6px;
 }
 
 .link-history-toggle .ui-icon {
@@ -301,11 +305,11 @@ body.compositing-mode-active #canvas-container {
 }
 
 .link-history-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  right: 0;
-  z-index: 25;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  z-index: 10001;
+  color: var(--text-primary);
   box-sizing: border-box;
   max-height: min(320px, 42dvh);
   overflow-y: auto;
