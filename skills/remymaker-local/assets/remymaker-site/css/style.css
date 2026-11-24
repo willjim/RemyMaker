@@ -977,7 +977,11 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 
 .landing-logo {
   margin-bottom: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--accent-cyan);
+  font-family: inherit;
   font-size: 30px;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -986,6 +990,14 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.landing-logo:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 4px;
+  border-radius: 4px;
 }
 
 @keyframes float-logo {
@@ -1066,60 +1078,6 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   flex: 0 0 34px;
 }
 
-/* ========================================
-   Notifications / Toast
-   ======================================== */
-.flight-timing-panel {
-  margin: 8px 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border-glass);
-  border-radius: 9px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.flight-timing-panel summary { cursor: pointer; color: var(--text-primary); }
-.camera-path-panel:has(.flight-timing-panel[open]) { max-height: calc(100dvh - 125px); overflow-y: auto; }
-.flight-timing-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.flight-timing-panel input[type="number"],
-.flight-keyframe-duration input {
-  width: 68px;
-  min-width: 0;
-  padding: 5px 6px;
-  border: 1px solid var(--border-glass);
-  border-radius: 5px;
-  background: rgba(255,255,255,.07);
-  color: var(--text-primary);
-  font: inherit;
-}
-.flight-timing-panel select {
-  max-width: 62%;
-  padding: 5px;
-  background: #18182b;
-  border: 1px solid var(--border-glass);
-  border-radius: 5px;
-  color: var(--text-primary);
-  font: inherit;
-}
-.flight-keyframe-duration {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  white-space: nowrap;
-}
-.flight-timing-panel .flight-timing-note { margin-top: 8px; font-size: 10px; line-height: 1.5; }
-@media (max-width: 600px), (pointer: coarse) {
-  .flight-timing-panel { margin: 4px 0; padding: 6px 8px; font-size: 11px; }
-  .camera-path-panel:has(.flight-timing-panel[open]) { max-height: 65dvh; overflow-y: auto; }
-}
-
 /* Shared camera timeline */
 .camera-path-panel.flight-timeline-ready {
   --flight-panel-inset: 12px;
@@ -1141,14 +1099,6 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   transition: opacity var(--transition-fast);
 }
 
-.camera-path-panel.flight-timeline-ready.hidden {
-  visibility: hidden;
-}
-
-.flight-timeline-ready > :is(.camera-panel-header, .flight-timeline, .camera-actions, .flight-timing-panel, .mobile-camera-options) {
-  grid-column: 1 / -1;
-}
-
 .flight-timeline-ready .camera-panel-header h3 {
   margin: 0;
   border: 0;
@@ -1159,10 +1109,6 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 .flight-timeline-ready > :is(p, .keyframe-list),
 .flight-timeline-ready #btn-add-keyframe,
 .flight-timeline-ready .camera-actions > .camera-action-row:not(#custom-keyframe-actions),
-.flight-timeline-ready .flight-timing-panel [data-flight-total],
-.flight-timeline-ready .flight-timing-panel [data-flight-manual],
-.flight-timeline-ready .flight-keyframe-duration,
-.flight-timeline-ready .flight-timing-panel label:has(:is([data-flight-total], [data-flight-manual], [data-effect-start], [data-effect-duration], [data-effect-direction])),
 body.timeline-editor-playback #preview-controls {
   display: none !important;
 }
@@ -1186,18 +1132,17 @@ body.timeline-editor-playback #preview-controls {
   font-size: 11px !important;
 }
 
-.flight-timeline-ready .flight-timing-panel {
-  margin: 0;
-  padding: 4px 0 0;
-  border-width: 1px 0 0;
-  border-radius: 0;
+.flight-transition-defaults {
+  margin-top: 8px;
+  padding-top: 3px;
+  border-top: 1px solid var(--border-glass);
 }
 
-body.timeline-editor-playback .flight-timeline-ready > :is(.camera-actions, .flight-timing-panel, .mobile-camera-options, .camera-option-item),
+body.timeline-editor-playback .flight-timeline-ready > :is(.camera-actions, .mobile-camera-options, .camera-option-item),
 body.timeline-editor-playback .flight-timeline-ready .camera-header-preview,
 body.timeline-editor-playback .flight-timeline-ready .flight-keyframe-controls,
 body.timeline-editor-playback .flight-timeline-ready .flight-renderer-controls,
-body.timeline-editor-playback .flight-timeline-ready :is(.flight-event-inspector, .flight-particle-inspector),
+body.timeline-editor-playback .flight-timeline-ready :is(.flight-event-inspector, .flight-particle-inspector, .flight-transition-defaults),
 body.timeline-editor-playback .flight-timeline-ready [data-flight-field="duration"],
 body.timeline-editor-playback .flight-timeline-ready label:has(:is([data-flight-field="duration"], [data-flight-field="timing-mode"])),
 body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-control, .remy-intro-panel, .stats-panel) {
@@ -2452,7 +2397,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 }
 
 /* Inset the chevron consistently while keeping the platform's native menu. */
-:is(.setting-item, .flight-timing-panel, .flight-timeline-controls) select {
+:is(.setting-item, .flight-timeline-controls) select {
   appearance: none;
   padding-right: 31px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2.5 4.5 3.5 3.5 3.5-3.5' fill='none' stroke='%23c6c7d6' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -2461,13 +2406,13 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   background-size: 12px 12px;
 }
 
-:is(.setting-item, .flight-timing-panel) select:focus-visible {
+.setting-item select:focus-visible {
   outline: 2px solid var(--accent-cyan);
   outline-offset: 1px;
 }
 
 @media (forced-colors: active) {
-  :is(.setting-item, .flight-timing-panel, .flight-timeline-controls) select {
+  :is(.setting-item, .flight-timeline-controls) select {
     appearance: auto;
     padding-right: 8px;
     background-image: none;
@@ -2534,10 +2479,10 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   top: 96px;
   left: 20px;
   z-index: 110;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 18px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+  padding: 14px;
   background: var(--bg-glass);
   backdrop-filter: blur(24px) saturate(1.3);
   -webkit-backdrop-filter: blur(24px) saturate(1.3);
@@ -2546,11 +2491,16 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.5),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  width: 280px;
-  transition: opacity var(--transition-smooth), transform var(--transition-smooth);
+  width: min(340px, calc(100vw - 40px));
+  transition: opacity var(--transition-smooth), transform var(--transition-smooth), visibility var(--transition-smooth);
+}
+
+.camera-path-panel > :is(.camera-panel-header, p, .keyframe-list, .flight-timeline, .camera-actions, .mobile-camera-options) {
+  grid-column: 1 / -1;
 }
 
 .camera-path-panel.hidden {
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-10px);
@@ -3019,7 +2969,7 @@ body.recording-mode-active .progress-control {
 
   .camera-path-panel {
     max-height: min(38dvh, 286px);
-    gap: 4px;
+    gap: 6px;
   }
 
   .settings-panel h3,

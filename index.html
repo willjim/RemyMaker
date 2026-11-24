@@ -20,7 +20,7 @@
   <title>Remy 自定义特效运镜工具</title>
   <meta name="description" content="Three.js particle visualization with MediaPipe hand gesture control. Load PLY models from Remy3D and interact with glowing particles.">
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=3.56">
+  <link rel="stylesheet" href="css/style.css?v=3.57">
   <!-- Three.js Import Map -->
   <script type="importmap">
   {
@@ -555,7 +555,7 @@
     <!-- ========== Welcome Hint (Landing Centered Box) ========== -->
     <div class="welcome-hint" id="welcome-hint">
       <div class="landing-card">
-        <div class="landing-logo"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span>RemyMaker</span></div>
+        <button id="landing-title" class="landing-logo" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg><span>RemyMaker</span></button>
         <h2>Remy 自定义特效运镜工具</h2>
         <p>在下方输入框粘贴 <a href="https://www.remy3d.cn/" target="_blank" rel="noopener" class="desc-link">Remy</a>、<a href="https://www.kiriengine.app/" target="_blank" rel="noopener" class="desc-link">Kiri Engine</a> 或 Insta360 分享链接<br>即可开始您的粒子艺术和 3DGS 体验</p>
         
@@ -635,7 +635,7 @@
       </button>
     </div>
     <!-- ========== Toast Container ========== -->
-    <div class="toast-container" id="toast-container"></div>
+    <div class="toast-container" id="toast-container" role="status" aria-atomic="false"></div>
   </div>
   <script>
     document.getElementById('wechat-open-dismiss')?.addEventListener('click', function () {
@@ -643,6 +643,6 @@
     });
   </script>
   <!-- App Entry Point -->
-  <script type="module" src="js/app.js?v=5.9"></script>
+  <script type="module" src="js/app.js?v=6.0"></script>
 </body>
 </html>

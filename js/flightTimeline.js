@@ -50,6 +50,7 @@ const labels = {
     'gather-scatter': '聚合后消散', addEvent: '添加切换', initial: '初始模式', target: '切换到',
     spark: '3D 实景', particles: '粒子', style: '过渡', fade: '渐变', fly: '逐区聚散',
     all: '四周', left: '左', right: '右', top: '上', bottom: '下',
+    transitionDefaults: '转场默认设置', transitionDuration: '转场时长（秒）', overlay: '实景叠加粒子',
     switchToSpark: '切换实景', switchToParticles: '切换粒子',
     overflow: '超出运镜时长的特效区间将在导出时截断。',
     empty: '添加两个视角开始运镜。', preset: '内置运镜',
@@ -64,6 +65,7 @@ const labels = {
     'gather-scatter': 'Gather then scatter', addEvent: 'Add switch', initial: 'Initial mode', target: 'Switch to',
     spark: '3D reality', particles: 'Particles', style: 'Transition', fade: 'Fade', fly: 'Progressive assembly',
     all: 'All sides', left: 'Left', right: 'Right', top: 'Top', bottom: 'Bottom',
+    transitionDefaults: 'Transition defaults', transitionDuration: 'Transition (s)', overlay: 'Particles over reality',
     switchToSpark: 'Switch to reality', switchToParticles: 'Switch to particles',
     overflow: 'Effects beyond the camera path will be cut off in the export.',
     empty: 'Add two views to create a camera path.', preset: 'Camera preset',
@@ -114,6 +116,7 @@ export function createFlightTimeline(panel, onAction) {
     const select = (key, caption, ...values) =>
       `<label>${words[caption]}<select data-flight-field="${key}">${opts(...values)}</select></label>`;
     const open = refs ? refs.details.open : true;
+    const defaultsOpen = refs?.defaults.open;
     panel.innerHTML = `
       <details class="flight-timeline-disclosure"${open ? ' open' : ''}>
         <summary>${words.title}</summary>
@@ -160,9 +163,19 @@ export function createFlightTimeline(panel, onAction) {
           ${number('event-duration', 'length', 0.05)}${button('delete-event', 'remove')}
         </div>
         <div class="flight-timeline-warning" hidden>${words.overflow}</div>
+        <details class="flight-transition-defaults"${defaultsOpen ? ' open' : ''}>
+          <summary>${words.transitionDefaults}</summary>
+          <div class="flight-timeline-controls">
+            ${number('default-duration', 'transitionDuration', MIN_TIMELINE_SEGMENT)}
+            ${select('default-mode', 'style', 'fade', 'fly')}
+            ${select('default-direction', 'direction', 'all', 'left', 'right', 'top', 'bottom')}
+            <label><input type="checkbox" data-flight-field="default-overlayEnabled">${words.overlay}</label>
+          </div>
+        </details>
       </details>`;
     refs = {
-      details: query('details'), tracks: query('.flight-timeline-tracks'), scroller: query('.flight-timeline-scroll'),
+      details: query('.flight-timeline-disclosure'), defaults: query('.flight-transition-defaults'),
+      tracks: query('.flight-timeline-tracks'), scroller: query('.flight-timeline-scroll'),
       ticks: query('.flight-ticks'), seek: query('.flight-seek'), readout: query('.flight-timeline-readout'),
       keyframes: query('.flight-keyframe-track'), particle: query('.flight-particle-track'),
       renderer: query('.flight-renderer-track'), warning: query('.flight-timeline-warning'),
@@ -272,6 +285,11 @@ export function createFlightTimeline(panel, onAction) {
     fields['particle-duration'].value = fieldTime(view.particle.duration);
     fields['particle-direction'].value = view.particle.direction;
     fields['initial-renderer'].value = view.initialRenderer;
+    fields['default-duration'].value = fieldTime(view.transitionDefaults.duration);
+    fields['default-mode'].value = view.transitionDefaults.mode;
+    fields['default-direction'].value = view.transitionDefaults.direction;
+    fields['default-direction'].parentElement.hidden = view.transitionDefaults.mode !== 'fly';
+    fields['default-overlayEnabled'].checked = view.transitionDefaults.overlayEnabled;
     if (event) {
       fields['event-time'].value = fieldTime(event.time);
       fields['event-renderer'].value = event.renderer;
@@ -405,7 +423,8 @@ export function createFlightTimeline(panel, onAction) {
   function commitField(field) {
     const key = field.dataset.flightField;
     if (!key || editLocked()) return;
-    const value = field.type === 'number' ? field.valueAsNumber : field.value;
+    const value = field.type === 'number' ? field.valueAsNumber
+      : field.type === 'checkbox' ? field.checked : field.value;
     if (field.type === 'number' && !Number.isFinite(value)) {
       renderControls();
       return;
@@ -414,6 +433,7 @@ export function createFlightTimeline(panel, onAction) {
     else if (key === 'timing-mode') send('set-timing-mode', { mode: value === 'manual' ? 'manual' : 'automatic' });
     else if (key === 'keyframe-time') send('move-keyframe', { index: view.selectedKeyframe, time: value });
     else if (key === 'initial-renderer') send('set-initial-renderer', { renderer: value });
+    else if (key.startsWith('default-')) send('set-transition-defaults', { changes: { [key.slice(8)]: value } });
     else if (key.startsWith('particle-')) send('set-particle', { changes: { [key.slice(9)]: value } });
     else if (key.startsWith('event-')) send('set-event', { index: selection.index, changes: { [key.slice(6)]: value } });
     renderControls();
