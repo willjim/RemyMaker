@@ -19,6 +19,7 @@ function extractFunction(name) {
 
 const timingFunctions = [
   'getCurrentFlightDuration',
+  'getPresetFlightDuration',
   'getActiveParticleEffectDuration',
   'evaluateEffectAtSeconds',
   'evaluateRendererTransitionAtSeconds',
@@ -26,6 +27,7 @@ const timingFunctions = [
   'getManualCurveProgress',
   'createMonotoneTimeDerivatives',
   'getRendererBlendAtSeconds',
+  'evaluateFlightAtSeconds',
 ].map(extractFunction).join('\n');
 
 const context = vm.createContext({
@@ -60,6 +62,7 @@ vm.runInContext(`${timingFunctions}\nglobalThis.timing = {
   getRendererAtTime,
   getManualCurveProgress,
   getRendererBlendAtSeconds,
+  evaluateFlightAtSeconds,
 };`, context, { filename: 'js/app.js timing helpers' });
 
 test('manual segment durations define the exact flight timeline', () => {
@@ -90,6 +93,23 @@ test('effects longer than the flight are cut without speeding up', () => {
   assert.equal(context.timing.getCurrentFlightDuration(), 5);
   assert.equal(context.timing.evaluateEffectAtSeconds(5).progress, .4);
   assert.equal(context.timing.evaluateEffectAtSeconds(5.1).active, false);
+});
+
+test('recording uses its captured duration and samples the exact final frame', () => {
+  const { state } = context;
+  state.settings.presetFlight = 'verticalLoop';
+  try {
+    assert.equal(context.timing.getCurrentFlightDuration(), 16);
+    state.flightTiming.presetDurations.verticalLoop = 7;
+    assert.equal(context.timing.getCurrentFlightDuration(), 7);
+    const frame = context.timing.evaluateFlightAtSeconds(3.04, 3);
+    assert.equal(frame.time, 3);
+    assert.equal(frame.progress, 1);
+    assert.equal(frame.finished, true);
+  } finally {
+    delete state.flightTiming.presetDurations.verticalLoop;
+    state.settings.presetFlight = 'none';
+  }
 });
 
 test('interrupted renderer transitions are continuous and frame-rate independent', () => {

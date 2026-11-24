@@ -29,6 +29,14 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
     key: 'arrivalViewToWorld',
     value: new THREE.Matrix4(),
   });
+  const startMeshToViewUniform = new dyno.DynoMat4({
+    key: 'arrivalStartMeshToView',
+    value: new THREE.Matrix4(),
+  });
+  const worldToMeshUniform = new dyno.DynoMat4({
+    key: 'arrivalWorldToMesh',
+    value: new THREE.Matrix4(),
+  });
   const tanHalfFovUniform = new dyno.DynoFloat({ key: 'arrivalTanHalfFov', value: 1 });
   const aspectUniform = new dyno.DynoFloat({ key: 'arrivalAspect', value: 1 });
 
@@ -39,6 +47,8 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
       direction: 'int',
       objectToView: 'mat4',
       viewToObject: 'mat4',
+      startMeshToView: 'mat4',
+      worldToMesh: 'mat4',
       tanHalfFov: 'float',
       aspect: 'float',
     },
@@ -49,6 +59,8 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
       direction: directionUniform,
       objectToView: objectToViewUniform,
       viewToObject: viewToObjectUniform,
+      startMeshToView: startMeshToViewUniform,
+      worldToMesh: worldToMeshUniform,
       tanHalfFov: tanHalfFovUniform,
       aspect: aspectUniform,
     },
@@ -60,7 +72,8 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
       `float arrivalR2 = fract(sin(arrivalSeed * 39.3467 + 11.135) * 24634.6345);`,
       `float arrivalR3 = fract(sin(arrivalSeed * 73.1569 + 47.853) * 56445.2341);`,
       `vec4 arrivalViewCenter = ${inputs.objectToView} * vec4(${inputs.gsplat}.center, 1.0);`,
-      `float arrivalDepth = max(-arrivalViewCenter.z, 0.01);`,
+      `vec4 arrivalOriginalView = ${inputs.startMeshToView} * ${inputs.worldToMesh} * vec4(${inputs.gsplat}.center, 1.0);`,
+      `float arrivalDepth = max(-arrivalOriginalView.z, 0.01);`,
       `float arrivalRadius = 3.0 * max(max(${inputs.gsplat}.scales.x, ${inputs.gsplat}.scales.y), ${inputs.gsplat}.scales.z);`,
       `float arrivalHalfH = arrivalDepth * ${inputs.tanHalfFov} + arrivalRadius;`,
       `float arrivalHalfW = arrivalHalfH * ${inputs.aspect};`,
@@ -76,7 +89,7 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
       `else if (${inputs.direction} == 2) arrivalX = arrivalHalfW * 1.28 + arrivalRadius;`,
       `else if (${inputs.direction} == 3) arrivalY = arrivalHalfH * 1.28 + arrivalRadius;`,
       `else arrivalY = -arrivalHalfH * 1.28 - arrivalRadius;`,
-      `vec3 arrivalStartView = vec3(arrivalX, arrivalY, arrivalViewCenter.z);`,
+      `vec3 arrivalStartView = vec3(arrivalX, arrivalY, -arrivalDepth);`,
       `vec2 arrivalChord = arrivalViewCenter.xy - arrivalStartView.xy;`,
       `float arrivalChordLength = max(length(arrivalChord), 0.001);`,
       `vec2 arrivalPerp = vec2(-arrivalChord.y, arrivalChord.x) / arrivalChordLength;`,
@@ -87,7 +100,8 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
       `vec2 arrivalControl = mix(arrivalStartView.xy, arrivalViewCenter.xy, 0.5) + arrivalPerp * arrivalCurve;`,
       `float arrivalRemain = 1.0 - arrivalEase;`,
       `vec2 arrivalPathXY = arrivalRemain * arrivalRemain * arrivalStartView.xy + 2.0 * arrivalRemain * arrivalEase * arrivalControl + arrivalEase * arrivalEase * arrivalViewCenter.xy;`,
-      `vec4 arrivalPathWorld = ${inputs.viewToObject} * vec4(arrivalPathXY, arrivalViewCenter.z, 1.0);`,
+      `float arrivalPathZ = mix(arrivalStartView.z, arrivalViewCenter.z, arrivalEase);`,
+      `vec4 arrivalPathWorld = ${inputs.viewToObject} * vec4(arrivalPathXY, arrivalPathZ, 1.0);`,
       `if (arrivalT >= 1.0) {`,
       `  ${outputs.gsplat}.center = ${inputs.gsplat}.center;`,
       `  ${outputs.gsplat}.scales = ${inputs.gsplat}.scales;`,
@@ -126,6 +140,10 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
 
   function update(progress) {
     if (disposed) return;
+    if (started && !suspended) {
+      mesh.updateWorldMatrix?.(true, false);
+      worldToMeshUniform.value.copy(mesh.matrixWorld).invert();
+    }
     const value = Number(progress);
     const next = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
     if (next !== progressUniform.value) {
@@ -147,6 +165,8 @@ export function createSplatArrival(mesh, { THREE, dyno } = {}) {
     // world space here. Freeze camera matrices so starts don't follow it.
     objectToViewUniform.value = camera.matrixWorldInverse.clone();
     viewToObjectUniform.value = camera.matrixWorld.clone();
+    startMeshToViewUniform.value.multiplyMatrices(camera.matrixWorldInverse, mesh.matrixWorld);
+    worldToMeshUniform.value.copy(mesh.matrixWorld).invert();
 
     const effectiveFov = typeof camera.getEffectiveFOV === 'function'
       ? camera.getEffectiveFOV()

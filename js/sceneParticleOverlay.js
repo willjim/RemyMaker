@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import { ParticleSystem } from './particleSystem.js?v=6.4';
 
 // This layer samples the actual decoded Gaussians, so every source index refers
@@ -10,20 +9,26 @@ export class SceneParticleOverlay {
     this.system = null;
     this.signature = null;
     this.rgbaSource = null;
+    this.disposed = false;
   }
 
   async prepare(settings, crop) {
     const signature = JSON.stringify([settings.maxParticles, crop]);
     if (this.system && this.signature === signature && this.rgbaSource === this.mesh.splatRgba) return;
     const mesh = this.mesh;
+    const rgbaSource = mesh.splatRgba;
     // Read committed alpha once per edit revision, never the temporary pink
     // selection mask. A read failure must reach the playback error handler.
-    const rgba = mesh.splatRgba ? await mesh.splatRgba.getArray() : null;
-    const maxParticles = Math.max(1, settings.maxParticles || 500000);
-    const step = Math.max(1, Math.ceil(mesh.numSplats / maxParticles));
+    const rgba = rgbaSource ? await rgbaSource.getArray() : null;
+    if (this.disposed) return;
+    if (rgbaSource !== mesh.splatRgba || (rgba && rgba.length < mesh.numSplats * 4)) {
+      throw new Error('Committed splat colors changed or could not be read. Please retry.');
+    }
+    const maxParticles = Math.max(1, Math.floor(settings.maxParticles || 500000));
     const positions = [], colors = [], opacities = [], indices = [];
+    let eligibleCount = 0;
+    let random = 0x897d23a1;
     mesh.forEachSplat((index, center, _scale, _rotation, opacity, color) => {
-      if (index % step || positions.length / 3 >= maxParticles) return;
       const alpha = rgba ? rgba[index * 4 + 3] / 255 : opacity;
       if (!Number.isFinite(alpha) || alpha < 1 / 255) return;
       if (![center.x, center.y, center.z].every(Number.isFinite)) return;
@@ -36,12 +41,25 @@ export class SceneParticleOverlay {
           : x * x + y * y + z * z <= 1;
         if (!inside) return;
       }
-      positions.push(center.x, center.y, center.z);
-      colors.push(rgba ? rgba[index * 4] / 255 : color.r,
-        rgba ? rgba[index * 4 + 1] / 255 : color.g,
-        rgba ? rgba[index * 4 + 2] / 255 : color.b);
-      opacities.push(alpha);
-      indices.push(index);
+      // Sample the retained subject, even if it contains very few splats.
+      // A seeded reservoir keeps memory bounded for large uncropped scenes.
+      let slot = eligibleCount++;
+      if (slot >= maxParticles) {
+        random ^= random << 13;
+        random ^= random >>> 17;
+        random ^= random << 5;
+        slot = Math.floor((random >>> 0) / 0x100000000 * eligibleCount);
+        if (slot >= maxParticles) return;
+      }
+      const offset = slot * 3;
+      positions[offset] = center.x;
+      positions[offset + 1] = center.y;
+      positions[offset + 2] = center.z;
+      colors[offset] = rgba ? rgba[index * 4] / 255 : color.r;
+      colors[offset + 1] = rgba ? rgba[index * 4 + 1] / 255 : color.g;
+      colors[offset + 2] = rgba ? rgba[index * 4 + 2] / 255 : color.b;
+      opacities[slot] = alpha;
+      indices[slot] = index;
     });
     const next = new ParticleSystem();
     try {
@@ -70,7 +88,7 @@ export class SceneParticleOverlay {
     this.system?.dispose();
     this.system = next;
     this.signature = signature;
-    this.rgbaSource = mesh.splatRgba;
+    this.rgbaSource = rgbaSource;
   }
 
   update({ settings, effect, time, delta, camera, opacity, width, height, pointScale = 1, exporting = false }) {
@@ -96,5 +114,9 @@ export class SceneParticleOverlay {
   }
 
   hide() { if (this.system?.pivot) this.system.pivot.visible = false; }
-  dispose() { this.system?.dispose(); this.system = null; }
+  dispose() {
+    this.disposed = true;
+    this.system?.dispose();
+    this.system = null;
+  }
 }

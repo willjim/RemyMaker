@@ -111,6 +111,30 @@ test('prepare applies box crop bounds independently on each axis', async () => {
   assert.deepEqual(Array.from(captures[0].sourceSplatIndices), [0, 2]);
 });
 
+test('crop filters before sampling so a sparse retained subject is still represented', async () => {
+  const splats = [splat(0, 10, 0), splat(1, 0, 0), splat(2, 10, 0), splat(3, 10, 0)];
+  const { overlay, captures } = makeHarness(splats);
+  await overlay.prepare({ maxParticles: 1 }, {
+    enabled: true,
+    shape: 'box',
+    center: { x: 0, y: 0, z: 0 },
+    radii: { x: 1, y: 1, z: 1 },
+  });
+  assert.deepEqual(Array.from(captures[0].sourceSplatIndices), [1]);
+});
+
+test('disposing the model during RGBA readback prevents a stale overlay from attaching', async () => {
+  let finishReadback;
+  const rgba = { getArray: () => new Promise(resolve => { finishReadback = resolve; }) };
+  const { overlay, captures } = makeHarness([splat(0, 0, 0)], rgba);
+  const preparation = overlay.prepare({ maxParticles: 1 }, { enabled: false });
+  overlay.dispose();
+  finishReadback(new Uint8Array([40, 80, 120, 255]));
+  await preparation;
+  assert.equal(captures.length, 0);
+  assert.equal(overlay.system, null);
+});
+
 test('same crop/settings reuse the sample; a new RGBA object rebuilds after undo', async () => {
   const splats = [splat(0, 0, 0), splat(1, 0.25, 0)];
   const { overlay, mesh, captures, systems } = makeHarness(splats);
