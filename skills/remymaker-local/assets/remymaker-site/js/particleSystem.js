@@ -15,12 +15,15 @@ const vertexShader = /* glsl */ `
   attribute float aRandomSpeed;
   attribute float aPhaseOffset;
   attribute float aSourceOpacity;
+  attribute float aSourceVisibility;
   attribute vec3 aColor;
   uniform float uProgress;
   uniform float uTime;
   uniform float uPointSize;
   uniform float uLogicalPointSize;
   uniform float uSplatInterpolation;
+  uniform float uOverlayMode;
+  uniform float uOverlayOpacity;
   uniform float uTransitionDirection; // 1.0 = point cloud -> 3DGS, -1.0 = 3DGS -> point cloud
   uniform float uVectorField; // selected vector field index (0.0 to 20.0)
   uniform float uStarModelArrivalScale;
@@ -509,6 +512,10 @@ const vertexShader = /* glsl */ `
         posInterp = pointCloudPos;
       }
     }
+    // Overlay points are an independent visual layer on top of the live splats.
+    // They must keep their complete point-cloud trajectory regardless of the
+    // app's 3DGS interpolation state (which normally hides them at full splat).
+    if (uOverlayMode > 0.5) posInterp = pointCloudPos;
     vec4 mvPosition = modelViewMatrix * vec4(posInterp, 1.0);
     gl_Position = projectionMatrix * mvPosition;
    
@@ -573,8 +580,13 @@ const vertexShader = /* glsl */ `
     float forwardAlpha = pointCloudAlpha * pow(1.0 - localSplatInterp, 3.0) + forwardBand * 0.12;
     float reverseAlpha = pointCloudAlpha * pow(reverseCloudReveal, 1.8);
     reverseAlpha += reverseBand * 0.28 * (1.0 - uSplatInterpolation);
-    vAlpha = mix(reverseAlpha, forwardAlpha, outwardMode)
-      * fadeOut * effectReveal * clamp(aSourceOpacity, 0.0, 1.0);
+    float standardAlpha = mix(reverseAlpha, forwardAlpha, outwardMode);
+    float overlayReveal = smoothstep(0.0, 0.08, max(localProgress, easedProgress));
+    float overlayAlpha = overlayReveal;
+    vAlpha = mix(standardAlpha, overlayAlpha, step(0.5, uOverlayMode))
+      * fadeOut * effectReveal * clamp(aSourceOpacity, 0.0, 1.0)
+      * clamp(aSourceVisibility, 0.0, 1.0)
+      * mix(1.0, clamp(uOverlayOpacity, 0.0, 1.0), step(0.5, uOverlayMode));
   }
 `;
 // Fragment Shader
@@ -658,6 +670,8 @@ export class ParticleSystem {
     this.autoRotate = true;
     this.rotationSpeed = 0.15;
     this.particleCount = 0;
+    this.sourceSplatIndices = null;
+    this.sourceVisibility = null;
     this.modelScale = 1.0;
     this.pivot = null; // group for rotation
     this.isGestureActive = false;
@@ -799,6 +813,26 @@ export class ParticleSystem {
     const orderedRandomSpeeds = reorderFloat32Attribute(randomSpeeds, 1, renderOrder);
     const orderedPhaseOffsets = reorderFloat32Attribute(phaseOffsets, 1, renderOrder);
     const orderedSourceOpacities = reorderFloat32Attribute(sourceOpacities, 1, renderOrder);
+    const sourceSplatIndices = data.sourceSplatIndices;
+    const originalSourceSplatIndices = sourceSplatIndices?.length >= count
+      ? new Uint32Array(count)
+      : null;
+    if (originalSourceSplatIndices) {
+      for (let i = 0; i < count; i++) {
+        originalSourceSplatIndices[i] = Number(sourceSplatIndices[i]) >>> 0;
+      }
+    }
+    const orderedSourceSplatIndices = originalSourceSplatIndices
+      ? new Uint32Array(count)
+      : null;
+    if (orderedSourceSplatIndices) {
+      for (let dst = 0; dst < count; dst++) {
+        orderedSourceSplatIndices[dst] = originalSourceSplatIndices[renderOrder[dst]];
+      }
+    }
+    this.sourceSplatIndices = orderedSourceSplatIndices;
+    const orderedSourceVisibility = new Float32Array(count).fill(1);
+    this.sourceVisibility = orderedSourceVisibility;
 
     // --- Create geometry ---
     this.geometry = new THREE.BufferGeometry();
@@ -809,6 +843,10 @@ export class ParticleSystem {
     this.geometry.setAttribute('aRandomSpeed', new THREE.BufferAttribute(orderedRandomSpeeds, 1));
     this.geometry.setAttribute('aPhaseOffset', new THREE.BufferAttribute(orderedPhaseOffsets, 1));
     this.geometry.setAttribute('aSourceOpacity', new THREE.BufferAttribute(orderedSourceOpacities, 1));
+    this.geometry.setAttribute('aSourceVisibility', new THREE.BufferAttribute(orderedSourceVisibility, 1));
+    if (orderedSourceSplatIndices) {
+      this.geometry.setAttribute('aSourceSplatIndex', new THREE.BufferAttribute(orderedSourceSplatIndices, 1));
+    }
     this.updateDrawRange();
     // --- Create material ---
     // Additive emission lets overlapping particles build genuine luminous
@@ -826,6 +864,8 @@ export class ParticleSystem {
         uParticleOpacity: { value: 1.0 },
         uExportColorCompensation: { value: 0.0 },
         uSplatInterpolation: { value: 0.0 },
+        uOverlayMode: { value: 0.0 },
+        uOverlayOpacity: { value: 1.0 },
         uTransitionDirection: { value: 1.0 },
         uVectorField: { value: 0.0 },
         uStarModelArrivalScale: { value: 1.0 },
@@ -1114,6 +1154,38 @@ export class ParticleSystem {
       this.material.uniforms.uSplatInterpolation.value = Math.max(0, Math.min(1, value));
     }
   }
+  /** Enable the independent particle overlay path, bypassing 3DGS interpolation visibility. */
+  setOverlayMode(enabled) {
+    if (this.material?.uniforms.uOverlayMode) {
+      this.material.uniforms.uOverlayMode.value = enabled ? 1.0 : 0.0;
+    }
+  }
+  /** Set the overlay's multiplicative opacity without changing its scatter trajectory. */
+  setOverlayOpacity(opacity) {
+    if (this.material?.uniforms.uOverlayOpacity) {
+      this.material.uniforms.uOverlayOpacity.value = Math.max(0, Math.min(1, Number(opacity) || 0));
+    }
+  }
+  /** Return exact source splat indices in rendered-particle order, when supplied. */
+  getSourceSplatIndices() {
+    return this.sourceSplatIndices;
+  }
+  /**
+   * Apply a visibility mask indexed by original source-splat order. The existing
+   * GPU buffer is updated in place, so crop/erase changes never rebuild geometry.
+   */
+  setSourceVisibility(visibility) {
+    if (!this.sourceSplatIndices || !this.geometry || !visibility) return;
+    const attribute = this.geometry.getAttribute('aSourceVisibility');
+    if (!attribute) return;
+    for (let i = 0; i < this.particleCount; i++) {
+      const sourceIndex = this.sourceSplatIndices[i];
+      this.sourceVisibility[i] = sourceIndex < visibility.length
+        ? Math.max(0, Math.min(1, Number(visibility[sourceIndex]) || 0))
+        : 0;
+    }
+    attribute.needsUpdate = true;
+  }
   setTransitionDirection(direction) {
     if (this.material) {
       this.material.uniforms.uTransitionDirection.value = direction >= 0 ? 1.0 : -1.0;
@@ -1256,5 +1328,7 @@ export class ParticleSystem {
       this.pivot = null;
     }
     this.points = null;
+    this.sourceSplatIndices = null;
+    this.sourceVisibility = null;
   }
 }
