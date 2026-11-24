@@ -116,6 +116,12 @@
       color: #fff;
     }
 
+    .lang-btn:focus-visible,
+    .btn-back:focus-visible {
+      outline: 2px solid var(--primary-color);
+      outline-offset: 3px;
+    }
+
     .lang-separator {
       color: var(--border-color);
       user-select: none;
@@ -291,6 +297,21 @@
       background: rgba(255, 255, 255, 0.05);
       color: #e2e2ec;
       border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    @media (max-width: 600px) {
+      body { padding: 64px 14px 24px; }
+      .lang-toggle-container { top: 14px; right: 14px; }
+      .lang-btn { min-height: 26px; }
+      header { margin-bottom: 24px; }
+      h1 { font-size: clamp(1.65rem, 6vw, 2.15rem); line-height: 1.25; }
+      .subtitle { font-size: 0.95rem; }
+      .card { padding: 16px; margin-bottom: 16px; }
+      h2 { gap: 8px; font-size: 1.2rem; }
+      th, td { padding: 8px 6px; font-size: 0.875rem; }
+      .icon-col { width: 40px; font-size: 1.3rem; }
+      .gesture-name { white-space: normal; }
+      .tip-box { margin-block: 14px; padding: 10px 12px; }
     }
   </style>
 </head>

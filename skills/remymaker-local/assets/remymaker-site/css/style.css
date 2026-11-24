@@ -210,7 +210,7 @@ body.compositing-mode-active #canvas-container {
   box-shadow:
     0 8px 32px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition: var(--transition-smooth);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   max-width: 90vw;
 }
 
@@ -282,6 +282,7 @@ body.compositing-mode-active #canvas-container {
 }
 
 .link-history-toggle:hover,
+.link-history-toggle:focus-visible,
 .link-history-toggle[aria-expanded="true"] {
   border-color: rgba(0, 245, 212, 0.55);
   color: var(--accent-cyan);
@@ -1045,7 +1046,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 }
 
 .landing-input-box input::placeholder {
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(240, 240, 245, 0.58);
 }
 
 .landing-input-box > #landing-btn-load {
@@ -1121,6 +1122,7 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 
 /* Shared camera timeline */
 .camera-path-panel.flight-timeline-ready {
+  --flight-panel-inset: 12px;
   position: fixed;
   top: auto;
   bottom: max(16px, env(safe-area-inset-bottom));
@@ -1132,9 +1134,11 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
-  gap: 6px 12px;
-  padding: 10px 14px;
+  gap: 7px 10px;
+  padding: 10px var(--flight-panel-inset);
+  scrollbar-width: thin;
   transform: translateX(-50%);
+  transition: opacity var(--transition-fast);
 }
 
 .camera-path-panel.flight-timeline-ready.hidden {
@@ -1148,18 +1152,8 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 .flight-timeline-ready .camera-panel-header h3 {
   margin: 0;
   border: 0;
-  padding-bottom: 2px;
-}
-
-.flight-timeline-ready .camera-option-item {
-  min-width: 0;
-  margin: 0 !important;
-}
-
-.flight-timeline-ready .camera-option-item select {
-  min-width: 0;
-  height: 32px;
-  margin: 0 !important;
+  padding: 0;
+  line-height: 1.4;
 }
 
 .flight-timeline-ready > :is(p, .keyframe-list),
@@ -1181,15 +1175,22 @@ body.timeline-editor-playback #preview-controls {
 }
 
 .flight-timeline-ready #custom-keyframe-actions {
-  justify-content: flex-start;
+  justify-content: flex-end;
 }
 
 .flight-timeline-ready #custom-keyframe-actions #btn-clear-keyframes {
   flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11px !important;
 }
 
 .flight-timeline-ready .flight-timing-panel {
   margin: 0;
+  padding: 4px 0 0;
+  border-width: 1px 0 0;
+  border-radius: 0;
 }
 
 body.timeline-editor-playback .flight-timeline-ready > :is(.camera-actions, .flight-timing-panel, .mobile-camera-options, .camera-option-item),
@@ -1214,17 +1215,19 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 }
 
 .flight-timeline-disclosure {
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border-glass-hover);
-  background: rgba(6, 6, 16, .32);
+  padding-top: 3px;
+  border-top: 1px solid var(--border-glass);
 }
 
 .flight-timeline summary {
   width: fit-content;
-  padding: 3px 0;
+  padding: 5px 6px 5px 2px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.flight-timeline summary::marker {
+  color: var(--text-secondary);
 }
 
 .flight-timeline-controls,
@@ -1243,7 +1246,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 .flight-timeline-controls label {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   color: var(--text-secondary);
 }
 
@@ -1251,14 +1254,15 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   min-height: 29px;
   padding: 4px 8px;
   border: 1px solid var(--border-glass-hover);
-  border-radius: 5px;
-  background: #1b1b32;
+  border-radius: 6px;
+  background: #191a2c;
   color: var(--text-primary);
   font: inherit;
 }
 
 .flight-timeline-controls input[type="number"] {
   width: 62px;
+  font-variant-numeric: tabular-nums;
 }
 
 .flight-timeline-controls button,
@@ -1267,14 +1271,21 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   touch-action: manipulation;
 }
 
-.flight-timeline-controls button[data-flight-action="export"] {
+.flight-timeline-controls button:is([data-flight-action="transport"], [data-flight-action="export"]):not(:disabled) {
+  border-color: rgba(0, 245, 212, .27);
+  background: rgba(0, 245, 212, .08);
   color: var(--accent-cyan);
+}
+
+.flight-timeline-controls button:not(:disabled):hover {
+  border-color: rgba(0, 245, 212, .4);
+  background: rgba(0, 245, 212, .13);
 }
 
 .flight-timeline button:disabled,
 .flight-timeline input:disabled,
 .flight-timeline select:disabled {
-  opacity: .45;
+  opacity: .58;
   cursor: default;
 }
 
@@ -1293,8 +1304,8 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   overflow-x: auto;
   overscroll-behavior-x: contain;
   margin-top: 6px;
-  border-radius: 5px;
-  padding: 3px 10px;
+  border-radius: 7px;
+  padding: 3px 8px;
   scrollbar-width: thin;
   background: rgba(0, 0, 0, .22);
 }
@@ -1310,7 +1321,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
 .flight-track-label {
   position: sticky;
-  left: -10px;
+  left: -8px;
   z-index: 2;
   align-self: stretch;
   display: grid;
@@ -1324,8 +1335,8 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 .flight-track {
   position: relative;
   min-height: 32px;
-  margin-right: 12px;
-  border-radius: 3px;
+  margin-right: 7px;
+  border-radius: 5px;
   background: rgba(255, 255, 255, .045);
 }
 
@@ -1445,28 +1456,36 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
 @media (max-width: 600px), (pointer: coarse) {
   .camera-path-panel.flight-timeline-ready {
+    --flight-panel-inset: 9px;
     top: auto !important;
-    right: 8px !important;
-    left: 8px !important;
-    bottom: calc(66px + env(safe-area-inset-bottom)) !important;
+    right: var(--mobile-ui-right) !important;
+    left: var(--mobile-ui-left) !important;
+    bottom: var(--mobile-panel-bottom) !important;
     transform: none;
     max-height: min(56dvh, calc(100dvh - 110px));
-    padding: 8px;
+    padding: var(--flight-panel-inset);
   }
   body.timeline-editor-playback .camera-path-panel.flight-timeline-ready {
-    bottom: max(8px, env(safe-area-inset-bottom)) !important;
+    bottom: calc(10px + env(safe-area-inset-bottom)) !important;
   }
   .flight-timeline-ready .camera-panel-header {
-    margin: -8px -8px 0;
-    top: -8px;
-    padding: 8px;
+    margin: calc(-1 * var(--flight-panel-inset)) calc(-1 * var(--flight-panel-inset)) 0;
+    top: calc(-1 * var(--flight-panel-inset));
+    padding: 6px var(--flight-panel-inset);
   }
-  .flight-timeline-ready .camera-start-hint { display: none; }
+  .flight-timeline-ready .camera-start-hint {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+  }
   .flight-timeline { font-size: 11px; }
+  .flight-timeline-controls { gap: 4px 6px; }
   .flight-timeline-controls :is(button, input, select) { min-height: 34px; }
   .flight-timeline-tracks { grid-template-columns: 53px minmax(0, 1fr); }
-  .flight-track:not(.flight-ruler) { min-height: 38px; }
-  .flight-marker { height: 34px; min-width: 32px; }
+  .flight-track:not(.flight-ruler) { min-height: 34px; }
+  .flight-marker { height: 30px; min-width: 30px; }
+  .flight-timeline-ready #custom-keyframe-actions #btn-clear-keyframes { min-height: 34px; }
 }
 
 .toast-container {
@@ -1523,21 +1542,25 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 /* ========================================
    Responsive
    ======================================== */
-@media (max-width: 1200px) {
+@media (max-width: 1280px) {
   .toolbar {
     max-width: 95vw;
+    gap: 6px;
+    padding-inline: 12px;
+  }
+  .toolbar .btn {
+    padding-inline: 12px;
   }
   .url-input-wrapper {
-    min-width: 200px;
+    min-width: 180px;
   }
 }
 
-@media (max-width: 1024px) {
-  .btn-text {
+@media (max-width: 1100px) {
+  .toolbar .btn-text {
     display: none;
   }
-  #btn-load svg,
-  #landing-btn-load svg {
+  #btn-load svg {
     display: inline-block;
   }
   .btn {
@@ -1594,26 +1617,32 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 }
 
 @media (max-width: 600px), (pointer: coarse) {
+  body {
+    --mobile-ui-left: calc(18px + env(safe-area-inset-left));
+    --mobile-ui-right: calc(18px + env(safe-area-inset-right));
+    --mobile-panel-bottom: calc(68px + env(safe-area-inset-bottom));
+  }
+
   .desktop-camera-scatter-item {
     display: none !important;
   }
 
   .welcome-hint {
-    width: calc(100vw - 28px);
-    max-width: none;
+    left: calc(50% + (env(safe-area-inset-left) - env(safe-area-inset-right)) / 2);
+    width: min(580px, calc(100% - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
   }
 
   .toolbar {
     position: fixed;
     top: auto;
     bottom: calc(10px + env(safe-area-inset-bottom));
-    left: 10px;
-    right: 10px;
+    left: var(--mobile-ui-left);
+    right: var(--mobile-ui-right);
     transform: none;
     justify-content: space-around;
     max-width: none;
     min-height: 52px;
-    padding: 6px 8px;
+    padding: 6px 0;
     gap: 6px;
     background: transparent;
     border: none;
@@ -1640,9 +1669,9 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
   .toolbar .btn {
     flex: 1 1 0;
-    min-width: 46px;
+    min-width: 0;
     min-height: 44px;
-    padding: 9px 8px;
+    padding: 7px 4px;
     border-radius: 10px;
     touch-action: manipulation;
     transition: none;
@@ -1691,8 +1720,8 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
     position: fixed;
     top: auto !important;
     bottom: calc(76px + env(safe-area-inset-bottom)) !important;
-    left: 10px !important;
-    right: 10px !important;
+    left: var(--mobile-ui-left) !important;
+    right: var(--mobile-ui-right) !important;
     width: auto !important;
     max-height: calc(100dvh - 140px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     overflow-y: auto;
@@ -1731,8 +1760,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
   .camera-actions .btn,
   .settings-panel .btn,
-  .setting-item select,
-  #select-preset-flight {
+  .setting-item select {
     min-height: 44px;
     font-size: 12px !important;
     touch-action: manipulation;
@@ -1802,8 +1830,8 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
   .remy-intro-panel {
     position: fixed;
-    right: 10px !important;
-    left: 10px;
+    right: var(--mobile-ui-right) !important;
+    left: var(--mobile-ui-left);
     bottom: calc(154px + env(safe-area-inset-bottom)) !important;
     width: auto !important;
     max-height: 124px;
@@ -1822,7 +1850,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
   .lang-toggle-btn {
     top: calc(10px + env(safe-area-inset-top));
-    right: 12px;
+    right: var(--mobile-ui-right);
     min-width: 52px;
     min-height: 36px;
     justify-content: flex-end;
@@ -1859,6 +1887,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   .landing-card p {
     font-size: 11px;
     line-height: 1.55;
+    text-wrap: balance;
   }
 
   .landing-input-box {
@@ -1873,19 +1902,26 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
     width: auto;
     min-height: 44px;
     min-width: 0;
-    padding-right: 4px;
+    padding-inline: 8px 4px;
+    font-size: 16px;
     box-sizing: border-box;
   }
 
   .landing-input-box > #landing-btn-load {
     flex: 0 0 auto;
     width: auto;
-    min-width: 68px;
-    min-height: 34px;
+    min-width: 56px;
+    min-height: 38px;
     padding: 7px 10px;
     border-radius: 9px;
     font-size: 12px;
     box-sizing: border-box;
+  }
+
+  .landing-input-box > .link-history-toggle {
+    flex-basis: 38px;
+    width: 38px;
+    height: 38px;
   }
 
   .mobile-export-sheet {
@@ -1986,6 +2022,9 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
     0 12px 40px rgba(0, 0, 0, 0.5),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
   width: 280px;
+  max-height: calc(100dvh - 112px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   transition: opacity var(--transition-smooth), transform var(--transition-smooth);
 }
 
@@ -2382,12 +2421,57 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
 .setting-item select:focus {
   border-color: rgba(0, 245, 212, 0.3);
-  background: rgba(20, 20, 45, 0.8);
+  background-color: rgba(20, 20, 45, 0.8);
 }
 
 .setting-item select option {
   background: var(--bg-secondary);
   color: var(--text-primary);
+}
+
+.camera-option-item {
+  min-width: 0;
+  gap: 4px;
+}
+
+.camera-option-item > label {
+  display: block;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.camera-option-item > select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  background-color: rgba(255, 255, 255, 0.07);
+  text-overflow: ellipsis;
+}
+
+/* Inset the chevron consistently while keeping the platform's native menu. */
+:is(.setting-item, .flight-timing-panel, .flight-timeline-controls) select {
+  appearance: none;
+  padding-right: 31px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2.5 4.5 3.5 3.5 3.5-3.5' fill='none' stroke='%23c6c7d6' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 12px 12px;
+}
+
+:is(.setting-item, .flight-timing-panel) select:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 1px;
+}
+
+@media (forced-colors: active) {
+  :is(.setting-item, .flight-timing-panel, .flight-timeline-controls) select {
+    appearance: auto;
+    padding-right: 8px;
+    background-image: none;
+  }
 }
 
 .slider-ticks {
@@ -2708,7 +2792,7 @@ body.recording-mode-active .progress-control {
   font-size: 13px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: var(--transition-smooth);
+  transition: color var(--transition-fast);
   display: flex;
   align-items: center;
   gap: 2px;
@@ -2875,7 +2959,7 @@ body.recording-mode-active .progress-control {
   font-size: 11px;
   color: #ffffff;
   line-height: 1.6;
-  text-align: justify;
+  text-align: start;
 }
 
 /* Light Particle Style */
@@ -2913,7 +2997,9 @@ body.recording-mode-active .progress-control {
   .toolbar .btn-text {
     display: inline !important;
     font-size: 11px;
-    white-space: nowrap;
+    line-height: 1.2;
+    text-align: center;
+    white-space: normal;
   }
 
   .mobile-rotation-btn {
@@ -2991,35 +3077,14 @@ body.recording-mode-active .progress-control {
     gap: 6px;
   }
 
-  .mobile-camera-options .camera-option-item {
-    min-width: 0;
-    margin: 0 !important;
-    gap: 4px;
-  }
-
   #mobile-camera-options .desktop-camera-scatter-item {
     display: flex !important;
   }
 
-  .mobile-camera-options .camera-option-item > label {
-    display: flex;
-    align-items: flex-end;
-    min-height: 22px;
-    margin: 0 !important;
-  }
-
-  .mobile-camera-options select {
-    width: 100% !important;
-    min-width: 0;
-    min-height: 34px !important;
-    margin: 0 !important;
-    padding: 5px 6px !important;
-    font-size: 10px !important;
-  }
-
-  #mobile-camera-options #select-preset-flight,
-  #mobile-camera-options #camera-scatter-effect {
-    font-size: 10px !important;
+  .mobile-camera-options .camera-option-item > select {
+    height: 38px;
+    min-height: 38px;
+    padding-block: 5px;
   }
 
   .keyframe-list:empty {
@@ -3068,12 +3133,13 @@ body.recording-mode-active .progress-control {
   }
 
   .settings-panel.mobile-settings-root {
-    bottom: calc(76px + env(safe-area-inset-bottom)) !important;
+    bottom: var(--mobile-panel-bottom) !important;
     padding: 8px;
     gap: 0;
   }
 
   .settings-panel.mobile-settings-detail {
+    --mobile-settings-value-height: 50px;
     bottom: calc(16px + env(safe-area-inset-bottom)) !important;
     z-index: 170;
     padding: 8px;
@@ -3137,7 +3203,7 @@ body.recording-mode-active .progress-control {
     grid-template-columns: max-content minmax(0, 1fr);
     align-items: center;
     gap: 10px;
-    min-height: 38px;
+    min-height: var(--mobile-settings-value-height);
   }
 
   .settings-panel.mobile-settings-detail.mobile-settings-particles #setting-crop-item.mobile-active {
@@ -3164,7 +3230,7 @@ body.recording-mode-active .progress-control {
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     column-gap: 8px;
-    min-height: 38px;
+    min-height: var(--mobile-settings-value-height);
     margin: 0;
     padding: 0;
     border-top: 0;
@@ -3203,8 +3269,7 @@ body.recording-mode-active .progress-control {
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 6px;
-    min-height: 50px;
-    height: 50px;
+    min-height: var(--mobile-settings-value-height);
     margin: 0;
     padding: 0;
     border-top: 0;
@@ -3267,8 +3332,7 @@ body.recording-mode-active .progress-control {
     flex-direction: column;
     justify-content: center;
     width: 100%;
-    height: 50px;
-    min-height: 50px;
+    min-height: var(--mobile-settings-value-height);
     margin: 0;
     padding: 0;
     gap: 3px;
@@ -3307,17 +3371,17 @@ body.recording-mode-active .progress-control {
 
   .settings-panel.mobile-settings-detail .mobile-settings-actions {
     display: grid;
-    grid-template-columns: 28px minmax(0, 1fr) 28px;
+    grid-template-columns: 32px minmax(0, 1fr) 32px;
     align-items: center;
     justify-content: space-between;
-    min-height: 28px;
+    min-height: 32px;
   }
 
   .mobile-settings-action {
     display: inline-grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 8px;
@@ -3427,7 +3491,7 @@ body.recording-mode-active .progress-control {
   }
 
   .progress-control {
-    right: 18px !important;
+    right: var(--mobile-ui-right) !important;
     left: auto !important;
     width: 230px;
     padding: 6px 8px;
@@ -3474,9 +3538,9 @@ body.recording-mode-active .progress-control {
 
   body.preview-mode-active .preview-controls {
     position: fixed;
-    right: 10px;
+    right: var(--mobile-ui-right);
     bottom: calc(10px + env(safe-area-inset-bottom));
-    left: 10px;
+    left: var(--mobile-ui-left);
     z-index: 220;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3497,9 +3561,9 @@ body.recording-mode-active .progress-control {
   }
 
   body.recording-mode-active .recording-controls {
-    right: 10px;
+    right: var(--mobile-ui-right);
     bottom: calc(10px + env(safe-area-inset-bottom));
-    left: 10px;
+    left: var(--mobile-ui-left);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3516,7 +3580,7 @@ body.recording-mode-active .progress-control {
 
   .home-btn {
     top: calc(10px + env(safe-area-inset-top));
-    left: 10px;
+    left: var(--mobile-ui-left);
     display: flex;
     align-items: center;
     height: 36px;
@@ -3542,7 +3606,7 @@ body.recording-mode-active .progress-control {
 
   .github-link {
     top: calc(20px + env(safe-area-inset-top));
-    right: 76px;
+    right: calc(var(--mobile-ui-right) + 64px);
     width: 16px;
     height: 16px;
   }
