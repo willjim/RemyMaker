@@ -6,7 +6,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parsePLY, parseSplat } from './plyParser.js';
 import { ParticleSystem } from './particleSystem.js?v=6.4';
-import { createSplatArrival } from './splatEffects.js?v=1.1';
+import { createSplatArrival } from './splatEffects.js?v=1.2';
+import {
+  createFlightTimeline, getManualTimelineTimes, normalizeManualTimelineTimes,
+  moveTimelineKeyframe, scaleTimelineTimes, MIN_TIMELINE_SEGMENT,
+} from './flightTimeline.js?v=1.0';
 import { SceneParticleOverlay } from './sceneParticleOverlay.js?v=1.1';
 import { GestureControl } from './gestureControl.js?v=1.1';
 import { extractPLYFromUrl, downloadPLY } from './remyLoader.js?v=1.3';
@@ -178,6 +182,10 @@ const state = {
   cameraMotionDistances: null,
   cameraMotionTotal: 0,
   cameraModeActive: false,  // true when camera path panel is visible
+  flightEditor: {
+    time: 0, initialRenderer: null, events: [], basePose: null, frameHeld: false,
+    paused: false, seeking: false, seekRevision: 0,
+  },
   previewActive: false,     // true during flight preview
   previewTime: 0.0,
   previewStart: null,
@@ -3067,6 +3075,7 @@ function applyTranslations(lang) {
   // Update toggle button text dynamically (Spark 3DGS vs Point Cloud)
   updateRendererUI();
   renderFlightTimingPanel();
+  updateFlightTimelineUI();
   
   // Update play/reverse button text based on language and state
   if (typeof updatePlayButtonUI === 'function') {
@@ -3287,6 +3296,7 @@ function rememberRemyLink(url, name) {
  * Load model from a supported share URL.
  */
 async function loadFromUrl({ rememberInHistory = true } = {}) {
+  if (isTimelineBusy() || state.previewActive) return;
   const url = dom.urlInput.value.trim();
   if (!url) {
     showToast('Please enter a Remy3D, Kiri Engine, or Insta360 share URL', 'error');
@@ -3372,6 +3382,7 @@ async function loadFromUrl({ rememberInHistory = true } = {}) {
  * Load model from local file.
  */
 async function loadFromFile(file) {
+  if (isTimelineBusy() || state.previewActive) return;
   state.initialCameraPosition = null; // Clear URL camera position
   showLoading(`Loading: ${file.name}`);
   try {
@@ -3483,6 +3494,13 @@ async function processBuffer(buffer, name, isFreshLoad = false, options = {}) {
   state.modelZoomScale = 1.0;
   state.initialZoomDist = null;
   state.keyframes = [];
+  Object.assign(state.flightEditor, {
+    time: 0, initialRenderer: null, events: [], basePose: null, frameHeld: false,
+    paused: false, seekRevision: state.flightEditor.seekRevision + 1,
+  });
+  if (state.previewActive || state.previewCompleted) {
+    stopPreviewFlight({ reopenPanel: false, keepTimeline: false, restoreStart: false });
+  }
   state.flightTiming.segmentDurations = [];
   state.flightTiming.totalDuration = 0;
   state.selectedKeyframeIndex = null;
@@ -4299,7 +4317,8 @@ function animate() {
     state.particleSystem.isGestureActive = state.isGestureActive;
   }
   // Gesture detection
-  if (state.isGestureActive && state.gestureControl && !isFlightZoomLocked() && !state.recordingActive && !state.exportPreparing) {
+  if (state.isGestureActive && state.gestureControl && !state.cameraModeActive && !isFlightZoomLocked()
+      && !state.recordingActive && !state.exportPreparing) {
     state.gestureControl.detect(performance.now());
     // Apply gesture target to particle system (only if not in manual mode)
     if (!state.manualControl && state.particleSystem) {
@@ -4331,14 +4350,16 @@ function animate() {
     if (state.previewActive) {
       const frame = evaluateFlightAtSeconds((performance.now() - state.previewStartedAt) / 1000);
       state.previewTime = frame.time;
+      state.flightEditor.time = frame.time;
       renderFlightFrame(frame, state.previewInitialRenderer, state.previewRendererTimeline);
+      flightTimelineUI?.setTime(frame.time, getTimelineSwitchState());
       previewFinished = frame.finished;
     } else if (state.recordingActive) {
       const frame = evaluateFlightAtSeconds((performance.now() - state.recordingStartedAt) / 1000, state.recordingSession.duration);
       state.recordTime = frame.time;
       renderExportFrame(state.recordingSession, frame.time);
       recordingFinished = frame.finished;
-    } else if (!state.exportPreparing && (!state.previewCompleted || state.modeTransition)) {
+    } else if (!state.exportPreparing && !state.flightEditor.frameHeld && (!state.previewCompleted || state.modeTransition)) {
       setSparkPrewarmActive(false);
       updateAnimationLayers(elapsed, delta);
       const progress = state.particleSystem.getProgress();
@@ -4381,7 +4402,8 @@ function animate() {
   }
 
   // Update controls (only if not in active camera flight, and only if model is loaded to bypass landing parallax override)
-  if (!state.previewActive && !state.previewCompleted && !state.recordingActive && !state.exportPreparing && state.isModelLoaded) {
+  if (!state.previewActive && !state.previewCompleted && !state.recordingActive && !state.exportPreparing && state.isModelLoaded
+      && !state.flightEditor.frameHeld) {
     state.controls.update();
   }
   updateSplatCropHandleDepthOpacity();
@@ -4485,7 +4507,7 @@ function setRendererMode(mode, source = 'timeline') {
 function getRendererAtTime(time, initialRenderer, timeline = []) {
   let renderer = initialRenderer || state.settings.renderer;
   for (const event of timeline) {
-    if (event.time > time + 0.0001) break;
+    if (event.time > time) break;
     renderer = event.renderer;
   }
   return renderer;
@@ -4525,50 +4547,28 @@ function setSparkPrewarmActive(active) {
 }
 
 function recordPreviewRendererSwitch(renderer) {
-  const time = Math.max(0, Math.min(state.previewTime, getCurrentFlightDuration()));
-  state.previewRendererTimeline = state.previewRendererTimeline.filter(
-    event => event.time < time - 0.0001
-  );
-  const previousRenderer = getRendererAtTime(
-    Math.max(0, time - 0.0002),
-    state.previewInitialRenderer,
-    state.previewRendererTimeline
-  );
-  if (previousRenderer !== renderer) {
-    state.previewRendererTimeline.push({
-      time, renderer, type: state.flightTiming.appearance.mode,
-      direction: state.flightTiming.appearance.direction,
-      duration: state.flightTiming.particle.transitionDuration,
-    });
-  }
+  const editor = state.flightEditor;
+  if (editor.time >= getCurrentFlightDuration()) return;
+  const slot = editTimelineEvent(null, { time: editor.time, renderer });
+  if (slot != null) editor.selectedEvent = slot;
+  updateFlightTimelineUI();
 }
 
 function recordExportRendererSwitch(renderer) {
-  const timeline = state.exportRendererTimeline;
-  const time = Math.max(0, Math.min(state.recordTime, getCurrentFlightDuration()));
-  const cutoffIndex = timeline.findIndex(event => event.time >= time - 0.0001);
-  if (cutoffIndex >= 0) timeline.splice(cutoffIndex);
-  const previousRenderer = getRendererAtTime(
-    Math.max(0, time - 0.0002),
-    state.exportInitialRenderer,
-    timeline
-  );
-  if (previousRenderer !== renderer) timeline.push({
-    time, renderer, type: state.flightTiming.appearance.mode,
-    direction: state.flightTiming.appearance.direction,
-    duration: state.flightTiming.particle.transitionDuration,
-  });
+  if (state.recordTime >= state.recordingSession.duration) return;
+  editTimelineEvent(null, { time: state.recordTime, renderer }, state.exportRendererTimeline);
 }
 
 function toggleRendererMode(source = 'gesture') {
   const newMode = state.settings.renderer === 'spark' ? 'particles' : 'spark';
-  setRendererMode(newMode, source);
   if (source === 'preview' && state.previewActive) {
     recordPreviewRendererSwitch(newMode);
-    state.modeTransition = null;
   } else if (source === 'recording' && state.recordingActive) {
     recordExportRendererSwitch(newMode);
-    state.modeTransition = null;
+  } else {
+    if (state.flightEditor.frameHeld) releaseTimelineFrame();
+    setRendererMode(newMode, source);
+    if (state.cameraModeActive) updateFlightTimelineUI();
   }
 }
 // ============================================================
@@ -4598,8 +4598,11 @@ function toggleCameraMode() {
       state.particleSystem.autoRotate = false;
     }
     restoreRememberedCameraPathFirstFrame();
+    state.flightEditor.initialRenderer ??= state.settings.renderer;
+    updateFlightTimelineUI();
     showToast('Camera Path Mode active: Adjust view and record keyframes!', 'success');
   } else {
+    releaseTimelineFrame();
     // Restore autoRotate
     if (state.particleSystem) {
       state.particleSystem.autoRotate = !state.rotationPaused;
@@ -4621,6 +4624,8 @@ function openCameraPathPanel() {
   dom.cameraPathPanel.classList.remove('hidden');
   document.body.classList.add('camera-path-active');
   restoreRememberedCameraPathFirstFrame();
+  state.flightEditor.initialRenderer ??= state.settings.renderer;
+  updateFlightTimelineUI();
 }
 const MOBILE_MAX_KEYFRAMES = 10;
 const CUSTOM_KEYFRAME_SEGMENT_DURATION = 2.0;
@@ -4637,6 +4642,10 @@ async function prepareAnimationLayers() {
   try {
     if (state.splatEraser?.active) setSplatEraserActive(false, { silent: true });
     if (!state.splatMesh) return;
+    if (state.splatEraser?.history.length && state.sparkPainterApi?.dyno) {
+      state.splatArrival ||= createSplatArrival(state.splatMesh, { THREE, dyno: state.sparkPainterApi.dyno });
+      await state.splatArrival.prepare?.();
+    }
     if (!state.flightTiming.appearance.overlayEnabled || !state.settings.particleEffectEnabled) return;
     if (!state.sceneParticleOverlay) state.sceneParticleOverlay = new SceneParticleOverlay(state.splatMesh, state.scene);
     const sdf = state.splatCropSdf;
@@ -4690,14 +4699,15 @@ function updateAnimationLayers(time, delta, { playback = null, session = null } 
   }
   const toSpark = (transition.to || state.settings.renderer) === 'spark';
   state.splatInterpolationTarget = toSpark ? 1 : 0;
-  const effect = playback ? evaluateEffectAtSeconds(time) : null;
+  const effect = playback ? evaluateEffectAtSeconds(time, session?.duration, session?.particleTiming) : null;
   const particles = state.particleSystem;
   if (effect && particles) {
     particles.autoRotate = false;
     particles.setStarFlightTiming(effect.duration, SPATIAL_EFFECT_GATHER_DURATION);
     particles.setProgressImmediate(state.settings.particleEffectEnabled ? effect.progress : 0);
   }
-  const fly = state.splatMesh && toSpark && transition.style === 'fly' && transition.amount < 1;
+  const fly = state.splatMesh && transition.style === 'fly' && transition.amount < 1
+    && (!playback || transition.from !== transition.to);
   if (fly && !state.splatArrival && state.sparkPainterApi?.dyno) {
     state.splatArrival = createSplatArrival(state.splatMesh, { THREE, dyno: state.sparkPainterApi.dyno });
   }
@@ -4708,11 +4718,17 @@ function updateAnimationLayers(time, delta, { playback = null, session = null } 
       // encoded frame falls after the switch timestamp.
       if (playback) {
         applyCurrentFlightProgress(evaluateFlightAtSeconds(transition.startTime, session?.duration).progress);
-        if (state.settings.particleEffectEnabled) particles?.setProgressImmediate(evaluateEffectAtSeconds(transition.startTime).progress);
+        if (state.settings.particleEffectEnabled) {
+          particles?.setProgressImmediate(evaluateEffectAtSeconds(transition.startTime, session?.duration, session?.particleTiming).progress);
+        }
       }
       syncSplatStarEffectTransform();
+      const crop = state.splatCropSdf;
+      const bounds = isSplatCropEnabled() && crop
+        ? new THREE.Box3(crop.position.clone().sub(crop.scale), crop.position.clone().add(crop.scale))
+        : undefined;
       state.splatArrival.begin({ camera: state.camera, direction: transition.direction,
-        startTime: transition.startTime, duration: transition.event.duration });
+        startTime: transition.startTime, duration: transition.event.duration, bounds });
       state.arrivalEvent = transition.event;
       if (playback) {
         applyCurrentFlightProgress(evaluateFlightAtSeconds(time, session?.duration).progress);
@@ -4720,7 +4736,7 @@ function updateAnimationLayers(time, delta, { playback = null, session = null } 
       }
     }
     syncSplatStarEffectTransform();
-    state.splatArrival.update(transition.amount);
+    state.splatArrival.update(toSpark ? transition.amount : 1 - transition.amount);
     state.splatMesh.opacity = 1;
   } else {
     if (state.arrivalEvent) { state.splatArrival?.reset(); state.arrivalEvent = null; }
@@ -4766,11 +4782,11 @@ function getCurrentFlightDuration() {
   return Math.max(0, Number(state.flightTiming.totalDuration) || Math.max(0, (state.keyframes.length - 1) * CUSTOM_KEYFRAME_SEGMENT_DURATION));
 }
 
-function getActiveParticleEffectDuration() {
-  const configured = state.flightTiming.particle.duration;
+function getActiveParticleEffectDuration(particle = state.flightTiming.particle, flightDuration = getCurrentFlightDuration()) {
+  const configured = particle.duration;
   if (configured !== null && Number.isFinite(Number(configured))) return Math.max(0.05, Number(configured));
   const effectId = Math.round(Number(state.settings.scatterEffect) || 0);
-  if (effectId === 20 && state.settings.presetFlight === 'spaceDepthPush') return getCurrentFlightDuration();
+  if (effectId === 20 && state.settings.presetFlight === 'spaceDepthPush') return Math.max(MIN_TIMELINE_SEGMENT, flightDuration);
   return effectId === 20 ? SPATIAL_EFFECT_GATHER_DURATION : EXPORT_GATHER_DURATION;
 }
 
@@ -4779,12 +4795,10 @@ function evaluateFlightAtSeconds(seconds, duration = getCurrentFlightDuration())
   return { time, duration, progress: duration > 0 ? time / duration : 1, finished: time >= duration };
 }
 
-function evaluateEffectAtSeconds(seconds) {
-  const effect = state.flightTiming.particle;
+function evaluateEffectAtSeconds(seconds, flightDuration = getCurrentFlightDuration(), effect = state.flightTiming.particle) {
   const time = Math.max(0, Number(seconds) || 0);
-  const flightDuration = getCurrentFlightDuration();
   const start = Math.max(0, Number(effect.start) || 0);
-  const duration = getActiveParticleEffectDuration();
+  const duration = getActiveParticleEffectDuration(effect, flightDuration);
   const progress = Math.max(0, Math.min(1, (time - start) / duration));
   let gather = 1 - progress;
   if (effect.direction === 'scatter') gather = progress;
@@ -4818,14 +4832,7 @@ function evaluateRendererTransitionAtSeconds(seconds, initialRenderer, timeline 
 }
 
 function invalidateRecordedEffectTimelines() {
-  if (state.previewActive || state.previewCompleted) {
-    state.previewRendererTimeline = [];
-    state.previewInitialRenderer = state.settings.renderer;
-  }
-  if (state.recordingActive || state.compositingActive) {
-    state.exportRendererTimeline = [];
-    state.exportInitialRenderer = state.settings.renderer;
-  }
+  updateFlightTimelineUI();
 }
 
 function renderFlightTimingPanel() {
@@ -4838,66 +4845,28 @@ function renderFlightTimingPanel() {
   }
   const zh = state.lang === 'zh';
   const timing = state.flightTiming;
-  const preset = state.settings.presetFlight;
-  const manual = timing.mode === 'manual';
-  const duration = getCurrentFlightDuration();
-  const segments = Math.max(0, state.keyframes.length - 1);
-  const effectsOpen = panel.querySelector('.flight-effect-controls')?.open;
-  const segmentFields = Array.from({ length: segments }, (_, index) => `
-    <label class="flight-timing-row flight-keyframe-duration">${zh ? `视角 ${index + 1} → ${index + 2}（秒）` : `View ${index + 1} → ${index + 2} (sec)`}
-      <input type="number" min="0.05" step="0.1" data-segment-duration="${index}" value="${Number(timing.segmentDurations[index] || CUSTOM_KEYFRAME_SEGMENT_DURATION).toFixed(1)}">
-    </label>`).join('');
   panel.innerHTML = `
-    <summary>${zh ? '时间设置' : 'Timing settings'}</summary>
-    <label class="flight-timing-row">${zh ? '总时长（秒）' : 'Total duration (sec)'}
-      <input type="number" min="0.1" step="0.1" data-flight-total value="${duration.toFixed(1)}" ${manual && preset === 'none' ? 'disabled' : ''}>
-    </label>
-    ${preset === 'none' ? `<label class="flight-timing-row"><input type="checkbox" data-flight-manual ${manual ? 'checked' : ''}> ${zh ? '手动设置每段时长' : 'Set each segment manually'}</label>${manual ? segmentFields : ''}` : ''}
-    <details class="flight-effect-controls" ${effectsOpen ? 'open' : ''}><summary>${zh ? '粒子与外观效果' : 'Particle & appearance effects'}</summary><div>
-      <strong>${zh ? '粒子效果' : 'Particle effect'}</strong>
-      <label class="flight-timing-row">${zh ? '开始时间（秒）' : 'Start (sec)'}<input type="number" min="0" step="0.1" data-effect-start value="${Number(timing.particle.start || 0).toFixed(1)}"></label>
-      <label class="flight-timing-row">${zh ? '持续时间（秒）' : 'Duration (sec)'}<input type="number" min="0.05" step="0.1" data-effect-duration placeholder="${getActiveParticleEffectDuration().toFixed(1)}" title="${zh ? '留空使用默认时长' : 'Leave empty for default duration'}" value="${timing.particle.duration == null ? '' : Number(timing.particle.duration).toFixed(1)}"></label>
-      <label class="flight-timing-row">${zh ? '方向' : 'Direction'}<select data-effect-direction><option value="gather">${zh ? '聚集' : 'Gather'}</option><option value="scatter">${zh ? '散开' : 'Scatter'}</option><option value="gather-scatter">${zh ? '聚集后散开' : 'Gather → scatter'}</option></select></label>
+    <summary>${zh ? '转场默认设置' : 'Transition defaults'}</summary>
       <label class="flight-timing-row">${zh ? '转场时长（秒）' : 'Transition (sec)'}<input type="number" min="0.05" step="0.1" data-effect-transition value="${Number(timing.particle.transitionDuration || 1.5).toFixed(1)}"></label>
-      <strong>${zh ? '外观过渡' : 'Appearance transition'}</strong>
-      <label class="flight-timing-row">${zh ? '方式' : 'Mode'}<select data-appearance-mode><option value="fade">${zh ? '淡入淡出' : 'Fade'}</option><option value="fly">${zh ? '飞入' : 'Fly'}</option></select></label>
-      <label class="flight-timing-row">${zh ? '方向' : 'Direction'}<select data-appearance-direction>${['all','left','right','top','bottom'].map((v) => `<option value="${v}">${({ all: zh ? '全部' : 'All', left: zh ? '左' : 'Left', right: zh ? '右' : 'Right', top: zh ? '上' : 'Top', bottom: zh ? '下' : 'Bottom' })[v]}</option>`).join('')}</select></label>
+      <label class="flight-timing-row">${zh ? '方式' : 'Mode'}<select data-appearance-mode><option value="fade">${zh ? '渐变' : 'Fade'}</option><option value="fly">${zh ? '逐区聚散' : 'Regional build / disperse'}</option></select></label>
+      <label class="flight-timing-row">${zh ? '方向' : 'Direction'}<select data-appearance-direction>${['all','left','right','top','bottom'].map((v) => `<option value="${v}">${({ all: zh ? '四周' : 'All sides', left: zh ? '左' : 'Left', right: zh ? '右' : 'Right', top: zh ? '上' : 'Top', bottom: zh ? '下' : 'Bottom' })[v]}</option>`).join('')}</select></label>
       <label class="flight-timing-row"><input type="checkbox" data-appearance-overlay ${timing.appearance.overlayEnabled ? 'checked' : ''}> ${zh ? '实景叠加粒子' : 'Particles over reality'}</label>
-    </div></details><div class="flight-timing-note">${zh ? '视频按运镜时长结束，超出部分的效果会截断。' : 'Video ends with the camera path; effects beyond it are cut off.'}</div>`;
-  const direction = panel.querySelector('[data-effect-direction]');
-  direction.value = timing.particle.direction;
+  `;
   panel.querySelector('[data-appearance-mode]').value = timing.appearance.mode;
   panel.querySelector('[data-appearance-direction]').value = timing.appearance.direction;
-  panel.oninput = (event) => {
-    const target = event.target;
-    const value = Number(target.value);
-    if (target.value === '' && target.type === 'number' && !target.matches('[data-effect-duration]')) return;
-    if (target.matches('[data-flight-total]') && Number.isFinite(value)) {
-      const nextDuration = Math.max(0.1, value);
-      if (state.settings.presetFlight !== 'none') timing.presetDurations[state.settings.presetFlight] = nextDuration;
-      else timing.totalDuration = nextDuration;
-    }
-    if (target.matches('[data-segment-duration]') && Number.isFinite(value)) timing.segmentDurations[Number(target.dataset.segmentDuration)] = Math.max(0.05, value);
-    if (target.matches('[data-effect-start]') && Number.isFinite(value)) timing.particle.start = Math.max(0, value);
-    if (target.matches('[data-effect-duration]')) timing.particle.duration = target.value === '' ? null : (Number.isFinite(value) ? Math.max(0.05, value) : timing.particle.duration);
-    if (target.matches('[data-effect-transition]') && Number.isFinite(value)) timing.particle.transitionDuration = Math.max(0.05, value);
-    invalidateRecordedEffectTimelines();
-  };
   panel.onchange = (event) => {
+    if (isTimelineBusy() || state.previewActive) return;
     const target = event.target;
-    if (target.matches('[data-flight-manual]')) {
-      if (target.checked) {
-        if (state.keyframes.length >= 2) initCameraCurves();
-        timing.segmentDurations = getAutomaticSegmentDurations();
-      } else timing.totalDuration = getCurrentFlightDuration();
-      timing.mode = target.checked ? 'manual' : 'automatic';
-      renderFlightTimingPanel();
-    } else if (target.matches('[data-effect-direction]')) timing.particle.direction = target.value;
+    if (target.matches('[data-effect-transition]')) {
+      const value = target.valueAsNumber;
+      timing.particle.transitionDuration = Number.isFinite(value) ? Math.max(MIN_TIMELINE_SEGMENT, value) : 1.5;
+      target.value = timing.particle.transitionDuration;
+    }
     else if (target.matches('[data-appearance-mode]')) timing.appearance.mode = target.value;
     else if (target.matches('[data-appearance-direction]')) timing.appearance.direction = target.value;
     else if (target.matches('[data-appearance-overlay]')) timing.appearance.overlayEnabled = target.checked;
     invalidateRecordedEffectTimelines();
-    if (target.type === 'number') renderFlightTimingPanel();
+    if (state.flightEditor.frameHeld) seekFlightEditor(state.flightEditor.time, { keepSelection: true });
   };
 }
 
@@ -4907,7 +4876,6 @@ function getAutomaticSegmentDurations() {
   if (count <= 1 || !state.cameraMotionProgress || !state.cameraMotionDistances) return Array(count).fill(totalDuration / Math.max(1, count));
   const boundaries = [0];
   for (let index = 1; index < count; index++) {
-    const target = index / count * state.cameraMotionTotal;
     let low = 0; let high = 1;
     for (let iteration = 0; iteration < 24; iteration++) {
       const mid = (low + high) / 2;
@@ -4918,7 +4886,275 @@ function getAutomaticSegmentDurations() {
     boundaries.push((low + high) * 0.5);
   }
   boundaries.push(1);
-  return boundaries.slice(1).map((end, index) => Math.max(0.05, (end - boundaries[index]) * totalDuration));
+  return boundaries.slice(1).map((end, index) => (end - boundaries[index]) * totalDuration);
+}
+
+let flightTimelineUI;
+
+function isTimelineBusy() {
+  return state.recordingActive || state.exportPreparing || state.compositingActive;
+}
+
+function getTimelineKeyframeTimes() {
+  if (!state.keyframes.length) return [];
+  if (state.keyframes.length === 1) return [0];
+  if (state.flightTiming.mode === 'manual') {
+    return getManualTimelineTimes(state.flightTiming.segmentDurations);
+  }
+  if (!state.cameraMotionProgress) initCameraCurves();
+  let elapsed = 0;
+  return [0, ...getAutomaticSegmentDurations().map(duration => (elapsed += duration))];
+}
+
+function getTimelineSwitchState() {
+  const editor = state.flightEditor;
+  return {
+    currentRenderer: getRendererAtTime(editor.time, editor.initialRenderer, editor.events),
+    switchDisabled: editor.time >= getCurrentFlightDuration() || editor.events.some(event => (
+      editor.time >= event.time && editor.time < event.time + event.duration
+    )),
+  };
+}
+
+function updateFlightTimelineUI() {
+  const panel = document.getElementById('flight-timeline');
+  if (!panel) return;
+  flightTimelineUI ||= createFlightTimeline(panel, handleFlightTimelineAction);
+  const editor = state.flightEditor;
+  const preset = state.settings.presetFlight !== 'none';
+  const canPlay = state.isModelLoaded && (preset || state.keyframes.length >= 2);
+  flightTimelineUI.update({
+    lang: state.lang,
+    duration: getCurrentFlightDuration(),
+    time: editor.time,
+    preset,
+    timingMode: state.flightTiming.mode,
+    keyframes: preset ? [] : getTimelineKeyframeTimes().map(time => ({ time })),
+    selectedKeyframe: state.selectedKeyframeIndex,
+    selectedEvent: editor.selectedEvent,
+    particle: { ...state.flightTiming.particle, duration: getActiveParticleEffectDuration(), enabled: state.settings.particleEffectEnabled },
+    initialRenderer: editor.initialRenderer || state.settings.renderer,
+    events: editor.events,
+    playing: state.previewActive,
+    paused: editor.paused,
+    canPlay,
+    canAdd: state.isModelLoaded && state.keyframes.length < getKeyframeLimit(),
+    locked: state.previewActive,
+    busy: isTimelineBusy(),
+    ...getTimelineSwitchState(),
+  });
+  editor.selectedEvent = null;
+}
+
+function setManualTimelineTimes(times) {
+  state.flightTiming.mode = 'manual';
+  state.flightTiming.segmentDurations = times.slice(1).map((time, index) => time - times[index]);
+  invalidateCustomCameraPath();
+}
+
+function releaseTimelineFrame() {
+  const editor = state.flightEditor;
+  editor.seekRevision++;
+  editor.pendingSeek = null;
+  editor.frameHeld = false;
+  resetAnimationLayers();
+  resetFlightParticles();
+}
+
+function ensureTimelineStart() {
+  const editor = state.flightEditor;
+  const preset = state.settings.presetFlight !== 'none';
+  editor.initialRenderer ??= state.settings.renderer;
+  if (!preset) {
+    if (state.keyframes.length < 2) return false;
+    if (!state.cameraPositionCurve) initCameraCurves();
+  }
+  if (!editor.basePose || !preset) {
+    editor.basePose = preset ? captureCurrentCameraPathFrame() : cloneCameraPathFrame(state.keyframes[0]);
+  }
+  state.previewStart = cloneCameraPathFrame(editor.basePose);
+  if (preset) {
+    const frame = editor.basePose;
+    const spherical = new THREE.Spherical().setFromVector3(frame.position.clone().sub(frame.target));
+    state.settings.flightStartSpherical = {
+      radius: spherical.radius, phi: spherical.phi, theta: spherical.theta, target: frame.target.clone(),
+    };
+    state.settings.originalFov = frame.fov;
+  }
+  return true;
+}
+
+function syncTimelineOrbitControls() {
+  const frame = captureCurrentCameraPathFrame();
+  // The filtered path target can differ from the rendered camera direction.
+  // Align the orbit pivot for subsequent pointer edits while keeping the pose.
+  const distance = Math.max(0.001, frame.position.distanceTo(frame.target));
+  state.camera.getWorldDirection(frame.target).multiplyScalar(distance).add(frame.position);
+  applyCameraPathFrame(frame);
+}
+
+async function seekFlightEditor(time, { keepSelection = false } = {}) {
+  if (!state.cameraModeActive || isTimelineBusy() || !Number.isFinite(time) || !ensureTimelineStart()) return;
+  const editor = state.flightEditor;
+  if (state.previewActive) pauseTimelinePlayback();
+  editor.time = evaluateFlightAtSeconds(time).time;
+  editor.frameHeld = true;
+  if (!keepSelection && state.selectedKeyframeIndex !== null) {
+    state.selectedKeyframeIndex = null;
+    updateFlightTimelineUI();
+  }
+  editor.pendingSeek = { revision: editor.seekRevision, mesh: state.splatMesh };
+  flightTimelineUI?.setTime(editor.time, getTimelineSwitchState());
+  if (editor.seeking) return;
+  editor.seeking = true;
+  try {
+    while (editor.pendingSeek) {
+      const request = editor.pendingSeek;
+      editor.pendingSeek = null;
+      try {
+        if (!state.animationLayersPreparing) await prepareAnimationLayers();
+        if (request.mesh !== state.splatMesh || request.revision !== editor.seekRevision
+            || !state.cameraModeActive || isTimelineBusy() || state.previewActive) continue;
+        if (editor.pendingSeek) continue;
+        prepareFlightStart();
+        renderFlightFrame(evaluateFlightAtSeconds(editor.time), editor.initialRenderer, editor.events);
+        const selected = state.selectedKeyframeIndex;
+        if (selected != null && state.keyframes[selected]) applyCameraPathFrame(state.keyframes[selected]);
+        else syncTimelineOrbitControls();
+        flightTimelineUI?.setTime(editor.time, getTimelineSwitchState());
+      } catch (error) {
+        if (request.mesh === state.splatMesh && request.revision === editor.seekRevision) {
+          releaseTimelineFrame();
+          showToast(error.message, 'error');
+        }
+      }
+    }
+  } finally {
+    editor.seeking = false;
+  }
+}
+
+function editTimelineEvent(index, changes, events = state.flightEditor.events) {
+  const existing = index == null ? null : events[index];
+  if (index != null && !existing) return null;
+  const source = {
+    time: state.flightEditor.time,
+    renderer: 'spark',
+    type: state.flightTiming.appearance.mode,
+    direction: state.flightTiming.appearance.direction,
+    duration: state.flightTiming.particle.transitionDuration,
+    ...existing, ...changes,
+  };
+  if (!Number.isFinite(source.time) || !Number.isFinite(source.duration)
+      || !['spark', 'particles'].includes(source.renderer)
+      || !['fade', 'fly'].includes(source.type)
+      || !['all', 'left', 'right', 'top', 'bottom'].includes(source.direction)) return null;
+  const insertion = existing ? index : events.findIndex(event => event.time > source.time);
+  const slot = insertion < 0 ? events.length : insertion;
+  const previous = events[slot - 1];
+  const following = events[slot + (existing ? 1 : 0)];
+  const earliest = previous ? previous.time + previous.duration : 0;
+  const latestEnd = following?.time ?? Infinity;
+  if (latestEnd - earliest < MIN_TIMELINE_SEGMENT - 1e-9) return null;
+  if (!existing && source.time < earliest - 1e-9) return null;
+  const duration = Math.max(MIN_TIMELINE_SEGMENT, source.duration);
+  if (existing && 'time' in changes) {
+    source.time = THREE.MathUtils.clamp(source.time, earliest, Math.max(earliest, latestEnd - duration));
+    source.duration = duration;
+  } else {
+    source.time = Math.max(earliest, source.time);
+    if (latestEnd - source.time < MIN_TIMELINE_SEGMENT - 1e-9) return null;
+    source.duration = Math.min(duration, latestEnd - source.time);
+  }
+  events.splice(slot, existing ? 1 : 0, source);
+  return slot;
+}
+
+function addTimelineSwitch(events = state.flightEditor.events, time = state.flightEditor.time, initial = state.flightEditor.initialRenderer) {
+  if (time >= getCurrentFlightDuration()) return null;
+  const renderer = getRendererAtTime(time, initial, events) === 'spark' ? 'particles' : 'spark';
+  return editTimelineEvent(null, { time, renderer }, events);
+}
+
+function handleFlightTimelineAction(action) {
+  if (!state.cameraModeActive || !state.isModelLoaded || isTimelineBusy()) return;
+  const editor = state.flightEditor;
+  const { type, time, index, changes } = action;
+  if (type === 'seek') return seekFlightEditor(time);
+  if (type === 'play') return startPreviewFlight();
+  if (type === 'pause') return pauseTimelinePlayback();
+  if (type === 'stop') return stopPreviewFlight();
+  if (type === 'export') return exportPathVideo({ fromPreview: state.previewActive || editor.frameHeld });
+  if (type === 'switch-renderer' || type === 'add-event') {
+    const slot = addTimelineSwitch();
+    if (slot != null) editor.selectedEvent = slot;
+    else showToast(state.lang === 'zh' ? '当前时间无法添加切换' : 'A switch cannot start here', 'info');
+    updateFlightTimelineUI();
+    if (!state.previewActive && slot != null) seekFlightEditor(editor.time, { keepSelection: true });
+    return;
+  }
+  if (state.previewActive) return;
+
+  switch (type) {
+    case 'select-keyframe': return jumpToKeyframe(index);
+    case 'add-keyframe': return addKeyframe();
+    case 'delete-keyframe': return removeKeyframe(index);
+    case 'update-keyframe':
+      if (!state.keyframes[index]) return;
+      state.keyframes[index] = captureCurrentCameraPathFrame();
+      invalidateCustomCameraPath();
+      break;
+    case 'move-keyframe': {
+      const times = getTimelineKeyframeTimes();
+      if (index <= 0 || index >= times.length - 1) return;
+      const moved = moveTimelineKeyframe(normalizeManualTimelineTimes(times), index, time);
+      setManualTimelineTimes(moved);
+      return jumpToKeyframe(index);
+    }
+    case 'set-duration': {
+      const duration = action.duration;
+      if (!Number.isFinite(duration) || duration < MIN_TIMELINE_SEGMENT) return;
+      if (state.settings.presetFlight !== 'none') {
+        state.flightTiming.presetDurations[state.settings.presetFlight] = Math.max(0.1, duration);
+      } else if (state.flightTiming.mode === 'manual') {
+        setManualTimelineTimes(scaleTimelineTimes(getTimelineKeyframeTimes(), duration));
+      } else state.flightTiming.totalDuration = duration;
+      break;
+    }
+    case 'set-timing-mode':
+      if (action.mode === 'manual') setManualTimelineTimes(normalizeManualTimelineTimes(getTimelineKeyframeTimes()));
+      else {
+        state.flightTiming.totalDuration = getCurrentFlightDuration();
+        state.flightTiming.mode = 'automatic';
+        invalidateCustomCameraPath();
+      }
+      break;
+    case 'set-particle':
+      if (Number.isFinite(changes.start)) state.flightTiming.particle.start = Math.max(0, changes.start);
+      if (Number.isFinite(changes.duration)) state.flightTiming.particle.duration = Math.max(MIN_TIMELINE_SEGMENT, changes.duration);
+      if (['gather', 'scatter', 'gather-scatter'].includes(changes.direction)) state.flightTiming.particle.direction = changes.direction;
+      break;
+    case 'set-initial-renderer':
+      if (!['spark', 'particles'].includes(action.renderer)) return;
+      editor.initialRenderer = action.renderer;
+      break;
+    case 'set-event': {
+      const slot = editTimelineEvent(index, changes);
+      if (slot != null) editor.selectedEvent = slot;
+      break;
+    }
+    case 'delete-event':
+      if (!editor.events[index]) return;
+      editor.events.splice(index, 1);
+      break;
+    default: return;
+  }
+  if ((type === 'set-duration' || type === 'set-timing-mode') && state.selectedKeyframeIndex != null) {
+    editor.time = getTimelineKeyframeTimes()[state.selectedKeyframeIndex] ?? editor.time;
+  }
+  editor.time = Math.min(editor.time, getCurrentFlightDuration());
+  updateFlightTimelineUI();
+  if (editor.frameHeld && type !== 'update-keyframe') seekFlightEditor(editor.time, { keepSelection: true });
 }
 
 function getManualCurveProgress(timeProgress) {
@@ -4971,132 +5207,93 @@ function invalidateCustomCameraPath() {
 }
 
 function addKeyframe() {
-  if (!state.isModelLoaded) return;
-  const keyframeLimit = getKeyframeLimit();
-  if (state.keyframes.length >= keyframeLimit) {
+  if (!state.isModelLoaded || isTimelineBusy() || state.previewActive || state.settings.presetFlight !== 'none') return;
+  const limit = getKeyframeLimit();
+  if (state.keyframes.length >= limit) {
     showToast(t('max-keyframes-allowed'), 'warning');
     return;
   }
-  
-  const previousSegmentCount = Math.max(0, state.keyframes.length - 1);
-  state.keyframes.push(captureCurrentCameraPathFrame());
-  if (state.keyframes.length > 1 && state.flightTiming.segmentDurations.length === previousSegmentCount) {
-    state.flightTiming.segmentDurations.push(CUSTOM_KEYFRAME_SEGMENT_DURATION);
-  }
-  if (state.flightTiming.mode === 'automatic' && state.flightTiming.totalDuration > 0 && previousSegmentCount > 0) {
-    state.flightTiming.totalDuration += CUSTOM_KEYFRAME_SEGMENT_DURATION;
-  }
-  state.selectedKeyframeIndex = state.keyframes.length - 1;
 
+  const editor = state.flightEditor;
+  const times = getTimelineKeyframeTimes();
+  const last = times.at(-1) ?? 0;
+  const frame = captureCurrentCameraPathFrame();
+  let index = state.keyframes.length;
+  if (times.length > 1 && editor.time < last - 1e-6) {
+    const nearby = times.findIndex(time => Math.abs(time - editor.time) < MIN_TIMELINE_SEGMENT - 1e-9);
+    if (nearby >= 0) return jumpToKeyframe(nearby);
+    index = times.findIndex(time => time > editor.time);
+    times.splice(index, 0, editor.time);
+    setManualTimelineTimes(normalizeManualTimelineTimes(times, last));
+  } else if (times.length) {
+    editor.time = last + CUSTOM_KEYFRAME_SEGMENT_DURATION;
+    if (state.flightTiming.mode === 'manual') {
+      times.push(editor.time);
+      setManualTimelineTimes(times);
+    } else state.flightTiming.totalDuration = editor.time;
+  } else editor.time = 0;
+
+  state.keyframes.splice(index, 0, frame);
+  state.selectedKeyframeIndex = index;
   invalidateCustomCameraPath();
   updateKeyframeUI();
-  showToast(`Keyframe ${state.keyframes.length} recorded!`, 'success');
+  showToast(`Keyframe ${index + 1} recorded!`, 'success');
 }
+
 function clearKeyframes() {
+  if (isTimelineBusy() || state.previewActive) return;
   state.keyframes = [];
   state.flightTiming.segmentDurations = [];
   state.flightTiming.totalDuration = 0;
   state.selectedKeyframeIndex = null;
+  state.flightEditor.time = 0;
+  releaseTimelineFrame();
   invalidateCustomCameraPath();
   updateKeyframeUI();
   showToast('All keyframes cleared', 'info');
 }
+
 function updateKeyframeUI() {
-  dom.keyframeList.innerHTML = '';
-  
-  state.keyframes.forEach((kf, i) => {
-    const item = document.createElement('div');
-    item.className = 'keyframe-item';
-    item.classList.toggle('selected', state.selectedKeyframeIndex === i);
-    item.setAttribute('aria-current', state.selectedKeyframeIndex === i ? 'true' : 'false');
-    
-    const jumpButton = document.createElement('button');
-    jumpButton.type = 'button';
-    jumpButton.className = 'keyframe-jump';
-    jumpButton.textContent = `${state.lang === 'zh' ? '视角' : 'Viewpoint'} ${i + 1}`;
-    jumpButton.title = state.lang === 'zh'
-      ? `跳转到视角 ${i + 1}`
-      : `Go to viewpoint ${i + 1}`;
-    jumpButton.setAttribute('aria-pressed', state.selectedKeyframeIndex === i ? 'true' : 'false');
-    jumpButton.addEventListener('click', () => jumpToKeyframe(i));
-    item.appendChild(jumpButton);
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn-remove';
-    removeBtn.textContent = '✕';
-    removeBtn.title = 'Remove keyframe';
-    removeBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      removeKeyframe(i);
-    });
-    item.appendChild(removeBtn);
-    
-    dom.keyframeList.appendChild(item);
-  });
-
-  requestAnimationFrame(() => {
-    dom.keyframeList.scrollLeft = dom.keyframeList.scrollWidth;
-  });
-  
   dom.keyframeCount.textContent = state.keyframes.length;
   if (dom.keyframeLimit) {
-    dom.keyframeLimit.textContent = Number.isFinite(getKeyframeLimit())
-      ? `/${getKeyframeLimit()}`
-      : '';
+    dom.keyframeLimit.textContent = Number.isFinite(getKeyframeLimit()) ? `/${getKeyframeLimit()}` : '';
   }
-  if (state.settings.presetFlight !== 'none') {
-    dom.btnPreviewPath.disabled = false;
-    dom.btnHeaderPreview.disabled = false;
-    dom.btnExportVideo.disabled = false;
-  } else {
-    dom.btnPreviewPath.disabled = state.keyframes.length < 2;
-    dom.btnHeaderPreview.disabled = state.keyframes.length < 2;
-    dom.btnExportVideo.disabled = state.keyframes.length < 2;
-  }
+  const disabled = state.settings.presetFlight === 'none' && state.keyframes.length < 2;
+  dom.btnPreviewPath.disabled = disabled;
+  dom.btnHeaderPreview.disabled = disabled;
+  dom.btnExportVideo.disabled = disabled;
   renderFlightTimingPanel();
-}
-
-function updateSelectedKeyframeUI() {
-  Array.from(dom.keyframeList.children).forEach((item, index) => {
-    const selected = state.selectedKeyframeIndex === index;
-    item.classList.toggle('selected', selected);
-    item.setAttribute('aria-current', selected ? 'true' : 'false');
-    item.querySelector('.keyframe-jump')?.setAttribute('aria-pressed', selected ? 'true' : 'false');
-  });
+  updateFlightTimelineUI();
 }
 
 function jumpToKeyframe(index) {
   const frame = state.keyframes[index];
-  if (!frame || state.previewActive || state.recordingActive || state.compositingActive) return;
-  applyCameraPathFrame(frame);
+  if (!frame || state.previewActive || isTimelineBusy()) return;
   state.selectedKeyframeIndex = index;
-  updateSelectedKeyframeUI();
-  showToast(
-    state.lang === 'zh' ? `已跳转到视角 ${index + 1}` : `Viewpoint ${index + 1} restored`,
-    'info',
-    1800
-  );
+  const editor = state.flightEditor;
+  editor.time = getTimelineKeyframeTimes()[index] ?? 0;
+  if (state.keyframes.length < 2) applyCameraPathFrame(frame);
+  else seekFlightEditor(editor.time, { keepSelection: true });
+  updateFlightTimelineUI();
 }
 
 function removeKeyframe(index) {
-  const oldSegmentCount = Math.max(0, state.keyframes.length - 1);
-  if (state.flightTiming.segmentDurations.length === oldSegmentCount && oldSegmentCount > 0) {
-    if (index === 0) state.flightTiming.segmentDurations.shift();
-    else if (index === oldSegmentCount) state.flightTiming.segmentDurations.pop();
-    else {
-      const merged = Number(state.flightTiming.segmentDurations[index - 1]) + Number(state.flightTiming.segmentDurations[index]);
-      state.flightTiming.segmentDurations.splice(index - 1, 2, merged);
-    }
-  }
+  if (!state.keyframes[index] || state.previewActive || isTimelineBusy()) return;
+  const times = getTimelineKeyframeTimes();
   state.keyframes.splice(index, 1);
-  if (state.selectedKeyframeIndex === index) {
-    state.selectedKeyframeIndex = null;
-  } else if (state.selectedKeyframeIndex > index) {
-    state.selectedKeyframeIndex -= 1;
-  }
+  times.splice(index, 1);
+  const origin = times[0] || 0;
+  const remaining = times.map(time => time - origin);
+  if (state.flightTiming.mode === 'manual') setManualTimelineTimes(remaining);
+  else state.flightTiming.totalDuration = remaining.at(-1) || 0;
+
+  const editor = state.flightEditor;
+  editor.time = Math.min(Math.max(0, editor.time - origin), getCurrentFlightDuration());
+  state.selectedKeyframeIndex = null;
   invalidateCustomCameraPath();
+  if (state.keyframes.length < 2) releaseTimelineFrame();
+  else if (editor.frameHeld) seekFlightEditor(editor.time);
   updateKeyframeUI();
-  showToast('Keyframe removed', 'info');
 }
 
 function createMonotoneTimeDerivatives(values, times) {
@@ -6062,10 +6259,6 @@ function rememberCameraPathFirstFrame(frame) {
   state.previewStart = cloneCameraPathFrame(frame);
 }
 
-function capturePreviewStart() {
-  rememberCameraPathFirstFrame(captureCurrentCameraPathFrame());
-}
-
 function restorePreviewCameraStart() {
   if (!state.previewStart) return;
   applyCameraPathFrame(state.previewStart);
@@ -6141,21 +6334,33 @@ function updatePreviewStopButton() {
 
 function finishPreviewCycle() {
   if (!state.previewActive) return;
-  state.previewActive = false;
-  state.previewCompleted = true;
-  state.controls.enabled = false;
-  setPreviewControlsActive(true);
-  updatePreviewStopButton();
-  dom.btnPreviewPath.textContent = t('btn-preview-path');
+  pauseTimelinePlayback();
+  state.flightEditor.paused = false;
+  updateFlightTimelineUI();
   showToast(t('flight-preview-finished'), 'success');
 }
 
+function pauseTimelinePlayback() {
+  if (!state.previewActive) return;
+  state.previewActive = false;
+  state.flightEditor.paused = true;
+  state.flightEditor.frameHeld = true;
+  document.body.classList.remove('timeline-editor-playback');
+  setPreviewControlsActive(false);
+  state.controls.enabled = true;
+  syncTimelineOrbitControls();
+  dom.btnPreviewPath.textContent = t('btn-preview-path');
+  updateFlightTimelineUI();
+}
+
 function stopPreviewFlight({ reopenPanel = true, keepTimeline = true, restoreStart = true } = {}) {
-  resetAnimationLayers();
+  releaseTimelineFrame();
+  state.flightEditor.paused = false;
+  if (reopenPanel) state.flightEditor.time = 0;
   state.previewActive = false;
   state.previewCompleted = false;
+  document.body.classList.remove('timeline-editor-playback');
   setPreviewControlsActive(false);
-  resetFlightParticles();
   state.controls.enabled = true;
   if (!keepTimeline) {
     state.previewInitialRenderer = null;
@@ -6186,46 +6391,41 @@ function stopPreviewFlight({ reopenPanel = true, keepTimeline = true, restoreSta
 async function startPreviewFlight() {
   if (!state.isModelLoaded || state.animationLayersPreparing || state.exportPreparing
       || state.recordingActive || state.compositingActive || state.previewActive || state.previewCompleted) return;
-  if (state.settings.presetFlight === 'none' && (state.keyframes.length < 2 || !initCameraCurves())) return;
+  if (!ensureTimelineStart()) return;
 
   const mesh = state.splatMesh;
+  const editor = state.flightEditor;
+  const revision = ++editor.seekRevision;
   try { await prepareAnimationLayers(); } catch (error) {
     if (mesh === state.splatMesh) {
       showToast(`${state.lang === 'zh' ? '特效准备失败' : 'Effect preparation failed'}: ${error.message}`, 'error');
     }
     return;
   }
-  if (mesh !== state.splatMesh || !state.cameraModeActive) return;
+  if (mesh !== state.splatMesh || revision !== editor.seekRevision || !state.cameraModeActive) return;
 
-  capturePreviewStart();
-  state.previewInitialRenderer = state.settings.renderer;
-  state.previewRendererTimeline = [];
+  rememberCameraPathFirstFrame(editor.basePose);
+  state.previewInitialRenderer = editor.initialRenderer;
+  state.previewRendererTimeline = editor.events;
   state.cancelScatterAnimation?.();
   resetAnimationLayers();
   resetFlightParticles();
 
-  if (state.settings.presetFlight !== 'none') {
-    const offset = new THREE.Vector3().copy(state.camera.position).sub(state.controls.target);
-    const spherical = new THREE.Spherical().setFromVector3(offset);
-    state.settings.flightStartSpherical = {
-      radius: spherical.radius,
-      phi: spherical.phi,
-      theta: spherical.theta,
-      target: state.controls.target.clone(),
-    };
-    state.settings.originalFov = state.camera.fov;
-  }
-
-  collapseCameraPathPanel();
+  applyCameraPathFrame(editor.basePose);
   state.controls.enabled = false;
-  state.previewTime = 0;
+  state.previewTime = editor.time >= getCurrentFlightDuration() ? 0 : editor.time;
+  editor.time = state.previewTime;
+  editor.paused = false;
+  editor.frameHeld = false;
   state.previewActive = true;
-  state.previewStartedAt = performance.now();
+  state.previewStartedAt = performance.now() - state.previewTime * 1000;
+  document.body.classList.add('timeline-editor-playback');
   setPreviewControlsActive(true);
   prepareFlightStart();
-  renderFlightFrame(evaluateFlightAtSeconds(0), state.previewInitialRenderer, state.previewRendererTimeline);
+  renderFlightFrame(evaluateFlightAtSeconds(state.previewTime), state.previewInitialRenderer, state.previewRendererTimeline);
   dom.btnPreviewPath.textContent = state.lang === 'zh' ? '停止' : 'Stop Preview';
   updatePreviewStopButton();
+  updateFlightTimelineUI();
 }
 
 function isMobileViewport() {
@@ -6596,22 +6796,21 @@ function restoreCompositionPreviewControls(session) {
   restoreAfterExport(session);
   state.previewStart = session.restorePreviewStart;
   state.previewInitialRenderer = session.initialRenderer;
-  state.previewRendererTimeline = session.rendererTimeline.map(event => ({ ...event }));
+  state.previewRendererTimeline = state.flightEditor.events;
   state.previewActive = false;
-  state.previewCompleted = true;
+  state.previewCompleted = false;
   state.previewTime = session.returnToPreview ? session.restorePreviewTime : 0;
+  state.flightEditor.time = session.restorePreviewTime;
+  state.flightEditor.paused = session.returnToPreview;
+  openCameraPathPanel();
   if (session.returnToPreview && session.restorePreviewPose) {
-    renderFlightFrame(evaluateFlightAtSeconds(state.previewTime, session.duration), session.initialRenderer, session.rendererTimeline);
+    seekFlightEditor(state.previewTime, { keepSelection: true });
   }
-  state.controls.enabled = false;
-  setPreviewControlsActive(true);
-  updatePreviewStopButton();
 }
 
 function finishExportBlob(blob, filename, session, type = 'video/mp4') {
-  restoreAfterExport(session);
+  restoreCompositionPreviewControls(session);
   rememberCameraPathFirstFrame(session.cameraPathFirstFrame || session.startCamera);
-  state.restoreCameraPathFirstFrameOnOpen = true;
   if (!blob?.size) {
     showToast(
       state.lang === 'zh'
@@ -6782,7 +6981,7 @@ function startMediaRecorderFallback(session) {
   };
   recorder.onerror = event => {
     recorderFailed = true;
-    restoreAfterExport(session);
+    restoreCompositionPreviewControls(session);
     showToast(
       `${state.lang === 'zh' ? '视频导出失败' : 'Video export failed'}: ${event.error?.message || 'Recorder error'}`,
       'error',
@@ -6831,7 +7030,7 @@ function startMediaRecorderFallback(session) {
   );
 }
 
-async function exportPathVideo({ fromPreview = false } = {}) {
+async function exportPathVideo({ fromPreview = state.previewActive || state.flightEditor.frameHeld } = {}) {
   if (!state.isModelLoaded) return;
   if (state.settings.presetFlight === 'none') {
     if (state.keyframes.length < 2 || !initCameraCurves()) {
@@ -6844,20 +7043,21 @@ async function exportPathVideo({ fromPreview = false } = {}) {
     return;
   }
   if (state.previewActive && !fromPreview) return;
+  if (!ensureTimelineStart()) return;
 
   const mesh = state.splatMesh;
+  const editor = state.flightEditor;
+  const revision = ++editor.seekRevision;
   try { await prepareAnimationLayers(); } catch (error) {
     if (mesh === state.splatMesh) {
       showToast(`${state.lang === 'zh' ? '特效准备失败' : 'Effect preparation failed'}: ${error.message}`, 'error');
     }
     return;
   }
-  if (mesh !== state.splatMesh || (fromPreview && !isFlightZoomLocked()) || (!fromPreview && !state.cameraModeActive)) return;
+  if (mesh !== state.splatMesh || revision !== editor.seekRevision || !state.cameraModeActive) return;
 
   const restoreCamera = captureCurrentCameraPathFrame();
-  const savedPreviewStart = fromPreview && state.previewStart
-    ? cloneCameraPathFrame(state.previewStart)
-    : captureCurrentCameraPathFrame();
+  const savedPreviewStart = cloneCameraPathFrame(editor.basePose);
   rememberCameraPathFirstFrame(savedPreviewStart);
   const restoreRenderer = state.settings.renderer;
   const restoreInterpolation = state.splatInterpolation;
@@ -6866,34 +7066,14 @@ async function exportPathVideo({ fromPreview = false } = {}) {
   const restoreParticleProgress = state.particleSystem?.getProgress?.() ?? 0;
   const restoreOriginalFov = state.settings.originalFov;
   const restoreFlightStartSpherical = { ...state.settings.flightStartSpherical };
-  const initialRenderer = fromPreview && state.previewInitialRenderer
-    ? state.previewInitialRenderer
-    : state.settings.renderer;
-  const rendererTimeline = fromPreview
-    ? state.previewRendererTimeline.map(event => ({ ...event }))
-    : [];
-  const restorePreviewTime = state.previewTime;
-  const restorePreviewPose = fromPreview && !state.modeTransition
-    && state.settings.renderer === getRendererAtTime(restorePreviewTime, initialRenderer, rendererTimeline);
+  const initialRenderer = editor.initialRenderer;
+  const rendererTimeline = editor.events.map(event => ({ ...event }));
+  const restorePreviewTime = editor.time;
+  const restorePreviewPose = fromPreview;
 
   state.cancelScatterAnimation?.();
   resetFlightParticles();
-  if (fromPreview) {
-    stopPreviewFlight({ reopenPanel: false, keepTimeline: true });
-    restorePreviewCameraStart();
-  }
-
-  if (state.settings.presetFlight !== 'none') {
-    state.settings.originalFov = state.camera.fov;
-    const offset = new THREE.Vector3().copy(state.camera.position).sub(state.controls.target);
-    const spherical = new THREE.Spherical().setFromVector3(offset);
-    state.settings.flightStartSpherical = {
-      radius: spherical.radius,
-      phi: spherical.phi,
-      theta: spherical.theta,
-      target: state.controls.target.clone(),
-    };
-  }
+  stopPreviewFlight({ reopenPanel: false });
 
   const mobileExport = isMobileViewport();
   const originalWidth = window.innerWidth;
@@ -6912,10 +7092,11 @@ async function exportPathVideo({ fromPreview = false } = {}) {
     fps: EXPORT_FPS,
     bitrate: EXPORT_VIDEO_BITRATE,
     duration: getCurrentFlightDuration(),
+    particleTiming: { ...state.flightTiming.particle },
     originalWidth,
     originalHeight,
     pixelRatio: state.renderer.getPixelRatio(),
-    startCamera: captureCurrentCameraPathFrame(),
+    startCamera: savedPreviewStart,
     restoreCamera,
     restoreRenderer,
     restoreInterpolation,
@@ -6997,11 +7178,11 @@ async function exportPathVideo({ fromPreview = false } = {}) {
 // ============================================================
 function setupEventListeners() {
   state.controls?.addEventListener('start', () => {
-    if (state.selectedKeyframeIndex === null) return;
-    state.selectedKeyframeIndex = null;
-    updateSelectedKeyframeUI();
+    if (state.cameraModeActive && !state.previewActive && !state.flightEditor.frameHeld
+        && state.settings.presetFlight !== 'none') {
+      state.flightEditor.basePose = null;
+    }
   });
-
   const renderCanvas = state.renderer?.domElement;
   renderCanvas?.addEventListener('pointerdown', beginSplatEraserStroke, { capture: true });
   renderCanvas?.addEventListener('pointerdown', beginSplatCropDrag, { capture: true });
@@ -7354,7 +7535,7 @@ function setupEventListeners() {
   dom.btnRecordingToggleRenderer.addEventListener('click', () => toggleRendererMode('recording'));
   dom.btnRecordingStop.addEventListener('click', stopExportRecording);
   dom.btnCancelComposition.addEventListener('click', requestStopComposition);
-  dom.btnExportVideo.addEventListener('click', exportPathVideo);
+  dom.btnExportVideo.addEventListener('click', () => exportPathVideo());
 
   dom.btnMobileParticleSettings?.addEventListener('click', () => {
     setMobileSettingsMode('particles');
@@ -7384,7 +7565,18 @@ function setupEventListeners() {
   // Preset flight selection listener
   if (dom.selectPresetFlight) {
     dom.selectPresetFlight.addEventListener('change', (e) => {
+      if (state.previewActive || isTimelineBusy()) {
+        e.target.value = state.settings.presetFlight;
+        return;
+      }
       const preset = e.target.value;
+      if (state.flightEditor.basePose && state.flightEditor.frameHeld) {
+        applyCameraPathFrame(state.flightEditor.basePose);
+      }
+      releaseTimelineFrame();
+      state.flightEditor.basePose = null;
+      state.flightEditor.time = 0;
+      state.flightEditor.paused = false;
       state.settings.presetFlight = preset;
       
       if (preset !== 'none') {
@@ -7532,19 +7724,30 @@ function setupEventListeners() {
   });
   
   const applyScatterEffectSelection = (value) => {
+    if (state.previewActive || isTimelineBusy()) {
+      dom.cameraScatterEffect.value = state.settings.particleEffectEnabled ? String(state.settings.scatterEffect) : 'none';
+      return;
+    }
     state.cancelScatterAnimation?.();
     if (value === 'none') {
       state.settings.particleEffectEnabled = false;
       state.particleSystem?.setProgressImmediate(0);
       dom.progressSlider.value = 0;
       dom.progressValue.textContent = '0%';
+      updateFlightTimelineUI();
+      if (state.flightEditor.frameHeld) seekFlightEditor(state.flightEditor.time, { keepSelection: true });
       return;
     }
     state.settings.particleEffectEnabled = true;
     const effectIndex = parseFloat(value);
     state.settings.scatterEffect = effectIndex;
+    updateFlightTimelineUI();
     if (state.isModelLoaded && state.particleSystem) {
       state.particleSystem.setScatterEffect(effectIndex);
+      if (state.flightEditor.frameHeld) {
+        seekFlightEditor(state.flightEditor.time, { keepSelection: true });
+        return;
+      }
       // Auto-play the scatter effect to demonstrate it (full cycle: 0 -> 100 -> 0)
       state.particleSystem.setProgressImmediate(0.0);
       dom.progressSlider.value = 0;
@@ -7661,7 +7864,7 @@ function setupEventListeners() {
   // browser pinch zoom and Safari gesture zoom all stay locked until preview
   // mode is explicitly closed.
   window.addEventListener('wheel', (e) => {
-    if (isFlightZoomLocked() || state.recordingActive) {
+    if ((isFlightZoomLocked() || state.recordingActive) && !dom.cameraPathPanel.contains(e.target)) {
       e.preventDefault();
     }
   }, { passive: false });

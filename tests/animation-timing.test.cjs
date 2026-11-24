@@ -23,6 +23,7 @@ const timingFunctions = [
   'getActiveParticleEffectDuration',
   'evaluateEffectAtSeconds',
   'evaluateRendererTransitionAtSeconds',
+  'editTimelineEvent',
   'getRendererAtTime',
   'getManualCurveProgress',
   'createMonotoneTimeDerivatives',
@@ -32,6 +33,7 @@ const timingFunctions = [
 
 const context = vm.createContext({
   state: {
+    flightEditor: { time: 0, events: [] },
     settings: { presetFlight: 'none', scatterEffect: 0, renderer: 'particles' },
     keyframes: [{}, {}, {}],
     cameraKeyframeTimes: [0, 0.2, 1],
@@ -51,6 +53,7 @@ const context = vm.createContext({
   },
   THREE: { MathUtils: { clamp: (value, min, max) => Math.max(min, Math.min(max, value)), lerp: (a,b,t) => a+(b-a)*t } },
   CUSTOM_KEYFRAME_SEGMENT_DURATION: 2,
+  MIN_TIMELINE_SEGMENT: 0.05,
   SPATIAL_EFFECT_GATHER_DURATION: 4.75,
   EXPORT_GATHER_DURATION: 2.5,
 });
@@ -58,6 +61,7 @@ const context = vm.createContext({
 vm.runInContext(`${timingFunctions}\nglobalThis.timing = {
   getCurrentFlightDuration,
   evaluateEffectAtSeconds,
+  editTimelineEvent,
   evaluateRendererTransitionAtSeconds,
   getRendererAtTime,
   getManualCurveProgress,
@@ -118,6 +122,31 @@ test('interrupted renderer transitions are continuous and frame-rate independent
   assert.equal(context.timing.getRendererBlendAtSeconds(2, 'particles', events), .5);
   assert.equal(context.timing.getRendererBlendAtSeconds(2.5, 'particles', events), .25);
   assert.equal(context.timing.getRendererBlendAtSeconds(3, 'particles', events), 0);
+});
+
+test('adding a mode switch fits the gap and preserves later authored switches', () => {
+  const later = { time: 4, renderer: 'particles', duration: 1, type: 'fade', direction: 'all' };
+  const events = [later];
+  assert.equal(context.timing.editTimelineEvent(null, { time: 3.2, duration: 2, renderer: 'spark' }, events), 0);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].time + events[0].duration, later.time);
+  assert.equal(events[1], later);
+  assert.equal(context.timing.editTimelineEvent(null, { time: 3.5, renderer: 'particles' }, events), null);
+});
+
+test('retiming a switch clamps to its neighbors without changing the transition length', () => {
+  const events = [
+    { time: 0, renderer: 'spark', duration: 1, type: 'fade', direction: 'all' },
+    { time: 2, renderer: 'particles', duration: 1.5, type: 'fly', direction: 'left' },
+    { time: 4, renderer: 'spark', duration: 1, type: 'fade', direction: 'all' },
+  ];
+  context.timing.editTimelineEvent(1, { time: 4 }, events);
+  assert.equal(events[1].time, 2.5);
+  assert.equal(events[1].duration, 1.5);
+  assert.equal(events[1].type, 'fly');
+  assert.equal(events[1].direction, 'left');
+  context.timing.editTimelineEvent(1, { time: 0 }, events);
+  assert.equal(events[1].time, 1);
 });
 
 test('gather effect reaches exact start/end nodes and clamps outside its interval', () => {
