@@ -1081,14 +1081,18 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 /* Shared camera timeline */
 .camera-path-panel.flight-timeline-ready {
   --flight-panel-inset: 12px;
+  --flight-dock-height: min(420px, 44dvh);
+  --flight-summary-height: 34px;
   position: fixed;
   top: auto;
   bottom: max(16px, env(safe-area-inset-bottom));
   left: 50%;
   width: min(880px, calc(100vw - 32px));
-  max-height: min(54dvh, calc(100dvh - 100px));
+  max-height: var(--flight-dock-height);
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block-start: calc(var(--flight-summary-height) + 48px);
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
@@ -1107,35 +1111,9 @@ html.wechat-browser body.landing-mode .wechat-open-overlay:not(.dismissed) {
 }
 
 .flight-timeline-ready > :is(p, .keyframe-list),
-.flight-timeline-ready #btn-add-keyframe,
-.flight-timeline-ready .camera-actions > .camera-action-row:not(#custom-keyframe-actions),
+.flight-timeline-ready > .camera-actions,
 body.timeline-editor-playback #preview-controls {
   display: none !important;
-}
-
-.flight-timeline-ready .camera-actions {
-  position: static;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-}
-
-.flight-timeline-ready #custom-keyframe-actions {
-  justify-content: flex-end;
-}
-
-.flight-timeline-ready #custom-keyframe-actions #btn-clear-keyframes {
-  flex: 0 0 auto;
-  min-height: 30px;
-  padding: 5px 12px;
-  border-radius: 6px;
-  font-size: 11px !important;
-}
-
-.flight-transition-defaults {
-  margin-top: 8px;
-  padding-top: 3px;
-  border-top: 1px solid var(--border-glass);
 }
 
 body.timeline-editor-playback .flight-timeline-ready > :is(.camera-actions, .mobile-camera-options, .camera-option-item),
@@ -1160,19 +1138,60 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 }
 
 .flight-timeline-disclosure {
-  padding-top: 3px;
   border-top: 1px solid var(--border-glass);
 }
 
-.flight-timeline summary {
-  width: fit-content;
-  padding: 5px 6px 5px 2px;
+.flight-timeline-disclosure > summary {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  box-sizing: border-box;
+  height: var(--flight-summary-height);
+  padding: 7px 6px;
+  background: #121223;
+  border-radius: 6px 6px 0 0;
   font-weight: 600;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 .flight-timeline summary::marker {
   color: var(--text-secondary);
+}
+
+.flight-timeline-menu {
+  position: sticky;
+  top: var(--flight-summary-height);
+  z-index: 5;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 3px 4px;
+  background: #121223;
+  border-bottom: 1px solid var(--border-glass);
+}
+
+.flight-timeline-menu button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 1em/1.2 'Inter', sans-serif;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.flight-timeline-menu button[aria-pressed="true"] {
+  border-color: rgba(0, 245, 212, .25);
+  background: rgba(0, 245, 212, .1);
+  color: var(--accent-cyan);
+}
+
+.flight-timeline :is(.flight-timeline-main, .flight-timeline-editing, .flight-transition-defaults) {
+  min-width: 0;
 }
 
 .flight-timeline-controls,
@@ -1192,6 +1211,7 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   color: var(--text-secondary);
 }
 
@@ -1203,6 +1223,10 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
   background: #191a2c;
   color: var(--text-primary);
   font: inherit;
+}
+
+.flight-timeline-controls :is(select, input) {
+  min-width: 0;
 }
 
 .flight-timeline-controls input[type="number"] {
@@ -1240,9 +1264,13 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 }
 
 .flight-timeline-readout {
-  margin-left: auto;
   color: var(--accent-cyan);
   font-variant-numeric: tabular-nums;
+}
+
+.flight-ruler-readout {
+  line-height: 1.1;
+  overflow-wrap: anywhere;
 }
 
 .flight-timeline-scroll {
@@ -1401,18 +1429,34 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
 
 @media (max-width: 600px), (pointer: coarse) {
   .camera-path-panel.flight-timeline-ready {
-    --flight-panel-inset: 9px;
+    --flight-panel-inset: 7px;
     top: auto !important;
     right: var(--mobile-ui-right) !important;
     left: var(--mobile-ui-left) !important;
     bottom: var(--mobile-panel-bottom) !important;
     transform: none;
-    max-height: min(56dvh, calc(100dvh - 110px));
+    max-height: min(38dvh, 255px);
     padding: var(--flight-panel-inset);
   }
-  body.timeline-editor-playback .camera-path-panel.flight-timeline-ready {
-    bottom: calc(10px + env(safe-area-inset-bottom)) !important;
+
+  /* In timeline view the editing dock replaces, rather than stacks on, the toolbar.
+     The canvas still occupies the same pixels so composing a shot does not change FOV. */
+  .camera-path-panel.flight-timeline-ready:has(.flight-timeline-disclosure[open]) {
+    --flight-summary-height: 38px;
+    --flight-dock-height: min(264px, 40dvh);
+    right: max(6px, env(safe-area-inset-right)) !important;
+    left: max(6px, env(safe-area-inset-left)) !important;
+    bottom: calc(5px + env(safe-area-inset-bottom)) !important;
+    max-height: var(--flight-dock-height);
+    border-radius: 12px;
+    scroll-padding-block-start: 44px;
   }
+
+  .camera-path-panel.flight-timeline-ready:has(.flight-timeline-disclosure[open]) > :is(.camera-panel-header, .mobile-camera-options, .camera-option-item),
+  body.camera-path-active:has(.flight-timeline-ready:not(.hidden) .flight-timeline-disclosure[open]) .toolbar {
+    display: none !important;
+  }
+
   .flight-timeline-ready .camera-panel-header {
     margin: calc(-1 * var(--flight-panel-inset)) calc(-1 * var(--flight-panel-inset)) 0;
     top: calc(-1 * var(--flight-panel-inset));
@@ -1424,13 +1468,71 @@ body.camera-path-active:has(.flight-timeline-ready:not(.hidden)) :is(.progress-c
     color: var(--text-secondary);
     text-overflow: ellipsis;
   }
-  .flight-timeline { font-size: 11px; }
-  .flight-timeline-controls { gap: 4px 6px; }
-  .flight-timeline-controls :is(button, input, select) { min-height: 34px; }
-  .flight-timeline-tracks { grid-template-columns: 53px minmax(0, 1fr); }
-  .flight-track:not(.flight-ruler) { min-height: 34px; }
-  .flight-marker { height: 30px; min-width: 30px; }
-  .flight-timeline-ready #custom-keyframe-actions #btn-clear-keyframes { min-height: 34px; }
+  .flight-timeline { font-size: 12px; }
+  /* Share a single navigation row with the collapse button on small screens. */
+  .flight-timeline-disclosure[open] > summary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    padding: 0;
+    border-radius: 6px;
+    font-size: 0;
+    list-style: none;
+  }
+  .flight-timeline-disclosure[open] > summary::-webkit-details-marker { display: none; }
+  .flight-timeline-disclosure[open] > summary::after {
+    width: 7px;
+    height: 7px;
+    border-right: 1.5px solid var(--text-secondary);
+    border-bottom: 1.5px solid var(--text-secondary);
+    transform: translateY(-2px) rotate(45deg);
+    content: '';
+  }
+  .flight-timeline-menu {
+    top: 0;
+    min-height: var(--flight-summary-height);
+    margin-top: calc(-1 * var(--flight-summary-height));
+    padding: 1px 2px 2px 35px;
+  }
+  .flight-timeline-menu button {
+    min-height: 34px;
+    padding-inline: 5px;
+    flex: 1 1 auto;
+  }
+  .flight-timeline-controls { gap: 4px 5px; margin-top: 4px; }
+  .flight-timeline-controls :is(button, select, input[type="number"]) { min-height: 34px; }
+  /* Native iOS editors otherwise zoom the model viewport on field focus. */
+  .flight-timeline-controls :is(select, input[type="number"]) { font-size: 16px; }
+  .flight-timeline-controls select { max-width: min(49vw, 192px); }
+  .flight-timeline-controls input[type="number"] { width: 66px; }
+  .flight-timeline-controls input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
+  .flight-transport {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .flight-transport button { min-width: 0; padding-inline: 3px; line-height: 1.15; }
+  .flight-timeline-scroll { margin-top: 4px; padding: 2px 4px; }
+  .flight-timeline-tracks { grid-template-columns: 50px minmax(0, 1fr); gap: 2px 5px; }
+  .flight-track-label { left: -4px; padding-inline: 2px; }
+  .flight-track:not(.flight-ruler) { min-height: 28px; }
+  .flight-ruler { min-height: 30px; }
+  .flight-ticks { height: 11px; line-height: 11px; }
+  .flight-seek { height: 18px; }
+  .flight-marker { height: 26px; min-width: 27px; top: 1px; }
+}
+
+/* In short phone landscape the bottom third leaves too little room for three
+   tracks. A narrow inspector keeps the model and its center interactive. */
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 960px) {
+  .camera-path-panel.flight-timeline-ready:has(.flight-timeline-disclosure[open]) {
+    left: auto !important;
+    right: max(6px, env(safe-area-inset-right)) !important;
+    bottom: calc(5px + env(safe-area-inset-bottom)) !important;
+    width: min(43vw, 380px) !important;
+    max-height: calc(100dvh - 78px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    transform: none;
+  }
 }
 
 .toast-container {

@@ -10,7 +10,7 @@ import { createSplatArrival } from './splatEffects.js?v=1.2';
 import {
   createFlightTimeline, getManualTimelineTimes, normalizeManualTimelineTimes,
   moveTimelineKeyframe, scaleTimelineTimes, MIN_TIMELINE_SEGMENT,
-} from './flightTimeline.js?v=1.1';
+} from './flightTimeline.js?v=1.2';
 import { createProfessionalMode } from './professionalMode.js?v=1.0';
 import { SceneParticleOverlay } from './sceneParticleOverlay.js?v=1.1';
 import { GestureControl } from './gestureControl.js?v=1.1';
@@ -5094,6 +5094,7 @@ function handleFlightTimelineAction(action) {
   switch (type) {
     case 'select-keyframe': return jumpToKeyframe(index);
     case 'add-keyframe': return addKeyframe();
+    case 'clear-keyframes': return clearKeyframes();
     case 'delete-keyframe': return removeKeyframe(index);
     case 'update-keyframe':
       if (!state.keyframes[index]) return;

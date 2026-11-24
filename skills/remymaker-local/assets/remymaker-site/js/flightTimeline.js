@@ -41,10 +41,10 @@ export function scaleTimelineTimes(times, duration) {
 
 const labels = {
   zh: {
-    title: '运镜时间轴', play: '播放', pause: '暂停', resume: '继续播放', stop: '停止',
+    title: '运镜时间轴', timeline: '时间轴', edit: '编辑', play: '播放', pause: '暂停', resume: '继续播放', stop: '停止',
     export: '导出视频', duration: '总时长（秒）', timing: '关键帧节奏', auto: '自动', manual: '手动',
     playhead: '播放位置', camera: '镜头', particle: '点云', renderer: '实景切换', keyframe: '视角',
-    prev: '上一帧', next: '下一帧', add: '添加关键帧', update: '更新视角', remove: '删除',
+    prev: '上一帧', next: '下一帧', add: '添加关键帧', update: '更新视角', remove: '删除', clear: '清空关键帧',
     time: '时间（秒）', start: '开始（秒）', length: '时长（秒）', direction: '方向',
     none: '无特效', editParticle: '编辑点云区间', gather: '聚合', scatter: '消散',
     'gather-scatter': '聚合后消散', addEvent: '添加切换', initial: '初始模式', target: '切换到',
@@ -56,10 +56,10 @@ const labels = {
     empty: '添加两个视角开始运镜。', preset: '内置运镜',
   },
   en: {
-    title: 'Camera timeline', play: 'Play', pause: 'Pause', resume: 'Resume', stop: 'Stop',
+    title: 'Camera timeline', timeline: 'Timeline', edit: 'Edit', play: 'Play', pause: 'Pause', resume: 'Resume', stop: 'Stop',
     export: 'Export video', duration: 'Total (s)', timing: 'Keyframe timing', auto: 'Auto', manual: 'Manual',
     playhead: 'Playback position', camera: 'Camera', particle: 'Particles', renderer: 'Mode switches', keyframe: 'View',
-    prev: 'Previous', next: 'Next', add: 'Add keyframe', update: 'Update view', remove: 'Delete',
+    prev: 'Previous', next: 'Next', add: 'Add keyframe', update: 'Update view', remove: 'Delete', clear: 'Clear keyframes',
     time: 'Time (s)', start: 'Start (s)', length: 'Length (s)', direction: 'Direction',
     none: 'No effect', editParticle: 'Edit particle interval', gather: 'Gather', scatter: 'Scatter',
     'gather-scatter': 'Gather then scatter', addEvent: 'Add switch', initial: 'Initial mode', target: 'Switch to',
@@ -93,6 +93,9 @@ export function createFlightTimeline(panel, onAction) {
   let view;
   let words;
   let refs;
+  let section = 'timeline';
+  let timelineScroll = 0;
+  let revealOnReturn = null;
   let selection = { type: 'keyframe', index: null };
   let drag = null;
   let suppressClickUntil = 0;
@@ -115,21 +118,25 @@ export function createFlightTimeline(panel, onAction) {
       `<label>${words[caption]}<input type="number" data-flight-field="${key}" min="${min}" step="any" inputmode="decimal"></label>`;
     const select = (key, caption, ...values) =>
       `<label>${words[caption]}<select data-flight-field="${key}">${opts(...values)}</select></label>`;
-    const open = refs ? refs.details.open : true;
-    const defaultsOpen = refs?.defaults.open;
+    const open = refs?.details.open ?? false;
+    const menuButton = (name, caption, controls) =>
+      `<button type="button" data-flight-view="${name}" aria-controls="${controls}" aria-pressed="false">${words[caption]}</button>`;
     panel.innerHTML = `
       <details class="flight-timeline-disclosure"${open ? ' open' : ''}>
         <summary>${words.title}</summary>
-        <div class="flight-timeline-controls">
+        <div class="flight-timeline-menu" role="group" aria-label="${words.title}">
+          ${menuButton('timeline', 'timeline', 'flight-timeline-main')}
+          ${menuButton('edit', 'edit', 'flight-timeline-editing')}
+          ${menuButton('defaults', 'transitionDefaults', 'flight-transition-defaults')}
+        </div>
+        <div id="flight-timeline-main" class="flight-timeline-main">
+        <div class="flight-timeline-controls flight-transport">
           ${button('transport', 'play')}${button('stop')}
           ${button('switch-renderer', 'switchToSpark')}${button('export')}
-          ${number('duration', 'duration', 0.05)}
-          ${select('timing-mode', 'timing', 'auto', 'manual')}
-          <output class="flight-timeline-readout"></output>
         </div>
         <div class="flight-timeline-scroll">
           <div class="flight-timeline-tracks">
-            <div class="flight-track-label" aria-hidden="true"></div>
+            <div class="flight-track-label flight-ruler-readout"><output class="flight-timeline-readout" aria-live="off"></output></div>
             <div class="flight-track flight-ruler">
               <div class="flight-ticks" aria-hidden="true"></div>
               <input class="flight-seek" type="range" min="0" step="any" aria-label="${words.playhead}">
@@ -142,14 +149,25 @@ export function createFlightTimeline(panel, onAction) {
             <div class="flight-track flight-renderer-track" role="group" aria-label="${words.renderer}"></div>
           </div>
         </div>
+        <div class="flight-timeline-controls flight-quick-actions">
+          ${button('add-keyframe', 'add')}
+        </div>
+        <div class="flight-timeline-warning" hidden>${words.overflow}</div>
+        </div>
+        <div id="flight-timeline-editing" class="flight-timeline-editing" hidden>
+        <div class="flight-timeline-controls flight-timing-controls">
+          ${number('duration', 'duration', MIN_TIMELINE_SEGMENT)}
+          ${select('timing-mode', 'timing', 'auto', 'manual')}
+        </div>
         <div class="flight-timeline-controls flight-keyframe-controls">
-          ${button('previous-keyframe', 'prev')}${button('next-keyframe', 'next')}${button('add-keyframe', 'add')}
+          ${button('previous-keyframe', 'prev')}${button('next-keyframe', 'next')}${button('clear-keyframes', 'clear')}
           <div class="flight-keyframe-inspector">
             ${number('keyframe-time', 'time')}${button('update-keyframe', 'update')}${button('delete-keyframe', 'remove')}
           </div>
         </div>
         <div class="flight-timeline-controls flight-renderer-controls">
           ${select('initial-renderer', 'initial', 'particles', 'spark')}${button('add-event', 'addEvent')}
+          ${button('edit-particle', 'editParticle')}
         </div>
         <div class="flight-timeline-controls flight-particle-inspector" hidden>
           ${number('particle-start', 'start')}${number('particle-duration', 'length', 0.05)}
@@ -162,19 +180,20 @@ export function createFlightTimeline(panel, onAction) {
           ${select('event-direction', 'direction', 'all', 'left', 'right', 'top', 'bottom')}
           ${number('event-duration', 'length', 0.05)}${button('delete-event', 'remove')}
         </div>
-        <div class="flight-timeline-warning" hidden>${words.overflow}</div>
-        <details class="flight-transition-defaults"${defaultsOpen ? ' open' : ''}>
-          <summary>${words.transitionDefaults}</summary>
+        </div>
+        <div id="flight-transition-defaults" class="flight-transition-defaults" hidden>
           <div class="flight-timeline-controls">
             ${number('default-duration', 'transitionDuration', MIN_TIMELINE_SEGMENT)}
             ${select('default-mode', 'style', 'fade', 'fly')}
             ${select('default-direction', 'direction', 'all', 'left', 'right', 'top', 'bottom')}
             <label><input type="checkbox" data-flight-field="default-overlayEnabled">${words.overlay}</label>
           </div>
-        </details>
+        </div>
       </details>`;
     refs = {
-      details: query('.flight-timeline-disclosure'), defaults: query('.flight-transition-defaults'),
+      details: query('.flight-timeline-disclosure'), quickActions: query('.flight-quick-actions'),
+      sections: { timeline: query('#flight-timeline-main'), edit: query('#flight-timeline-editing'), defaults: query('#flight-transition-defaults') },
+      menu: [...panel.querySelectorAll('[data-flight-view]')],
       tracks: query('.flight-timeline-tracks'), scroller: query('.flight-timeline-scroll'),
       ticks: query('.flight-ticks'), seek: query('.flight-seek'), readout: query('.flight-timeline-readout'),
       keyframes: query('.flight-keyframe-track'), particle: query('.flight-particle-track'),
@@ -185,6 +204,29 @@ export function createFlightTimeline(panel, onAction) {
       buttons: Object.fromEntries([...panel.querySelectorAll('[data-flight-action]')].map(node => [node.dataset.flightAction, node])),
     };
     refs.seek.addEventListener('input', () => send('seek', { time: Number(refs.seek.value) }));
+  }
+
+  function renderSection() {
+    for (const [name, node] of Object.entries(refs.sections)) node.hidden = section !== name;
+    for (const button of refs.menu) {
+      const selected = button.dataset.flightView === section;
+      button.setAttribute('aria-pressed', String(selected));
+      button.disabled = view.playing || view.busy;
+    }
+    if (section === 'timeline') {
+      refs.scroller.scrollLeft = timelineScroll;
+      if (revealOnReturn !== null) {
+        revealMarker(revealOnReturn);
+        revealOnReturn = null;
+      }
+    }
+  }
+
+  function setSection(next) {
+    if (section === next || !Object.hasOwn(refs.sections, next)) return;
+    if (section === 'timeline') timelineScroll = refs.scroller.scrollLeft;
+    section = next;
+    renderSection();
   }
 
   function marker(type, index, time, caption, length = null) {
@@ -208,7 +250,7 @@ export function createFlightTimeline(panel, onAction) {
   function renderTracks() {
     const total = duration();
     const density = Math.max(view.preset ? 0 : view.keyframes.length, view.events.length);
-    refs.tracks.style.setProperty('--track-width', `${Math.min(2400, Math.max(286, density * 40 + 90))}px`);
+    refs.tracks.style.setProperty('--track-width', `${Math.min(2400, Math.max(240, density * 40 + 90))}px`);
     refs.ticks.replaceChildren();
     if (total > 0) {
       const step = niceTickStep(total, 6);
@@ -257,6 +299,7 @@ export function createFlightTimeline(panel, onAction) {
     const index = view.selectedKeyframe;
     const frame = view.keyframes[index];
     const event = view.events[selection.index];
+    refs.quickActions.hidden = view.preset || view.playing;
     refs.keyControls.hidden = view.preset;
     refs.keyInspector.hidden = selection.type !== 'keyframe' || !frame;
     refs.particleInspector.hidden = selection.type !== 'particle' || !view.particle.enabled;
@@ -268,10 +311,13 @@ export function createFlightTimeline(panel, onAction) {
     buttons.export.disabled = view.busy || !view.canPlay;
     buttons['previous-keyframe'].disabled = locked || !view.keyframes.length || (frame && index <= 0);
     buttons['next-keyframe'].disabled = locked || !view.keyframes.length || (frame && index >= view.keyframes.length - 1);
+    buttons['clear-keyframes'].disabled = locked || !view.keyframes.length;
     buttons['add-keyframe'].disabled = locked || !view.canAdd;
     buttons['update-keyframe'].disabled = locked || !frame;
     buttons['delete-keyframe'].disabled = locked || !frame;
     buttons['add-event'].disabled = locked || !view.canPlay || view.time >= duration();
+    buttons['edit-particle'].hidden = !view.particle.enabled;
+    buttons['edit-particle'].disabled = locked;
     buttons['delete-event'].disabled = locked || !event;
     refs.seek.max = String(duration());
     refs.seek.disabled = view.busy || !view.canPlay;
@@ -326,29 +372,37 @@ export function createFlightTimeline(panel, onAction) {
   function update(next) {
     const priorLang = view?.lang;
     const focused = panel.contains(document.activeElement) ? document.activeElement : null;
-    const scroll = refs?.scroller.scrollLeft || 0;
+    if (refs && section === 'timeline' && refs.details.open) timelineScroll = refs.scroller.scrollLeft;
     view = { ...next };
     if (!refs || priorLang !== view.lang) setup();
-    if (view.playing) refs.details.open = true;
+    if (view.playing) {
+      refs.details.open = true;
+      section = 'timeline';
+    }
     if (Number.isInteger(view.selectedEvent)) selection = { type: 'event', index: view.selectedEvent };
     if (selection.type === 'event' && !view.events[selection.index]) selection = { type: 'keyframe', index: null };
     if (selection.type === 'particle' && !view.particle.enabled) selection = { type: 'keyframe', index: null };
     renderTracks();
     renderControls();
     setTime(view.time || 0);
-    refs.scroller.scrollLeft = scroll;
+    renderSection();
     if (focused?.dataset.marker && !focused.isConnected) {
       panel.querySelector(`[data-marker="${focused.dataset.marker}"][data-index="${focused.dataset.index}"]`)?.focus({ preventScroll: true });
     }
   }
 
   function revealMarker(index) {
+    if (section !== 'timeline') {
+      revealOnReturn = index;
+      return;
+    }
     const node = refs.keyframes.querySelector(`[data-index="${index}"]`);
     if (!node) return;
     const markerRect = node.getBoundingClientRect();
     const railRect = refs.scroller.getBoundingClientRect();
     if (markerRect.left < railRect.left) refs.scroller.scrollLeft += markerRect.left - railRect.left - 8;
     if (markerRect.right > railRect.right) refs.scroller.scrollLeft += markerRect.right - railRect.right + 8;
+    timelineScroll = refs.scroller.scrollLeft;
   }
 
   function selectKeyframe(index) {
@@ -376,6 +430,7 @@ export function createFlightTimeline(panel, onAction) {
     }
     const node = event.target.closest('button');
     if (!node || node.disabled) return;
+    if (node.dataset.flightView) return setSection(node.dataset.flightView);
     if (node.dataset.marker) {
       if (clock() >= suppressClickUntil) applyMarkerClick(node);
       return;
@@ -411,6 +466,11 @@ export function createFlightTimeline(panel, onAction) {
       }
       return;
     }
+    if (action === 'edit-particle') {
+      selection = { type: 'particle', index: 0 };
+      renderControls();
+      return;
+    }
     if (action === 'delete-event') {
       const index = selection.index;
       selection = { type: 'keyframe', index: null };
@@ -441,6 +501,12 @@ export function createFlightTimeline(panel, onAction) {
 
   panel.addEventListener('change', event => commitField(event.target));
   panel.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && refs && section !== 'timeline' && !view.busy) {
+      event.preventDefault();
+      setSection('timeline');
+      query('[data-flight-view="timeline"]').focus();
+      return;
+    }
     if (event.key !== 'Enter' || !event.target.matches('input[type="number"][data-flight-field]')) return;
     event.preventDefault();
     commitField(event.target);
